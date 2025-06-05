@@ -25,3 +25,5 @@
 [rtd-link]:                 https://jolly-roger.readthedocs.io/en/latest/?badge=latest
 
 <!-- prettier-ignore-end -->
+
+The pirate flagger!
