@@ -91,7 +91,7 @@ def build_api_docs(session: nox.Session) -> None:
         "--module-first",
         "--no-toc",
         "--force",
-        "src/jolly_roger",
+        "jolly_roger",
     )
 
 
