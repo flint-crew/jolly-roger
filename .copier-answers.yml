@@ -1,0 +1,12 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: 2025.05.02-13-g4bc2312
+_src_path: gh:scientific-python/cookie
+backend: hatch
+email: alec.thomson@csiro.au
+full_name: Alec Thomson
+license: BSD
+org: flint-crew
+project_name: jolly-roger
+project_short_description: The pirate flagger
+url: https://github.com/flint-crew/jolly-roger
+vcs: true
