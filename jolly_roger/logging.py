@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any, ClassVar
 
 # Create logger
 logging.captureWarnings(True)
@@ -26,7 +27,7 @@ class CustomFormatter(logging.Formatter):
     reset = "\x1b[0m"
     format_str = "%(asctime)s.%(msecs)03d: %(message)s"
 
-    FORMATS = {
+    FORMATS: ClassVar = {
         logging.DEBUG: f"{blue}%(levelname)s{reset} {format_str}",
         logging.INFO: f"{green}%(levelname)s{reset} {format_str}",
         logging.WARNING: f"{yellow}%(levelname)s{reset} {format_str}",
@@ -34,7 +35,7 @@ class CustomFormatter(logging.Formatter):
         logging.CRITICAL: f"{bold_red}%(levelname)s{reset} {format_str}",
     }
 
-    def format(self, record):
+    def format(self, record: Any) -> Any:
         log_fmt = self.FORMATS.get(record.levelno)
         formatter = logging.Formatter(log_fmt, "%Y-%m-%d %H:%M:%S")
         return formatter.format(record)
