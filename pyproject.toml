@@ -29,7 +29,11 @@ classifiers = [
   "Typing :: Typed",
 ]
 dynamic = ["version"]
-dependencies = []
+dependencies = [
+    "astropy",
+    "numpy>=2.0.0",
+    "python-casacore>=3.6.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/flint-crew/jolly-roger"
