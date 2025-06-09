@@ -95,21 +95,30 @@ def xyz_to_uvw(
 class SunScale:
     """Describes the (u,v)-scales sensitive to angular scales of the Sun"""
 
-    sun_scale_chan_lambda: u.Quantity
-    """The distance that corresponds to an angular scale scaled to each channel"""
+    sun_min_scale_chan_lambda: u.Quantity
+    """The distance that corresponds to an angular scale scaled to each channel set using the minimum angular scale"""
+    sun_max_scale_chan_lambda: u.Quantity
+    """The distance that corresponds to an angular scale scaled to each channel set using the maximum angular scale"""
     chan_lambda: u.Quantity
     """The wavelength of each channel"""
     minimum_scale_deg: float
     """The minimum angular scale used for baseline flagging"""
+    maximum_scale_deg: float
+    """The minimum angular scale used for baseline flagging"""
 
 
-def get_sun_uv_scales(ms_path: Path, minimum_scale_deg: float = 0.075) -> SunScale:
+def get_sun_uv_scales(
+    ms_path: Path,
+    minimum_scale_deg: float = 0.075,
+    maximum_scale_deg: float = 0.5,
+) -> SunScale:
     """Compute the angular scales and the corresponding (u,v)-distances that
     would be sensitive to them.
 
     Args:
         ms_path (Path): The measurement set to consider, where frequency information is extracted from
         minimum_scale_deg (float, optional): The minimum angular scale that will be projected and flgged. Defaults to 0.075.
+        maximum_scale_deg (float, optional): The maximum angular scale that will be projected and flgged. Defaults to 0.5.
 
     Returns:
         SunScale: The sun scales in distances
@@ -120,13 +129,18 @@ def get_sun_uv_scales(ms_path: Path, minimum_scale_deg: float = 0.075) -> SunSca
 
     chan_lambda_m = np.squeeze((speed_of_light / chan_freqs).to(u.m))
 
-    sun_diameter = minimum_scale_deg * u.deg
-    sun_scale_chan_lambda = chan_lambda_m / sun_diameter.to(u.rad).value
+    sun_min_scale = minimum_scale_deg * u.deg
+    sun_min_scale_chan_lambda = chan_lambda_m / sun_min_scale.to(u.rad).value
+
+    sun_max_scale = maximum_scale_deg * u.deg
+    sun_max_scale_chan_lambda = chan_lambda_m / sun_max_scale.to(u.rad).value
 
     return SunScale(
-        sun_scale_chan_lambda=sun_scale_chan_lambda,
+        sun_min_scale_chan_lambda=sun_min_scale_chan_lambda,
+        sun_max_scale_chan_lambda=sun_max_scale_chan_lambda,
         chan_lambda=chan_lambda_m,
         minimum_scale_deg=minimum_scale_deg,
+        maximum_scale_deg=maximum_scale_deg,
     )
 
 
@@ -134,6 +148,8 @@ def uvw_flagger(
     computed_uvws: UVWs,
     min_horizon_lim: u.Quantity = -3 * u.deg,
     max_horizon_lim: u.Quantity = 90 * u.deg,
+    min_sun_scale: float = 0.075,
+    max_sun_scale: float = 0.5,
 ) -> Path:
     """Flag visibilities based on the (u, v, w)'s and assumed scales of
     the sun. The routine will compute ht ebaseline length affected by the Sun
@@ -144,6 +160,9 @@ def uvw_flagger(
         computed_uvws (UVWs): The pre-computed UVWs and associated meta-data
         min_horizon_lim (u.Quantity, optional): The lower horixzon limit required for flagging to be applied. Defaults to -3*u.deg.
         max_horizon_lim (u.Quantity, optional): The upper horixzon limit required for flagging to be applied. Defaults to 90*u.deg.
+        min_sun_scale (float, options): The minimum angular scale to consider when flagging the projected baselines. Defaults to 0.075.
+        max_sun_scale (float, options): The maximum angular scale to consider when flagging the projected baselines. Defaults to 0.5.
+
 
     Returns:
         Path: The path to the flagged measurement set
@@ -152,7 +171,11 @@ def uvw_flagger(
     baselines = computed_uvws.baselines
     ms_path = computed_uvws.baselines.ms_path
 
-    sun_scale = get_sun_uv_scales(ms_path=ms_path)
+    sun_scale = get_sun_uv_scales(
+        ms_path=ms_path,
+        minimum_scale_deg=min_sun_scale,
+        maximum_scale_deg=max_sun_scale,
+    )
 
     # A list of (ant1, ant2) to baseline index
     antennas_for_baselines = baselines.b_map.keys()
@@ -179,10 +202,16 @@ def uvw_flagger(
 
             elevation_curve = hour_angles.elevation
 
+            # The max angular scale corresponds to the shortest uv-distance
+            # The min angular scale corresponds to the longest uv-distance
             flag_uv_dist = (
                 (
+                    sun_scale.sun_max_scale_chan_lambda.to(u.m).value[None, :]
+                    < uv_dist[:, None]
+                )
+                & (
                     uv_dist[:, None]
-                    < sun_scale.sun_scale_chan_lambda.to(u.m).value[None, :]
+                    < sun_scale.sun_min_scale_chan_lambda.to(u.m).value[None, :]
                 )
                 & (min_horizon_lim < elevation_curve)[:, None]
                 & (elevation_curve <= max_horizon_lim)[:, None]
@@ -191,11 +220,10 @@ def uvw_flagger(
             # Only need to interact with the MS if there are flags to update
             if not np.any(flag_uv_dist):
                 continue
-            
+
             with taql(
                 "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
             ) as subtab:
-            
                 logger.debug(f"Updating for {ant_1=} {ant_2=}")
                 flags = subtab.getcol("FLAG")[:]
                 logger.debug(f"{flags.shape=}")
