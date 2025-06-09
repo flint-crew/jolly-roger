@@ -43,6 +43,8 @@ def flag(ms_path: Path, flag_options: FlagOptions) -> Path:
         computed_uvws=uvws,
         min_horizon_lim=flag_options.min_horizon_limit_deg * u.deg,
         max_horizon_lim=flag_options.max_horizon_limit_deg * u.deg,
+        min_sun_scale=flag_options.min_scale_deg,
+        max_sun_scale=flag_options.max_scale_deg,
     )
     logger.info(f"Finished processing {ms_path=}")
 
