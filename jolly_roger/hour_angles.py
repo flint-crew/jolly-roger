@@ -146,7 +146,7 @@ def make_hour_angles_for_ms(
     sin_alt = np.arcsin(
         np.sin(location.lat) * np.sin(sky_position[0].dec.rad)
         + np.cos(location.lat) * np.cos(sky_position.dec.rad) * np.cos(hour_angle)
-    ) * u.rad.to(u.deg)
+    ).to(u.rad)
 
     return PositionHourAngles(
         hour_angle=hour_angle,

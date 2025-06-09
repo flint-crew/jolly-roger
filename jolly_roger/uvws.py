@@ -166,42 +166,47 @@ def uvw_flagger(
             # Keeps the ruff from complaining about and unused varuable wheen
             # it is used in the table access command below
             _ = ms_tab
+
+            # TODO: It is unclear to TJG whether the time-order needs
+            # to be considered when reading in per-baseline at a time.
+            # initial version operated on a row basis so an explicit map
+            # to the t_idx of computed_uvws.uvws was needed (or useful?)
+
+            # Get the UVWs and for the baseline and calculate the uv-distance
+            b_idx = baselines.b_map[(ant_1, ant_2)]
+            uvws_bt = computed_uvws.uvws[:, b_idx]
+            uv_dist = np.sqrt((uvws_bt[0]) ** 2 + (uvws_bt[1]) ** 2).to(u.m).value
+
+            elevation_curve = hour_angles.elevation
+
+            flag_uv_dist = (
+                (
+                    uv_dist[:, None]
+                    < sun_scale.sun_scale_chan_lambda.to(u.m).value[None, :]
+                )
+                & (min_horizon_lim < elevation_curve)[:, None]
+                & (elevation_curve <= max_horizon_lim)[:, None]
+            )
+
+            # Only need to interact with the MS if there are flags to update
+            if not np.any(flag_uv_dist):
+                continue
+            
             with taql(
                 "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
             ) as subtab:
-                # TODO: It is unclear to TJG whether the time-order needs
-                # to be considered when reading in per-baseline at a time.
-                # initial version operated on a row basis so an explicit map
-                # to the t_idx of computed_uvws.uvws was needed (or useful?)
+            
+                logger.debug(f"Updating for {ant_1=} {ant_2=}")
+                flags = subtab.getcol("FLAG")[:]
+                logger.debug(f"{flags.shape=}")
 
-                # Get the UVWs and for the baseline and calculate the uv-distance
-                b_idx = baselines.b_map[(ant_1, ant_2)]
-                uvws_bt = computed_uvws.uvws[:, b_idx]
-                uv_dist = np.sqrt((uvws_bt[0]) ** 2 + (uvws_bt[1]) ** 2).to(u.m).value
+                total_flags = flags | flag_uv_dist[..., None]
+                logger.debug(f"Old: {np.sum(flags)}")
+                logger.debug(f"New: {np.sum(total_flags)}")
+                logger.debug(f" {min_horizon_lim=}  {max_horizon_lim=}")
+                logger.debug(f"{np.min(elevation_curve)} {np.max(elevation_curve)}")
 
-                elevation_curve = hour_angles.elevation.to(u.deg)
-
-                flag_uv_dist = (
-                    (
-                        uv_dist[:, None]
-                        < sun_scale.sun_scale_chan_lambda.to(u.m).value[None, :]
-                    )
-                    & (min_horizon_lim < elevation_curve)[:, None]
-                    & (elevation_curve <= max_horizon_lim)[:, None]
-                )
-
-                # Only need to interact with the MS if there are flags to update
-                if np.any(flag_uv_dist):
-                    logger.info(f"Updating for {ant_1=} {ant_2=}")
-                    flags = subtab.getcol("FLAG")[:]
-                    logger.debug(f"{flags.shape=}")
-
-                    total_flags = np.logical_or(flags, flag_uv_dist[..., None])
-                    logger.info(f"Old: {np.sum(flags)}")
-                    logger.info(f"New: {np.sum(total_flags)}")
-                    logger.info(f" {min_horizon_lim=}  {max_horizon_lim=}")
-
-                    subtab.putcol("FLAG", total_flags)
-                    subtab.flush()
+                subtab.putcol("FLAG", total_flags)
+                subtab.flush()
 
     return ms_path
