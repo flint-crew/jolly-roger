@@ -94,7 +94,7 @@ def _process_position(
     raise ValueError(msg)
 
 
-def make_hour_angles(
+def make_hour_angles_for_ms(
     ms_path: Path,
     location: EarthLocation = ASKAP,
     position: SkyCoord | str | None = None,

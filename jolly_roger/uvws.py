@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import astropy.units as u
 import numpy as np
+from astropy.constants import c as speed_of_light
+from casacore.tables import table, taql
 
 from jolly_roger.baselines import Baselines
 from jolly_roger.hour_angles import PositionHourAngles
@@ -24,7 +27,7 @@ class UVWs:
     """The set of antenna baselines used for form the UVWs"""
 
 
-def all_b_xyz_to_uvw(
+def xyz_to_uvw(
     baselines: Baselines,
     hour_angles: PositionHourAngles,
 ) -> UVWs:
@@ -85,3 +88,98 @@ def all_b_xyz_to_uvw(
     logger.debug(f"{uvw.shape=}")
 
     return UVWs(uvws=uvw, hour_angles=hour_angles, baselines=baselines)
+
+
+@dataclass
+class SunScale:
+    """Describes the (u,v)-scales sensitive to angular scales of the Sun"""
+
+    sun_scale_chan_lambda: u.Quantity
+    """The distance that corresponds to an angular scale scaled to each channel"""
+    chan_lambda: u.Quantity
+    """The wavelength of each channel"""
+    minimum_scale_deg: float
+    """The minimum angular scale used for baseline flagging"""
+
+
+def get_sun_uv_scales(ms_path: Path, minimum_scale_deg: float = 0.075) -> SunScale:
+    """Compute the angular scales and the corresponding (u,v)-distances that
+    would be sensitive to them.
+
+    Args:
+        ms_path (Path): The measurement set to consider, where frequency information is extracted from
+        minimum_scale_deg (float, optional): The minimum angular scale that will be projected and flgged. Defaults to 0.075.
+
+    Returns:
+        SunScale: The sun scales in distances
+    """
+
+    with table(str(ms_path / "SPECTRAL_WINDOW")) as tab:
+        chan_freqs = tab.getcol("CHAN_FREQ")[0] * u.Hz
+
+    chan_lambda_m = np.squeeze((speed_of_light / chan_freqs).to(u.m))
+
+    sun_diameter = minimum_scale_deg * u.deg
+    sun_scale_chan_lambda = chan_lambda_m / sun_diameter.to(u.rad).value
+
+    return SunScale(
+        sun_scale_chan_lambda=sun_scale_chan_lambda,
+        chan_lambda=chan_lambda_m,
+        minimum_scale_deg=minimum_scale_deg,
+    )
+
+
+def uvw_flagger(computed_uvws: UVWs, horizon_lim: u.Quantity = -3 * u.deg) -> Path:
+    """Flag visibilities based on the (u, v, w)'s and assumed scales of
+    the sun. The routine will compute ht ebaseline length affected by the Sun
+    and then flagged visibilities where the projected (u,v)-distance towards
+    the direction of the Sun and presumably sensitive.
+
+    Args:
+        computed_uvws (UVWs): The pre-computed UVWs and associated meta-data
+        horizon_lim (u.Quantity, optional): The horixzon limit required for flagging to be applied. Defaults to -3*u.deg.
+
+    Returns:
+        Path: The path to the flagged measurement set
+    """
+    hour_angles = computed_uvws.hour_angles
+    baselines = computed_uvws.baselines
+    ms_path = computed_uvws.baselines.ms_path
+
+    sun_scale = get_sun_uv_scales(ms_path=ms_path)
+
+    # A list of (ant1, ant2) to baseline index
+    antennas_for_baselines = baselines.b_map.keys()
+    logger.info(f"Will be considering {len(antennas_for_baselines)} baselines")
+
+    logger.info(f"Opening {ms_path=}")
+    with table(str(ms_path), ack=False, readonly=False) as ms_tab:
+        for ant_1, ant_2 in antennas_for_baselines:
+            logger.debug(f"Processing {ant_1=} {ant_2=}")
+
+            # Keeps the ruff from complaining about and unused varuable wheen
+            # it is used in the table access command below
+            _ = ms_tab
+            with taql(
+                "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
+            ) as subtab:
+                time = subtab.getcol("TIME_CENTROID")[:]
+                flags = subtab.getcol("FLAG")[:]
+                logger.debug(f"{time.shape=}")
+                logger.debug(f"{flags.shape=}")
+
+                # Get the UVWs and for the baseline and calculate the uv-distance
+                b_idx = baselines.b_map[(ant_1, ant_2)]
+                uvws_bt = computed_uvws.uvws[:, b_idx]
+                uv_dist = np.sqrt((uvws_bt[0]) ** 2 + (uvws_bt[1]) ** 2).to(u.m).value
+
+                flag_uv_dist = (
+                    uv_dist[:, None]
+                    < sun_scale.sun_scale_chan_lambda.to(u.m).value[None, :]
+                ) & (hour_angles.elevation > horizon_lim)[:, None]
+
+                total_flags = np.logical_or(flags, flag_uv_dist[..., None])
+
+                subtab.putcol("FLAGS", total_flags)
+
+    return ms_path

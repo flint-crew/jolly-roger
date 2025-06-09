@@ -33,6 +33,7 @@ dependencies = [
     "astropy",
     "numpy>=2.0.0",
     "python-casacore>=3.6.0",
+    "tqdm",
 ]
 
 [project.urls]

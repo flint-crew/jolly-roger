@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 
 # Create logger
 logging.captureWarnings(True)
-logger = logging.getLogger("flint")
+logger = logging.getLogger("jolly_rodger")
 logger.setLevel(logging.INFO)
 
 # Create console handler and set level to debug
