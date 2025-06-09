@@ -169,9 +169,6 @@ def uvw_flagger(
             with taql(
                 "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
             ) as subtab:
-                flags = subtab.getcol("FLAG")[:]
-                logger.debug(f"{flags.shape=}")
-
                 # TODO: It is unclear to TJG whether the time-order needs
                 # to be considered when reading in per-baseline at a time.
                 # initial version operated on a row basis so an explicit map
@@ -191,7 +188,11 @@ def uvw_flagger(
                     & (hour_angles.elevation <= max_horizon_lim)[:, None]
                 )
 
+                # Only need to interact with the MS if there are flags to update
                 if np.any(flag_uv_dist):
+                    flags = subtab.getcol("FLAG")[:]
+                    logger.debug(f"{flags.shape=}")
+
                     total_flags = np.logical_or(flags, flag_uv_dist[..., None])
 
                     subtab.putcol("FLAG", total_flags)
