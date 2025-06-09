@@ -180,6 +180,7 @@ def uvw_flagger(computed_uvws: UVWs, horizon_lim: u.Quantity = -3 * u.deg) -> Pa
 
                 total_flags = np.logical_or(flags, flag_uv_dist[..., None])
 
-                subtab.putcol("FLAGS", total_flags)
+                subtab.putcol("FLAG", total_flags)
+                subtab.flush()
 
     return ms_path
