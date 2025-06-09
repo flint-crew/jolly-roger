@@ -188,9 +188,10 @@ def uvw_flagger(
                     & (hour_angles.elevation <= max_horizon_lim)[:, None]
                 )
 
-                total_flags = np.logical_or(flags, flag_uv_dist[..., None])
+                if np.any(flag_uv_dist):
+                    total_flags = np.logical_or(flags, flag_uv_dist[..., None])
 
-                subtab.putcol("FLAG", total_flags)
-                subtab.flush()
+                    subtab.putcol("FLAG", total_flags)
+                    subtab.flush()
 
     return ms_path
