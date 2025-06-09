@@ -16,7 +16,7 @@ from jolly_roger.logging import logger
 
 # Default location with XYZ based on mean of antenna positions
 ASKAP_XYZ_m = np.array([-2556146.66356375, 5097426.58592797, -2848333.08164107]) * u.m
-ASKAP = EarthLocation(ASKAP_XYZ_m)
+ASKAP = EarthLocation(*ASKAP_XYZ_m)
 
 
 @dataclass
