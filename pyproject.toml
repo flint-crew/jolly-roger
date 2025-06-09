@@ -42,6 +42,8 @@ Homepage = "https://github.com/flint-crew/jolly-roger"
 Discussions = "https://github.com/flint-crew/jolly-roger/discussions"
 Changelog = "https://github.com/flint-crew/jolly-roger/releases"
 
+[project.scripts]
+jolly_flagger = "jolly_rodger.flag:cli"
 
 [dependency-groups]
 test = [
