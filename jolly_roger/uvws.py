@@ -211,7 +211,7 @@ def uvw_flagger(
                 )
                 & (
                     uv_dist[:, None]
-                    < sun_scale.sun_min_scale_chan_lambda.to(u.m).value[None, :]
+                    <= sun_scale.sun_min_scale_chan_lambda.to(u.m).value[None, :]
                 )
                 & (min_horizon_lim < elevation_curve)[:, None]
                 & (elevation_curve <= max_horizon_lim)[:, None]
