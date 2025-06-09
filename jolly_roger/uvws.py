@@ -12,7 +12,7 @@ from jolly_roger.logging import logger
 def all_b_xyz_to_uvw(
     b_xyz: np.ndarray,
     hour_angle: PositionHourAngle,
-):
+) -> np.ndarray:
     # Getting the units right is important, mate
     ha = hour_angle.hour_angle
     ha = ha.to(u.rad)
@@ -51,7 +51,7 @@ def all_b_xyz_to_uvw(
     # b_xyz shape: (baselines, coord) where coord is XYZ
     # mat shape: (3, 3, timesteps)
     # uvw shape: (baseline, coord, timesteps) where coord is UVW
-    uvw = np.einsum("ijk,lj->lik", mat, b_xyz, optimize=True)  # qa: ignore
+    uvw = np.einsum("ijk,lj->lik", mat, b_xyz, optimize=True)  # codespell:ignore lik
 
     logger.debug(f"{uvw.shape=}")
 
