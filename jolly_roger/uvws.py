@@ -130,7 +130,11 @@ def get_sun_uv_scales(ms_path: Path, minimum_scale_deg: float = 0.075) -> SunSca
     )
 
 
-def uvw_flagger(computed_uvws: UVWs, horizon_lim: u.Quantity = -3 * u.deg) -> Path:
+def uvw_flagger(
+    computed_uvws: UVWs,
+    min_horizon_lim: u.Quantity = -3 * u.deg,
+    max_horizon_lim: u.Quantity = 90 * u.deg,
+) -> Path:
     """Flag visibilities based on the (u, v, w)'s and assumed scales of
     the sun. The routine will compute ht ebaseline length affected by the Sun
     and then flagged visibilities where the projected (u,v)-distance towards
@@ -138,7 +142,8 @@ def uvw_flagger(computed_uvws: UVWs, horizon_lim: u.Quantity = -3 * u.deg) -> Pa
 
     Args:
         computed_uvws (UVWs): The pre-computed UVWs and associated meta-data
-        horizon_lim (u.Quantity, optional): The horixzon limit required for flagging to be applied. Defaults to -3*u.deg.
+        min_horizon_lim (u.Quantity, optional): The lower horixzon limit required for flagging to be applied. Defaults to -3*u.deg.
+        max_horizon_lim (u.Quantity, optional): The upper horixzon limit required for flagging to be applied. Defaults to 90*u.deg.
 
     Returns:
         Path: The path to the flagged measurement set
@@ -175,9 +180,13 @@ def uvw_flagger(computed_uvws: UVWs, horizon_lim: u.Quantity = -3 * u.deg) -> Pa
                 uv_dist = np.sqrt((uvws_bt[0]) ** 2 + (uvws_bt[1]) ** 2).to(u.m).value
 
                 flag_uv_dist = (
-                    uv_dist[:, None]
-                    < sun_scale.sun_scale_chan_lambda.to(u.m).value[None, :]
-                ) & (hour_angles.elevation > horizon_lim)[:, None]
+                    (
+                        uv_dist[:, None]
+                        < sun_scale.sun_scale_chan_lambda.to(u.m).value[None, :]
+                    )
+                    & (min_horizon_lim < hour_angles.elevation)[:, None]
+                    & (hour_angles.elevation <= max_horizon_lim)[:, None]
+                )
 
                 total_flags = np.logical_or(flags, flag_uv_dist[..., None])
 
