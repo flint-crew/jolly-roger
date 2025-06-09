@@ -27,3 +27,11 @@
 <!-- prettier-ignore-end -->
 
 The pirate flagger!
+
+# About
+
+Calculate the (u,v,w)'s towards the Sun for some measurement set and flag based on the projected baseline, i.e. the uv-distance.
+
+```
+jolly_flagger scienceData.EMU_1141-55.SB47138.EMU_1141-55.beam00_averaged_cal.leakage.ms --min-horizon-limit-deg '-3' --max-horizon-limit-deg 30 --max-scale-deg 10
+```
