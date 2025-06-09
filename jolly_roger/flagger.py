@@ -68,13 +68,13 @@ def get_parser() -> ArgumentParser:
         help="The minimum scale required for flagging",
     )
     parser.add_argument(
-        "--min-horizon-limi-deg",
+        "--min-horizon-limit-deg",
         type=float,
         default=-3,
         help="The minimum elevation of the centroid of the object (e.g. sun) for uvw flagging to be activated",
     )
     parser.add_argument(
-        "--max-horizon-limi-deg",
+        "--max-horizon-limit-deg",
         type=float,
         default=-3,
         help="The maximum elevation of the centroid of the object (e.g. sun) for uvw flagging to be activated",
