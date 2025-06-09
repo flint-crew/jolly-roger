@@ -9,6 +9,7 @@ import astropy.units as u
 import numpy as np
 from astropy.constants import c as speed_of_light
 from casacore.tables import table, taql
+from tqdm import tqdm
 
 from jolly_roger.baselines import Baselines
 from jolly_roger.hour_angles import PositionHourAngles
@@ -154,7 +155,7 @@ def uvw_flagger(computed_uvws: UVWs, horizon_lim: u.Quantity = -3 * u.deg) -> Pa
 
     logger.info(f"Opening {ms_path=}")
     with table(str(ms_path), ack=False, readonly=False) as ms_tab:
-        for ant_1, ant_2 in antennas_for_baselines:
+        for ant_1, ant_2 in tqdm(antennas_for_baselines):
             logger.debug(f"Processing {ant_1=} {ant_2=}")
 
             # Keeps the ruff from complaining about and unused varuable wheen
