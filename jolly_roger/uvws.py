@@ -2,22 +2,49 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import astropy.units as u
 import numpy as np
 
-from jolly_roger.hour_angles import PositionHourAngle
+from jolly_roger.baselines import Baselines
+from jolly_roger.hour_angles import PositionHourAngles
 from jolly_roger.logging import logger
 
 
+@dataclass
+class UVWs:
+    """A small container to represent uvws"""
+
+    uvws: np.ndarray
+    """The (U,V,W) coordinates"""
+    hour_angles: PositionHourAngles
+    """The hour angle information used to construct the UVWs"""
+    baselines: Baselines
+    """The set of antenna baselines used for form the UVWs"""
+
+
 def all_b_xyz_to_uvw(
-    b_xyz: np.ndarray,
-    hour_angle: PositionHourAngle,
-) -> np.ndarray:
+    baselines: Baselines,
+    hour_angles: PositionHourAngles,
+) -> UVWs:
+    """Generate the UVWs for a given set of baseline vectors towards a position
+    across a series of hour angles.
+
+    Args:
+        baselines (Baselines): The set of baselines vectors to use
+        hour_angles (PositionHourAngles): The hour angles and position to generate UVWs for
+
+    Returns:
+        UVWs: The generated set of UVWs
+    """
+    b_xyz = baselines.b_xyz
+
     # Getting the units right is important, mate
-    ha = hour_angle.hour_angle
+    ha = hour_angles.hour_angle
     ha = ha.to(u.rad)
 
-    declination = hour_angle.position.declination
+    declination = hour_angles.position.declination
     declination = declination.to(u.rad)
 
     # This is necessary for broadcastung in the matrix to work.
@@ -53,6 +80,8 @@ def all_b_xyz_to_uvw(
     # uvw shape: (baseline, coord, timesteps) where coord is UVW
     uvw = np.einsum("ijk,lj->lik", mat, b_xyz, optimize=True)  # codespell:ignore lik
 
+    # Make order (coord, baseline, timesteps)
+    uvw = np.swapaxes(uvw, 0, 1)
     logger.debug(f"{uvw.shape=}")
 
-    return uvw
+    return UVWs(uvws=uvw, hour_angles=hour_angles, baselines=baselines)

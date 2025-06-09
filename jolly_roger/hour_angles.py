@@ -20,7 +20,7 @@ ASKAP = EarthLocation(ASKAP_XYZ_m)
 
 
 @dataclass
-class PositionHourAngle:
+class PositionHourAngles:
     """Represent time, hour angles and other quantities for some
     assumed sky position. Time intervals are intended to represent
     those stored in a measurement set."""
@@ -99,7 +99,7 @@ def make_hour_angles(
     location: EarthLocation = ASKAP,
     position: SkyCoord | str | None = None,
     whole_day: bool = False,
-) -> PositionHourAngle:
+) -> PositionHourAngles:
     """Calculate hour-angle and time quantities for a given position using time information
     encoded in a nominated measurement set at a nominated location
 
@@ -148,7 +148,7 @@ def make_hour_angles(
         + np.cos(location.lat) * np.cos(sky_position.dec.rad) * np.cos(hour_angle)
     ) * u.rad.to(u.deg)
 
-    return PositionHourAngle(
+    return PositionHourAngles(
         hour_angle=hour_angle,
         time_mjds=times_mjds,
         location=location,
