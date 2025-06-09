@@ -47,7 +47,7 @@ def xyz_to_uvw(
     ha = hour_angles.hour_angle
     ha = ha.to(u.rad)
 
-    declination = hour_angles.position.declination
+    declination = hour_angles.position.dec
     declination = declination.to(u.rad)
 
     # This is necessary for broadcastung in the matrix to work.
