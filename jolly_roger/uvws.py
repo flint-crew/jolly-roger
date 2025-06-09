@@ -169,10 +169,13 @@ def uvw_flagger(
             with taql(
                 "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
             ) as subtab:
-                time = subtab.getcol("TIME_CENTROID")[:]
                 flags = subtab.getcol("FLAG")[:]
-                logger.debug(f"{time.shape=}")
                 logger.debug(f"{flags.shape=}")
+
+                # TODO: It is unclear to TJG whether the time-order needs
+                # to be considered when reading in per-baseline at a time.
+                # initial version operated on a row basis so an explicit map
+                # to the t_idx of computed_uvws.uvws was needed (or useful?)
 
                 # Get the UVWs and for the baseline and calculate the uv-distance
                 b_idx = baselines.b_map[(ant_1, ant_2)]
