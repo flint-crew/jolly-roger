@@ -179,13 +179,15 @@ def uvw_flagger(
                 uvws_bt = computed_uvws.uvws[:, b_idx]
                 uv_dist = np.sqrt((uvws_bt[0]) ** 2 + (uvws_bt[1]) ** 2).to(u.m).value
 
+                elevation_curve = hour_angles.elevation * u.deg
+
                 flag_uv_dist = (
                     (
                         uv_dist[:, None]
                         < sun_scale.sun_scale_chan_lambda.to(u.m).value[None, :]
                     )
-                    & (min_horizon_lim < hour_angles.elevation)[:, None]
-                    & (hour_angles.elevation <= max_horizon_lim)[:, None]
+                    & (min_horizon_lim < elevation_curve)[:, None]
+                    & (elevation_curve <= max_horizon_lim)[:, None]
                 )
 
                 # Only need to interact with the MS if there are flags to update
