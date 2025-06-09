@@ -190,6 +190,7 @@ def uvw_flagger(
 
                 # Only need to interact with the MS if there are flags to update
                 if np.any(flag_uv_dist):
+                    logger.info(f"Updating for {ant_1=} {ant_2=}")
                     flags = subtab.getcol("FLAG")[:]
                     logger.debug(f"{flags.shape=}")
 
