@@ -195,6 +195,8 @@ def uvw_flagger(
                     logger.debug(f"{flags.shape=}")
 
                     total_flags = np.logical_or(flags, flag_uv_dist[..., None])
+                    logger.info(f"Old: {np.sum(flags)}")
+                    logger.info(f"New: {np.sum(total_flags)}")
 
                     subtab.putcol("FLAG", total_flags)
                     subtab.flush()
