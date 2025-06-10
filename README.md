@@ -28,6 +28,10 @@
 
 The pirate flagger!
 
+# Installation
+
+`pip install jolly-roger`
+
 # About
 
 This package attempts to flag visibilities that are contaminated by the Sun and uses a fairly simple heuristic based on the geometry of an interferometer.
