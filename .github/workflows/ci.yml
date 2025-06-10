@@ -61,7 +61,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
 
       - name: Install casacore
-        run: apt install casacore
+        run: sudo apt install -y casacore
 
       - name: Install package
         run: uv sync
