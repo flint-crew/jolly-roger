@@ -205,36 +205,37 @@ def uvw_flagger(
             # The max angular scale corresponds to the shortest uv-distance
             # The min angular scale corresponds to the longest uv-distance
             flag_uv_dist = (
-                (
-                    sun_scale.sun_max_scale_chan_lambda.to(u.m).value[None, :]
-                    < uv_dist[:, None]
-                )
-                & (
-                    uv_dist[:, None]
-                    <= sun_scale.sun_min_scale_chan_lambda.to(u.m).value[None, :]
-                )
-                & (min_horizon_lim < elevation_curve)[:, None]
-                & (elevation_curve <= max_horizon_lim)[:, None]
+                sun_scale.sun_max_scale_chan_lambda.to(u.m).value[None, :]
+                < uv_dist[:, None]
+            ) & (
+                uv_dist[:, None]
+                <= sun_scale.sun_min_scale_chan_lambda.to(u.m).value[None, :]
             )
+            flag_elevation = (min_horizon_lim < elevation_curve)[:, None] & (
+                elevation_curve <= max_horizon_lim
+            )[:, None]
+
+            all_flags = flag_uv_dist & flag_elevation
 
             # Only need to interact with the MS if there are flags to update
-            if not np.any(flag_uv_dist):
+            if not np.any(all_flags):
                 continue
 
             with taql(
                 "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
             ) as subtab:
-                logger.debug(f"Updating for {ant_1=} {ant_2=}")
                 flags = subtab.getcol("FLAG")[:]
-                logger.debug(f"{flags.shape=}")
+                total_flags = flags | all_flags[..., None]
 
-                total_flags = flags | flag_uv_dist[..., None]
+                subtab.putcol("FLAG", total_flags)
+                subtab.flush()
+
+                # Sanity mate
+                logger.debug(f"Updating for {ant_1=} {ant_2=}")
+                logger.debug(f"{flags.shape=}")
                 logger.debug(f"Old: {np.sum(flags)}")
                 logger.debug(f"New: {np.sum(total_flags)}")
                 logger.debug(f" {min_horizon_lim=}  {max_horizon_lim=}")
                 logger.debug(f"{np.min(elevation_curve)} {np.max(elevation_curve)}")
-
-                subtab.putcol("FLAG", total_flags)
-                subtab.flush()
 
     return ms_path
