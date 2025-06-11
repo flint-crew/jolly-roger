@@ -132,11 +132,46 @@ def get_sun_uv_scales(
     )
 
 
+@dataclass
+class BaselineFlagSummary:
+    """Container to capture the flagged baselines statistics"""
+
+    uvw_flag_perc: float
+    """The percentage of flags to add based on the uv-distance cut"""
+    elevation_flag_perc: float
+    """The percentage of flags to add based on the elevation cut"""
+    jolly_flag_perc: float
+    """The percentage of new to add based on both criteria"""
+
+
+def log_summaries(
+    summary: dict[tuple[int, int], BaselineFlagSummary], dry_run: bool = False
+) -> None:
+    """Log the flagging statistics made throughout the `uvw_flagger`.
+
+    Args:
+        summary (dict[tuple[int, int], BaselineFlagSummary]): Collection of flagging statistics accumulated when flagging
+    """
+    logger.info("----------------------------------")
+    logger.info("Flagging summary of modified flags")
+    if dry_run:
+        logger.info("(Dry run, not applying)")
+    logger.info("----------------------------------")
+
+    for ants, baseline_summary in summary.items():
+        logger.info(
+            f"({ants[0]:3d},{ants[1]:3d}): uvw perc. {baseline_summary.uvw_flag_perc:>6.2f} & elev. perc. {baseline_summary.elevation_flag_perc:>6.2f} = Applied perc. {baseline_summary.jolly_flag_perc:>6.2f}"
+        )
+
+    logger.info("\n")
+
+
 def uvw_flagger(
     computed_uvws: UVWs,
     min_horizon_lim: u.Quantity = -3 * u.deg,
     max_horizon_lim: u.Quantity = 90 * u.deg,
     min_sun_scale: u.Quantity = 0.075 * u.deg,
+    dry_run: bool = False,
 ) -> Path:
     """Flag visibilities based on the (u, v, w)'s and assumed scales of
     the sun. The routine will compute ht ebaseline length affected by the Sun
@@ -148,6 +183,7 @@ def uvw_flagger(
         min_horizon_lim (u.Quantity, optional): The lower horixzon limit required for flagging to be applied. Defaults to -3*u.deg.
         max_horizon_lim (u.Quantity, optional): The upper horixzon limit required for flagging to be applied. Defaults to 90*u.deg.
         min_sun_scale (u.Quantity, options): The minimum angular scale to consider when flagging the projected baselines. Defaults to 0.075*u.deg.
+        dry_run (bool, optional): Do not apply the flags to the measurement set. Defaults to False.
 
 
     Returns:
@@ -165,6 +201,11 @@ def uvw_flagger(
     # A list of (ant1, ant2) to baseline index
     antennas_for_baselines = baselines.b_map.keys()
     logger.info(f"Will be considering {len(antennas_for_baselines)} baselines")
+
+    elevation_curve = hour_angles.elevation
+
+    # Used to capture the baseline and additional flags added
+    summary: dict[tuple[int, int], BaselineFlagSummary] = {}
 
     logger.info(f"Opening {ms_path=}")
     with table(str(ms_path), ack=False, readonly=False) as ms_tab:
@@ -185,8 +226,6 @@ def uvw_flagger(
             uvws_bt = computed_uvws.uvws[:, b_idx]
             uv_dist = np.sqrt((uvws_bt[0]) ** 2 + (uvws_bt[1]) ** 2).to(u.m).value
 
-            elevation_curve = hour_angles.elevation
-
             # The max angular scale corresponds to the shortest uv-distance
             # The min angular scale corresponds to the longest uv-distance
             flag_uv_dist = (
@@ -203,6 +242,21 @@ def uvw_flagger(
             if not np.any(all_flags):
                 continue
 
+            baseline_summary = BaselineFlagSummary(
+                uvw_flag_perc=np.sum(flag_uv_dist)
+                / np.prod(flag_uv_dist.shape)
+                * 100.0,
+                elevation_flag_perc=np.sum(flag_elevation)
+                / np.prod(flag_elevation.shape)
+                * 100.0,
+                jolly_flag_perc=np.sum(all_flags) / np.prod(all_flags.shape) * 100.0,
+            )
+            summary[(ant_1, ant_2)] = baseline_summary
+
+            # Do not apply the flags mattteee
+            if dry_run:
+                continue
+
             with taql(
                 "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
             ) as subtab:
@@ -212,12 +266,6 @@ def uvw_flagger(
                 subtab.putcol("FLAG", total_flags)
                 subtab.flush()
 
-                # Sanity mate
-                logger.debug(f"Updating for {ant_1=} {ant_2=}")
-                logger.debug(f"{flags.shape=}")
-                logger.debug(f"Old: {np.sum(flags)}")
-                logger.debug(f"New: {np.sum(total_flags)}")
-                logger.debug(f" {min_horizon_lim=}  {max_horizon_lim=}")
-                logger.debug(f"{np.min(elevation_curve)} {np.max(elevation_curve)}")
+    log_summaries(summary=summary, dry_run=dry_run)
 
     return ms_path

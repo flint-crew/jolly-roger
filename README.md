@@ -49,7 +49,7 @@ In short, `jolly_roger` flags based on the projected baseline length should the 
 `jolly_roger` has a CLI entry point that can be called as:
 
 ```
-jolly_flagger scienceData.EMU_1141-55.SB47138.EMU_1141-55.beam00_averaged_cal.leakage.ms --min-horizon-limit-deg '-2' --max-horizon-limit-deg 30 --min-scale-deg 0.075 --max-scale-deg 1.0
+jolly_flagger scienceData.EMU_1141-55.SB47138.EMU_1141-55.beam00_averaged_cal.leakage.ms --min-horizon-limit-deg '-2' --max-horizon-limit-deg 30 --min-scale-deg 0.075
 ```
 
 Here we are flagging visibilities that correspond to instances where:

@@ -24,6 +24,8 @@ class JollyRogerFlagOptions:
     """The minimum elevation for the sun projected baselines to be considered for flagging"""
     max_horizon_limit_deg: float = 90
     """The minimum elevation for the sun projected baselines to be considered for flagging"""
+    dry_run: bool = False
+    """Do not apply the flags"""
 
 
 def flag(ms_path: Path, flag_options: JollyRogerFlagOptions) -> Path:
@@ -42,6 +44,7 @@ def flag(ms_path: Path, flag_options: JollyRogerFlagOptions) -> Path:
         min_horizon_lim=flag_options.min_horizon_limit_deg * u.deg,
         max_horizon_lim=flag_options.max_horizon_limit_deg * u.deg,
         min_sun_scale=flag_options.min_scale_deg * u.deg,
+        dry_run=flag_options.dry_run,
     )
     logger.info(f"Finished processing {ms_path=}")
 
@@ -72,6 +75,9 @@ def get_parser() -> ArgumentParser:
         default=-3,
         help="The maximum elevation of the centroid of the object (e.g. sun) for uvw flagging to be activated",
     )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Do not apply the computed flags"
+    )
 
     return parser
 
@@ -85,6 +91,7 @@ def cli() -> None:
         min_scale_deg=args.min_scale_deg,
         min_horizon_limit_deg=args.min_horizon_limit_deg,
         max_horizon_limit_deg=args.max_horizon_limit_deg,
+        dry_run=args.dry_run,
     )
 
     flag(ms_path=args.ms_path, flag_options=flag_options)
