@@ -145,22 +145,34 @@ class BaselineFlagSummary:
 
 
 def log_summaries(
-    summary: dict[tuple[int, int], BaselineFlagSummary], dry_run: bool = False
+    summary: dict[tuple[int, int], BaselineFlagSummary],
+    min_horizon_lim: u.Quantity,
+    max_horizon_lim: u.Quantity,
+    min_sun_scale: u.Quantity,
+    dry_run: bool = False,
 ) -> None:
     """Log the flagging statistics made throughout the `uvw_flagger`.
 
     Args:
         summary (dict[tuple[int, int], BaselineFlagSummary]): Collection of flagging statistics accumulated when flagging
+        min_horizon_lim (u.Quantity): The minimum horizon limit applied to the flagging.
+        max_horizon_lim (u.Quantity): The maximum horizon limit applied to the flagging.
+        min_sun_scale (u.Quantity): The sun scale used to compute the uv-distance limiter.
+        dry_run (bool, optional): Indicates whether the flags were applied. Defaults to False.
+
     """
     logger.info("----------------------------------")
     logger.info("Flagging summary of modified flags")
+    logger.info(f"Minimum Horizon Limit: {min_horizon_lim}")
+    logger.info(f"Maximum Horizon Limit: {max_horizon_lim}")
+    logger.info(f"Minimum Sun Scale: {min_sun_scale}")
     if dry_run:
         logger.info("(Dry run, not applying)")
     logger.info("----------------------------------")
 
     for ants, baseline_summary in summary.items():
         logger.info(
-            f"({ants[0]:3d},{ants[1]:3d}): uvw perc. {baseline_summary.uvw_flag_perc:>6.2f} & elev. perc. {baseline_summary.elevation_flag_perc:>6.2f} = Applied perc. {baseline_summary.jolly_flag_perc:>6.2f}"
+            f"({ants[0]:3d},{ants[1]:3d}): uvw {baseline_summary.uvw_flag_perc:>6.2f}% & elev. {baseline_summary.elevation_flag_perc:>6.2f}% = Applied {baseline_summary.jolly_flag_perc:>6.2f}%"
         )
 
     logger.info("\n")
@@ -266,6 +278,12 @@ def uvw_flagger(
                 subtab.putcol("FLAG", total_flags)
                 subtab.flush()
 
-    log_summaries(summary=summary, dry_run=dry_run)
+    log_summaries(
+        summary=summary,
+        min_horizon_lim=min_horizon_lim,
+        max_horizon_lim=max_horizon_lim,
+        min_sun_scale=min_sun_scale,
+        dry_run=dry_run,
+    )
 
     return ms_path
