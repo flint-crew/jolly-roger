@@ -1,0 +1,9 @@
+name: "Setup Dependencies"
+description: "Install deps"
+runs:
+  using: "composite"
+  steps:
+    - name: Install casacore and boost
+      shell: bash
+      run: |
+        sudo apt install -y build-essential libcfitsio-dev liblapack-dev libboost-python-dev python3-dev wcslib-dev casacore-dev
