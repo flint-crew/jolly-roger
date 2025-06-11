@@ -46,7 +46,7 @@ repos:
     hooks:
       - id: mypy
         files: jolly_roger|tests
-        args: []
+        args: ["--ignore-missing-imports"]
         additional_dependencies:
           - pytest
 
