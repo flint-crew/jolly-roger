@@ -79,13 +79,14 @@ def xyz_to_uvw(
     )
 
     # Every time this confuses me and I need the first mate to look over.
-    # b_xyz shape: (baselines, coord) where coord is XYZ
+    # b_xyz shape: (baselines, 3) where coord is XYZ
     # mat shape: (3, 3, timesteps)
-    # uvw shape: (baseline, coord, timesteps) where coord is UVW
-    uvw = np.einsum("ijk,lj->lik", mat, b_xyz, optimize=True)  # codespell:ignore lik
+    # uvw shape: (3, baseline, timesteps) where coord is UVW
+    uvw = np.einsum("ijk,lj->ilk", mat, b_xyz, optimize=True)  # codespell:ignore ilk
+    # i,j,k -> (3, 3, time)
+    # l,j -> (baseline, 3)
+    # i,l,k -> (3, baseline, time)
 
-    # Make order (coord, baseline, timesteps)
-    uvw = np.swapaxes(uvw, 0, 1)
     logger.debug(f"{uvw.shape=}")
 
     return UVWs(uvws=uvw, hour_angles=hour_angles, baselines=baselines)
