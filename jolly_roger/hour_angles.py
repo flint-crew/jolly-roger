@@ -8,15 +8,14 @@ from typing import Literal
 
 import astropy.units as u
 import numpy as np
-from astropy.coordinates import EarthLocation, SkyCoord, get_sun
+from astropy.coordinates import EarthLocation, SkyCoord, get_sun, AltAz
 from astropy.time import Time
 from casacore.tables import table
 
 from jolly_roger.logging import logger
 
 # Default location with XYZ based on mean of antenna positions
-ASKAP_XYZ_m = np.array([-2556146.66356375, 5097426.58592797, -2848333.08164107]) * u.m
-ASKAP = EarthLocation(*ASKAP_XYZ_m)
+ASKAP = EarthLocation.of_site("ASKAP")
 
 
 @dataclass
@@ -75,6 +74,9 @@ def _process_position(
         if position == "sun":
             logger.info("Getting sky-position of the sun")
             position = get_sun(times)
+        else:
+            logger.info(f"Getting sky-position of {position=}")
+            position = SkyCoord.from_name(position)
 
     if position is None:
         if ms_path is None:
@@ -83,8 +85,8 @@ def _process_position(
 
         with table(str(ms_path / "FIELD")) as tab:
             logger.info(f"Getting the sky-position from PHASE_DIR of {ms_path=}")
-            field_positions = tab.getcol("PHASE_DIR")
-            position = SkyCoord(field_positions[0] * u.rad)
+            field_positions = tab.getcol("PHASE_DIR")[:]
+            position = SkyCoord(*(field_positions * u.rad).squeeze())
 
     if isinstance(position, SkyCoord):
         return position
@@ -116,7 +118,7 @@ def make_hour_angles_for_ms(
     logger.info(f"Computing hour angles for {ms_path=}")
     with table(str(ms_path), ack=False) as tab:
         logger.info("Extracting timesteps and constructing time mapping")
-        times_mjds = tab.getcol("TIME_CENTROID")
+        times_mjds = tab.getcol("TIME_CENTROID")[:] * u.s
 
         # get unique time steps and make sure they are in their first appeared order
         times_mjds, indices = np.unique(times_mjds, return_index=True)
@@ -127,33 +129,30 @@ def make_hour_angles_for_ms(
     if whole_day:
         logger.info(f"Assuming a full day from {times_mjds} MJD (seconds)")
         time_step = times_mjds[1] - times_mjds[0]
-        times_mjds = times_mjds[0] + time_step * np.arange(
-            int(60 * 60 * 24 / time_step)
+        times_mjds = np.arange(
+            start=times_mjds[0],
+            stop=times_mjds[0] + 24 * u.hour,
+            step=time_step,
         )
 
-    times = Time(times_mjds / 60 / 60 / 24, format="mjd")
+    times = Time(times_mjds, format="mjd", scale="utc")
 
-    sky_position: SkyCoord = _process_position(
+    sky_position = _process_position(
         position=position, times=times, ms_path=ms_path
     )
 
     lst = times.sidereal_time("apparent", longitude=location.lon)
-    hour_angle = lst - sky_position.ra
-    mask = hour_angle > 12 * u.hourangle
-    hour_angle[mask] -= 24 * u.hourangle
+    hour_angle = (lst - sky_position.ra).wrap_at(12 * u.hourangle)
 
     logger.info("Creatring elevation curve")
-    sin_alt = np.arcsin(
-        np.sin(location.lat) * np.sin(sky_position[0].dec.rad)
-        + np.cos(location.lat) * np.cos(sky_position.dec.rad) * np.cos(hour_angle)
-    ).to(u.rad)
+    altaz = sky_position.transform_to(AltAz(obstime=times, location=location))
 
     return PositionHourAngles(
         hour_angle=hour_angle,
         time_mjds=times_mjds,
         location=location,
         position=sky_position,
-        elevation=sin_alt,
+        elevation=altaz.alt.to(u.rad),
         time=times,
         time_map=time_map,
     )
