@@ -68,12 +68,20 @@ def xyz_to_uvw(
     # Conversion from baseline vectors to UVW
     mat = np.array(
         [
-            [sin_ha, cos_ha, zeros],
-            [-sin_dec * cos_ha, sin_dec * sin_ha, cos_dec],
             [
-                np.cos(declination) * np.cos(ha),
-                np.cos(declination) * np.sin(ha),
-                np.sin(declination),
+                sin_ha, 
+                cos_ha, 
+                zeros
+            ],
+            [
+                - sin_dec * cos_ha, 
+                sin_dec * sin_ha, 
+                cos_dec
+            ],
+            [
+                cos_dec * cos_ha,
+                - cos_dec * sin_ha,
+                sin_dec,
             ],
         ]
     )
