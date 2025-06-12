@@ -8,7 +8,7 @@ from typing import Literal
 
 import astropy.units as u
 import numpy as np
-from astropy.coordinates import EarthLocation, SkyCoord, get_sun, AltAz
+from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_sun
 from astropy.time import Time
 from casacore.tables import table
 
@@ -137,9 +137,7 @@ def make_hour_angles_for_ms(
 
     times = Time(times_mjds, format="mjd", scale="utc")
 
-    sky_position = _process_position(
-        position=position, times=times, ms_path=ms_path
-    )
+    sky_position = _process_position(position=position, times=times, ms_path=ms_path)
 
     lst = times.sidereal_time("apparent", longitude=location.lon)
     hour_angle = (lst - sky_position.ra).wrap_at(12 * u.hourangle)
