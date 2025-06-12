@@ -71,9 +71,9 @@ def xyz_to_uvw(
             [sin_ha, cos_ha, zeros],
             [-sin_dec * cos_ha, sin_dec * sin_ha, cos_dec],
             [
-                np.cos(declination) * np.cos(ha),
-                np.cos(declination) * np.sin(ha),
-                np.sin(declination),
+                cos_dec * cos_ha,
+                -cos_dec * sin_ha,
+                sin_dec,
             ],
         ]
     )
@@ -82,10 +82,11 @@ def xyz_to_uvw(
     # b_xyz shape: (baselines, coord) where coord is XYZ
     # mat shape: (3, 3, timesteps)
     # uvw shape: (baseline, coord, timesteps) where coord is UVW
-    uvw = np.einsum("ijk,lj->lik", mat, b_xyz, optimize=True)  # codespell:ignore lik
+    uvw = np.einsum("ijk,lj->ilk", mat, b_xyz, optimize=True)  # codespell:ignore ilk
+    # i,j,k -> (3, 3, time)
+    # l,j -> (baseline, 3)
+    # i,l,k -> (3, baseline, time)
 
-    # Make order (coord, baseline, timesteps)
-    uvw = np.swapaxes(uvw, 0, 1)
     logger.debug(f"{uvw.shape=}")
 
     return UVWs(uvws=uvw, hour_angles=hour_angles, baselines=baselines)
