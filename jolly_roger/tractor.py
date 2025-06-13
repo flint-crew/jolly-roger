@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from argparse import ArgumentParser
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,6 +57,10 @@ class BaselineData:
     """The UVW coordinates of the phase center of the baseline."""
     time: Time
     """The time of the observations."""
+    ant_1: int
+    """The first antenna in the baseline."""
+    ant_2: int
+    """The second antenna in the baseline."""
 
 
 def get_baseline_data(
@@ -95,6 +100,8 @@ def get_baseline_data(
         phase_center=target,
         uvws_phase_center=uvws_phase_center,
         time=time,
+        ant_1=ant_1,
+        ant_2=ant_2,
     )
 
 
@@ -220,6 +227,35 @@ def write_output_column(
         tab.flush()
 
 
+def plot_baseline_data(
+    baseline_data: BaselineData,
+    output_dir: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+    from astropy.visualization import quantity_support, time_support
+    with quantity_support(), time_support():
+        data_masked = baseline_data.masked_data
+        data_xx = data_masked[..., 0]
+        data_yy = data_masked[..., -1]
+        data_stokesi = (data_xx + data_yy) / 2
+        amp_stokesi = np.abs(data_stokesi)
+
+
+        fig, ax = plt.subplots()
+        im = ax.pcolormesh(
+            baseline_data.time,
+            baseline_data.freq_chan,
+            amp_stokesi.T,
+        )
+        fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
+        ax.set(
+            ylabel=f"Frequency / {baseline_data.freq_chan.unit:latex_inline}",
+            title=f"Ant {baseline_data.ant_1} - Ant {baseline_data.ant_2}",
+        )
+        output_path = output_dir / f"baseline_data_{baseline_data.ant_1}_{baseline_data.ant_2}.png"
+        fig.savefig(output_path)
+
+
 def dumb_tukey_tractor(
     ms_path: Path,
     outer_width: float = np.pi / 4,
@@ -227,6 +263,7 @@ def dumb_tukey_tractor(
     data_column: str = "DATA",
     output_column: str = "CORRECTED_DATA",
     dry_run: bool = False,
+    make_plots: bool = False,
 ) -> None:
     baselines = get_baselines_from_ms(ms_path)
     antennas_for_baselines = baselines.b_map.keys()
@@ -273,3 +310,79 @@ def dumb_tukey_tractor(
             )
         else:
             logger.info(f"Dry run: would write {output_column} for {ant_1=} {ant_2=}")
+
+def get_parser() -> ArgumentParser:
+    """Create the CLI argument parser
+
+    Returns:
+        ArgumentParser: Constructed argument parser
+    """
+    parser = ArgumentParser(description="Run the Jolly Roger Tractor")
+    subparsers = parser.add_subparsers(dest="mode")
+
+    tukey_parser = subparsers.add_parser(
+        name="tukey", help="Perform a dumb Tukey taper across delay-time data"
+    )
+    tukey_parser.add_argument(
+        "ms_path",
+        type=Path,
+        help="The measurement set to process with the Tukey tractor",
+    )
+    tukey_parser.add_argument(
+        "--outer-width",
+        type=float,
+        default=np.pi / 4,
+        help="The outer width of the Tukey taper in radians",
+    )
+    tukey_parser.add_argument(
+        "--tukey-width",
+        type=float,
+        default=np.pi / 8,
+        help="The Tukey width of the Tukey taper in radians",
+    )
+    tukey_parser.add_argument(
+        "--data-column",
+        type=str,
+        default="DATA",
+        help="The data column to use for the Tukey tractor",
+    )
+    tukey_parser.add_argument(
+        "--output-column",
+        type=str,
+        default="CORRECTED_DATA",
+        help="The output column to write the Tukey tractor results to",
+    )
+    tukey_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="If set, the Tukey tractor will not write any output, but will log what it would do",
+    )
+    tukey_parser.add_argument(
+        "--make-plots",
+        action="store_true",
+        help="If set, the Tukey tractor will make plots of the results",
+    )
+
+
+    return parser
+
+def cli() -> None:
+    """Command line interface for the Jolly Roger Tractor."""
+    parser = get_parser()
+    args = parser.parse_args()
+
+    if args.mode == "tukey":
+        dumb_tukey_tractor(
+            ms_path=args.ms_path,
+            outer_width=args.outer_width,
+            tukey_width=args.tukey_width,
+            data_column=args.data_column,
+            output_column=args.output_column,
+            dry_run=args.dry_run,
+            make_plots=args.make_plots,
+        )
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    cli()
