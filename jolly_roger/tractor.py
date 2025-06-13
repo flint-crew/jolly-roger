@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from argparse import ArgumentParser
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import astropy.units as u
 import numpy as np
@@ -12,6 +14,7 @@ from astropy.coordinates import (
 from astropy.time import Time
 from casacore.tables import makecoldesc, table, taql
 from tqdm.auto import tqdm
+from tqdm.asyncio import tqdm as tqdm_async
 
 from jolly_roger.baselines import Baselines, get_baselines_from_ms
 from jolly_roger.logging import logger
@@ -62,8 +65,13 @@ class BaselineData:
     ant_2: int
     """The second antenna in the baseline."""
 
+def get_col_into_memory(
+    tab: table,
+    colname: str,
+) -> np.typing.NDArray[Any]:
+    return tab.getcol(colname)[:]
 
-def get_baseline_data(
+async def get_baseline_data(
     baselines: Baselines,
     ant_1: int,
     ant_2: int,
@@ -84,11 +92,21 @@ def get_baseline_data(
         with taql(
             "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
         ) as subtab:
-            data = subtab.getcol(data_column)[:]
-            flags = subtab.getcol("FLAG")[:]
-            uvws_phase_center = np.swapaxes(subtab.getcol("UVW")[:] * u.m, 0, 1)
+            data = await asyncio.to_thread(
+                get_col_into_memory, subtab, data_column
+            )
+            flags = await asyncio.to_thread(
+                get_col_into_memory, subtab, "FLAG"
+            )
+            uvws = await asyncio.to_thread(
+                get_col_into_memory, subtab, "UVW"
+            )
+            uvws_phase_center = np.swapaxes(uvws * u.m, 0, 1)
+            time_centroid = await asyncio.to_thread(
+                get_col_into_memory, subtab, "TIME_CENTROID"
+            )
             time = Time(
-                subtab.getcol("TIME_CENTROID")[:] * u.s,
+                time_centroid * u.s,
                 format="mjd",
                 scale="utc",
             )
@@ -115,7 +133,7 @@ class DelayTime:
     """The delay values corresponding to the delay time data."""
 
 
-def data_to_delay_time(baseline_data: BaselineData) -> DelayTime:
+async def data_to_delay_time(baseline_data: BaselineData) -> DelayTime:
     logger.info("Converting freq-time to delay-time")
     delay_time = np.fft.fftshift(
         np.fft.fft(baseline_data.masked_data.filled(0 + 0j), axis=1), axes=1
@@ -214,7 +232,7 @@ def add_output_column(
         taql(f"UPDATE $tab SET {output_column}={data_column}")
 
 
-def write_output_column(
+async def write_output_column(
     ms_path: Path,
     output_column: str,
     baseline_data: BaselineData,
@@ -272,72 +290,94 @@ def plot_baseline_data(
         fig.savefig(output_path)
 
 
-def dumb_tukey_tractor(
-    ms_path: Path,
-    outer_width: float = np.pi / 4,
-    tukey_width: float = np.pi / 8,
-    data_column: str = "DATA",
-    output_column: str = "CORRECTED_DATA",
-    dry_run: bool = False,
-    make_plots: bool = False,
-    overwrite: bool = False,
+async def _tukey_tractor_baseline(
+    ant_1: int,
+    ant_2: int,
+    baselines: Baselines,
+    tukey_tractor_options: TukeyTractorOptions,
 ) -> None:
-    baselines = get_baselines_from_ms(ms_path)
+    baseline_data = await get_baseline_data(
+        baselines=baselines,
+        ant_1=ant_1,
+        ant_2=ant_2,
+        data_column=tukey_tractor_options.data_column,
+    )
+
+    delay_time = await data_to_delay_time(baseline_data=baseline_data)
+
+    taper = tukey_taper(
+        x=delay_time.delay,
+        outer_width=tukey_tractor_options.outer_width,
+        tukey_width=tukey_tractor_options.tukey_width,
+    )
+
+    # Delay-time is a 3D array: (time, delay, pol)
+    # Taper is 1D: (delay,)
+    tapered_delay_time_data = (
+        delay_time.delay_time * taper[np.newaxis, :, np.newaxis]
+    )
+    tapered_delay_time = delay_time
+    tapered_delay_time.delay_time = tapered_delay_time_data
+
+    tapered_baseline_data = delay_time_to_data(
+        delay_time=tapered_delay_time,
+        original_baseline_data=baseline_data,
+    )
+    if not tukey_tractor_options.dry_run:
+        await write_output_column(
+            ms_path=tukey_tractor_options.ms_path,
+            output_column=tukey_tractor_options.output_column,
+            baseline_data=tapered_baseline_data,
+        )
+    else:
+        logger.info(
+            f"Dry run: would write {tukey_tractor_options.output_column} for baseline {ant_1} {ant_2}"
+        )
+
+    if tukey_tractor_options.make_plots:
+        output_dir = tukey_tractor_options.ms_path.parent / "plots"
+        output_dir.mkdir(exist_ok=True)
+        plot_baseline_data(
+            baseline_data=tapered_baseline_data,
+            output_dir=output_dir,
+        )
+        logger.info(f"Plots saved to {output_dir}")
+
+@dataclass
+class TukeyTractorOptions:
+    ms_path: Path
+    outer_width: float = np.pi / 4
+    tukey_width: float = np.pi / 8
+    data_column: str = "DATA"
+    output_column: str = "CORRECTED_DATA"
+    dry_run: bool = False
+    make_plots: bool = False
+    overwrite: bool = False
+
+async def dumb_tukey_tractor(
+    tukey_tractor_options: TukeyTractorOptions,
+) -> None:
+    baselines = get_baselines_from_ms(tukey_tractor_options.ms_path)
     antennas_for_baselines = baselines.b_map.keys()
 
-    if not dry_run:
+    if not tukey_tractor_options.dry_run:
         add_output_column(
-            ms_path=ms_path,
-            output_column=output_column,
-            data_column=data_column,
-            overwrite=overwrite,
+            ms_path=tukey_tractor_options.ms_path,
+            output_column=tukey_tractor_options.output_column,
+            data_column=tukey_tractor_options.data_column,
+            overwrite=tukey_tractor_options.overwrite,
         )
 
-    for ant_1, ant_2 in tqdm(antennas_for_baselines):
-        baseline_data = get_baseline_data(
-            baselines=baselines,
+    coros = []
+    for ant_1, ant_2 in antennas_for_baselines:
+        coro = _tukey_tractor_baseline(
             ant_1=ant_1,
             ant_2=ant_2,
-            data_column=data_column,
+            baselines=baselines,
+            tukey_tractor_options=tukey_tractor_options,
         )
-
-        delay_time = data_to_delay_time(baseline_data=baseline_data)
-
-        taper = tukey_taper(
-            x=delay_time.delay,
-            outer_width=outer_width,
-            tukey_width=tukey_width,
-        )
-
-        # Delay-time is a 3D array: (time, delay, pol)
-        # Taper is 1D: (delay,)
-        tapered_delay_time_data = (
-            delay_time.delay_time * taper[np.newaxis, :, np.newaxis]
-        )
-        tapered_delay_time = delay_time
-        tapered_delay_time.delay_time = tapered_delay_time_data
-
-        tapered_baseline_data = delay_time_to_data(
-            delay_time=tapered_delay_time,
-            original_baseline_data=baseline_data,
-        )
-        if not dry_run:
-            write_output_column(
-                ms_path=ms_path,
-                output_column=output_column,
-                baseline_data=tapered_baseline_data,
-            )
-        else:
-            logger.info(f"Dry run: would write {output_column} for baseline {ant_1} {ant_2}")
-
-        if make_plots:
-            output_dir = ms_path.parent / "plots"
-            output_dir.mkdir(exist_ok=True)
-            plot_baseline_data(
-                baseline_data=tapered_baseline_data,
-                output_dir=output_dir,
-            )
-            logger.info(f"Plots saved to {output_dir}")
+        coros.append(coro)
+    await asyncio.gather(*coros)
 
 def get_parser() -> ArgumentParser:
     """Create the CLI argument parser
@@ -405,7 +445,7 @@ def cli() -> None:
     args = parser.parse_args()
 
     if args.mode == "tukey":
-        dumb_tukey_tractor(
+        tukey_tractor_options = TukeyTractorOptions(
             ms_path=args.ms_path,
             outer_width=args.outer_width,
             tukey_width=args.tukey_width,
@@ -415,6 +455,7 @@ def cli() -> None:
             make_plots=args.make_plots,
             overwrite=args.overwrite,
         )
+        asyncio.run(dumb_tukey_tractor(tukey_tractor_options=tukey_tractor_options))
     else:
         parser.print_help()
 
