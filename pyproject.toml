@@ -32,6 +32,7 @@ dependencies = [
     "numpy>=2.0.0",
     "python-casacore>=3.6.0",
     "tqdm",
+    "matplotlib",
 ]
 
 [project.urls]
@@ -42,6 +43,7 @@ Changelog = "https://github.com/flint-crew/jolly-roger/releases"
 
 [project.scripts]
 jolly_flagger = "jolly_roger.flagger:cli"
+jolly_tractor = "jolly_roger.tractor:cli"
 
 [dependency-groups]
 test = [
