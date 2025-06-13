@@ -45,7 +45,7 @@ def xyz_to_uvw(
     b_xyz = baselines.b_xyz
 
     # Getting the units right is important, mate
-    ha = hour_angles.hour_angle
+    ha = hour_angles.hour_angle - hour_angles.location.lon.to(u.hourangle)
     ha = ha.to(u.rad)
 
     declination = hour_angles.position.dec
