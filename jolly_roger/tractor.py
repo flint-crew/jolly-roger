@@ -4,27 +4,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import astropy.units as u
-import matplotlib.pyplot as plt
 import numpy as np
-from astropy.time import Time
-from astropy.visualization import quantity_support, time_support
-from casacore.tables import table, taql, makecoldesc
 from astropy.coordinates import (
-    Angle,
-    Longitude,
     SkyCoord,
-    EarthLocation,
-    AltAz,
-    get_sun,
-    get_body,
 )
-from astropy.constants import c as speed_of_light
+from astropy.time import Time
+from casacore.tables import makecoldesc, table, taql
 from tqdm.auto import tqdm
 
 from jolly_roger.baselines import Baselines, get_baselines_from_ms
-from jolly_roger.hour_angles import make_hour_angles_for_ms
 from jolly_roger.logging import logger
-from jolly_roger.uvws import uvw_flagger, xyz_to_uvw
 
 
 def tukey_taper(
@@ -52,6 +41,7 @@ def tukey_taper(
 
     return taper
 
+
 @dataclass
 class BaselineData:
     """Container for baseline data and associated metadata."""
@@ -74,7 +64,6 @@ def get_baseline_data(
     ant_2: int,
     data_column: str = "DATA",
 ) -> BaselineData:
-
     ms_path = baselines.ms_path
     logger.info(f"Opening {ms_path=}")
     with (
@@ -87,15 +76,12 @@ def get_baseline_data(
         phase_dir = field_tab.getcol("PHASE_DIR")[:]
         target = SkyCoord(*(phase_dir * u.rad).squeeze())
         logger.debug(f"Processing {ant_1=} {ant_2=}")
-        b_idx = baselines.b_map[(ant_1, ant_2)]
         with taql(
             "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
         ) as subtab:
             data = subtab.getcol(data_column)[:]
             flags = subtab.getcol("FLAG")[:]
-            uvws_phase_center = np.swapaxes(
-                subtab.getcol("UVW")[:] * u.m, 0, 1
-            )
+            uvws_phase_center = np.swapaxes(subtab.getcol("UVW")[:] * u.m, 0, 1)
             time = Time(
                 subtab.getcol("TIME_CENTROID")[:] * u.s,
                 format="mjd",
@@ -111,6 +97,7 @@ def get_baseline_data(
         time=time,
     )
 
+
 @dataclass
 class DelayTime:
     """Container for delay time and associated metadata."""
@@ -119,6 +106,7 @@ class DelayTime:
     """ The delay vs time data. shape=(time, delay, pol)"""
     delay: u.Quantity
     """The delay values corresponding to the delay time data."""
+
 
 def data_to_delay_time(baseline_data: BaselineData) -> DelayTime:
     delay_time = np.fft.fftshift(
@@ -135,12 +123,13 @@ def data_to_delay_time(baseline_data: BaselineData) -> DelayTime:
         delay=delay,
     )
 
+
 def delay_time_to_data(
     delay_time: DelayTime,
     original_baseline_data: BaselineData,
 ) -> BaselineData:
     """Convert delay time data back to the original data format."""
-    new_data =  np.fft.ifft(
+    new_data = np.fft.ifft(
         np.fft.ifftshift(delay_time.delay_time, axes=1),
         axis=1,
     )
@@ -152,6 +141,7 @@ def delay_time_to_data(
     new_baseline_data.masked_data = new_data_masked
     return new_baseline_data
 
+
 @dataclass
 class DelayRate:
     """Container for delay rate and associated metadata."""
@@ -162,6 +152,7 @@ class DelayRate:
     """The delay values corresponding to the delay rate data."""
     rate: u.Quantity
     """The delay rate values corresponding to the delay rate data."""
+
 
 def data_to_delay_rate(
     baseline_data: BaselineData,
@@ -188,6 +179,7 @@ def data_to_delay_rate(
         rate=rate,
     )
 
+
 def add_output_column(
     ms_path: Path,
     data_column: str = "DATA",
@@ -197,9 +189,7 @@ def add_output_column(
         colnames = tab.colnames()
         if output_column in colnames:
             msg = f"Output column {output_column} already exists in the measurement set. Not overwriting."
-            raise ValueError(
-                msg
-            )
+            raise ValueError(msg)
         logger.info(f"Adding {output_column=}")
         desc = makecoldesc(data_column, tab.getcoldesc(data_column))
         desc["name"] = output_column
@@ -207,11 +197,12 @@ def add_output_column(
         tab.flush()
         taql(f"UPDATE $tab SET {output_column}={data_column}")
 
+
 def write_output_column(
     ms_path: Path,
     output_column: str,
     baseline_data: BaselineData,
-    update_flags: bool = False
+    update_flags: bool = False,
 ) -> None:
     """Write the output column to the measurement set."""
     with table(str(ms_path), readonly=False) as tab:
@@ -227,6 +218,7 @@ def write_output_column(
             # for the output column
             tab.putcol("FLAG", baseline_data.masked_data.mask)
         tab.flush()
+
 
 def dumb_tukey_tractor(
     ms_path: Path,
@@ -263,7 +255,9 @@ def dumb_tukey_tractor(
 
         # Delay-time is a 3D array: (time, delay, pol)
         # Taper is 1D: (delay,)
-        tapered_delay_time_data = delay_time.delay_time * taper[np.newaxis, :, np.newaxis]
+        tapered_delay_time_data = (
+            delay_time.delay_time * taper[np.newaxis, :, np.newaxis]
+        )
         tapered_delay_time = delay_time
         tapered_delay_time.delay_time = tapered_delay_time_data
 
