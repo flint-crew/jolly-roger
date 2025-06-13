@@ -65,13 +65,7 @@ class BaselineData:
     ant_2: int
     """The second antenna in the baseline."""
 
-def get_col_into_memory(
-    tab: table,
-    colname: str,
-) -> np.typing.NDArray[Any]:
-    return tab.getcol(colname)[:]
-
-async def get_baseline_data(
+def get_baseline_data(
     baselines: Baselines,
     ant_1: int,
     ant_2: int,
@@ -92,19 +86,11 @@ async def get_baseline_data(
         with taql(
             "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
         ) as subtab:
-            data = await asyncio.to_thread(
-                get_col_into_memory, subtab, data_column
-            )
-            flags = await asyncio.to_thread(
-                get_col_into_memory, subtab, "FLAG"
-            )
-            uvws = await asyncio.to_thread(
-                get_col_into_memory, subtab, "UVW"
-            )
+            data = subtab.getcol(data_column)[:]
+            flags = subtab.getcol("FLAG")[:]
+            uvws = subtab.getcol("UVW")[:]
             uvws_phase_center = np.swapaxes(uvws * u.m, 0, 1)
-            time_centroid = await asyncio.to_thread(
-                get_col_into_memory, subtab, "TIME_CENTROID"
-            )
+            time_centroid = subtab.getcol("TIME_CENTROID")[:].squeeze()
             time = Time(
                 time_centroid * u.s,
                 format="mjd",
@@ -133,7 +119,7 @@ class DelayTime:
     """The delay values corresponding to the delay time data."""
 
 
-async def data_to_delay_time(baseline_data: BaselineData) -> DelayTime:
+def data_to_delay_time(baseline_data: BaselineData) -> DelayTime:
     logger.info("Converting freq-time to delay-time")
     delay_time = np.fft.fftshift(
         np.fft.fft(baseline_data.masked_data.filled(0 + 0j), axis=1), axes=1
@@ -186,6 +172,7 @@ def data_to_delay_rate(
 ) -> DelayRate:
     """Convert baseline data to delay rate."""
 
+    logger.info("Converting freq-time to delay-rate")
     delay_rate = np.fft.fftshift(np.fft.fft2(baseline_data.masked_data.filled(0 + 0j)))
     delay = np.fft.fftshift(
         np.fft.fftfreq(
@@ -232,7 +219,7 @@ def add_output_column(
         taql(f"UPDATE $tab SET {output_column}={data_column}")
 
 
-async def write_output_column(
+def write_output_column(
     ms_path: Path,
     output_column: str,
     baseline_data: BaselineData,
@@ -296,14 +283,15 @@ async def _tukey_tractor_baseline(
     baselines: Baselines,
     tukey_tractor_options: TukeyTractorOptions,
 ) -> None:
-    baseline_data = await get_baseline_data(
+    baseline_data = await asyncio.to_thread(
+        get_baseline_data,
         baselines=baselines,
         ant_1=ant_1,
         ant_2=ant_2,
         data_column=tukey_tractor_options.data_column,
     )
 
-    delay_time = await data_to_delay_time(baseline_data=baseline_data)
+    delay_time = data_to_delay_time(baseline_data=baseline_data)
 
     taper = tukey_taper(
         x=delay_time.delay,
@@ -324,7 +312,8 @@ async def _tukey_tractor_baseline(
         original_baseline_data=baseline_data,
     )
     if not tukey_tractor_options.dry_run:
-        await write_output_column(
+        await asyncio.to_thread(
+            write_output_column,
             ms_path=tukey_tractor_options.ms_path,
             output_column=tukey_tractor_options.output_column,
             baseline_data=tapered_baseline_data,
@@ -376,8 +365,10 @@ async def dumb_tukey_tractor(
             baselines=baselines,
             tukey_tractor_options=tukey_tractor_options,
         )
+        # coros.append(coro)
+        # task = asyncio.create_task(coro)
         coros.append(coro)
-    await asyncio.gather(*coros)
+    await tqdm.gather(*coros)
 
 def get_parser() -> ArgumentParser:
     """Create the CLI argument parser
