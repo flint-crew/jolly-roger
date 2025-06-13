@@ -70,7 +70,7 @@ def get_baseline_data(
     data_column: str = "DATA",
 ) -> BaselineData:
     ms_path = baselines.ms_path
-    logger.info(f"Opening {ms_path=}")
+    logger.info(f"Opening {ms_path=} - getting baseline {ant_1} {ant_2}")
     with (
         table(str(ms_path), ack=False, readonly=True) as ms_tab,
         table(str(ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=True) as spw_tab,
@@ -116,6 +116,7 @@ class DelayTime:
 
 
 def data_to_delay_time(baseline_data: BaselineData) -> DelayTime:
+    logger.info("Converting freq-time to delay-time")
     delay_time = np.fft.fftshift(
         np.fft.fft(baseline_data.masked_data.filled(0 + 0j), axis=1), axes=1
     )
@@ -136,6 +137,7 @@ def delay_time_to_data(
     original_baseline_data: BaselineData,
 ) -> BaselineData:
     """Convert delay time data back to the original data format."""
+    logger.info("Converting delay-time to freq-time")
     new_data = np.fft.ifft(
         np.fft.ifftshift(delay_time.delay_time, axes=1),
         axis=1,
@@ -191,12 +193,19 @@ def add_output_column(
     ms_path: Path,
     data_column: str = "DATA",
     output_column: str = "CORRECTED_DATA",
+    overwrite: bool = False,
 ) -> None:
     with table((str(ms_path)), readonly=False) as tab:
         colnames = tab.colnames()
         if output_column in colnames:
-            msg = f"Output column {output_column} already exists in the measurement set. Not overwriting."
-            raise ValueError(msg)
+            if not overwrite:
+                msg = f"Output column {output_column} already exists in the measurement set. Not overwriting."
+                raise ValueError(msg)
+
+            logger.warning(
+                f"Output column {output_column} already exists in the measurement set. Will be overwritten!"
+            )
+            return
         logger.info(f"Adding {output_column=}")
         desc = makecoldesc(data_column, tab.getcoldesc(data_column))
         desc["name"] = output_column
@@ -212,19 +221,26 @@ def write_output_column(
     update_flags: bool = False,
 ) -> None:
     """Write the output column to the measurement set."""
+    ant_1 = baseline_data.ant_1
+    ant_2 = baseline_data.ant_2
+    _ = ant_1, ant_2 
+    logger.info(f"Writing {output_column=} for baseline {ant_1} {ant_2}")
     with table(str(ms_path), readonly=False) as tab:
         colnames = tab.colnames()
         if output_column not in colnames:
             msg = f"Output column {output_column} does not exist in the measurement set. Cannot write data."
             raise ValueError(msg)
 
-        logger.info(f"Writing {output_column=}")
-        tab.putcol(output_column, baseline_data.masked_data.filled(0 + 0j))
-        if update_flags:
-            # If we want to update the flags, we need to set the flags to False
-            # for the output column
-            tab.putcol("FLAG", baseline_data.masked_data.mask)
-        tab.flush()
+        with taql(
+            "select from $tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
+        ) as subtab:
+            logger.info(f"Writing {output_column=}")
+            subtab.putcol(output_column, baseline_data.masked_data.filled(0 + 0j))
+            if update_flags:
+                # If we want to update the flags, we need to set the flags to False
+                # for the output column
+                subtab.putcol("FLAG", baseline_data.masked_data.mask)
+            subtab.flush()
 
 
 def plot_baseline_data(
@@ -264,6 +280,7 @@ def dumb_tukey_tractor(
     output_column: str = "CORRECTED_DATA",
     dry_run: bool = False,
     make_plots: bool = False,
+    overwrite: bool = False,
 ) -> None:
     baselines = get_baselines_from_ms(ms_path)
     antennas_for_baselines = baselines.b_map.keys()
@@ -272,6 +289,8 @@ def dumb_tukey_tractor(
         add_output_column(
             ms_path=ms_path,
             output_column=output_column,
+            data_column=data_column,
+            overwrite=overwrite,
         )
 
     for ant_1, ant_2 in tqdm(antennas_for_baselines):
@@ -309,7 +328,16 @@ def dumb_tukey_tractor(
                 baseline_data=tapered_baseline_data,
             )
         else:
-            logger.info(f"Dry run: would write {output_column} for {ant_1=} {ant_2=}")
+            logger.info(f"Dry run: would write {output_column} for baseline {ant_1} {ant_2}")
+
+        if make_plots:
+            output_dir = ms_path.parent / "plots"
+            output_dir.mkdir(exist_ok=True)
+            plot_baseline_data(
+                baseline_data=tapered_baseline_data,
+                output_dir=output_dir,
+            )
+            logger.info(f"Plots saved to {output_dir}")
 
 def get_parser() -> ArgumentParser:
     """Create the CLI argument parser
@@ -362,6 +390,11 @@ def get_parser() -> ArgumentParser:
         action="store_true",
         help="If set, the Tukey tractor will make plots of the results",
     )
+    tukey_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="If set, the Tukey tractor will overwrite the output column if it already exists",
+    )
 
 
     return parser
@@ -380,6 +413,7 @@ def cli() -> None:
             output_column=args.output_column,
             dry_run=args.dry_run,
             make_plots=args.make_plots,
+            overwrite=args.overwrite,
         )
     else:
         parser.print_help()
