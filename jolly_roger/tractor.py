@@ -65,41 +65,69 @@ class BaselineData:
     ant_2: int
     """The second antenna in the baseline."""
 
-def get_baseline_data(
-    baselines: Baselines,
+@dataclass
+class BaselineArrays:
+    data: np.typing.NDArray[np.complexfloating]
+    flags: np.typing.NDArray[np.bool_]
+    uvws: np.typing.NDArray[np.floating]
+    time_centroid: np.typing.NDArray[np.floating]
+
+def _get_baseline_data(
+    ms_tab: table,
+    ant_1: int,
+    ant_2: int,
+    data_column: str = "DATA",
+) -> BaselineArrays:
+    _ = ms_tab, ant_1, ant_2
+    with taql(
+        "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
+    ) as subtab:
+        logger.info(f"Opening subtable for baseline {ant_1} {ant_2}")
+        data = subtab.getcol(data_column)[:]
+        flags = subtab.getcol("FLAG")[:]
+        uvws = subtab.getcol("UVW")[:]
+        time_centroid = subtab.getcol("TIME_CENTROID")[:]
+
+    return BaselineArrays(
+        data=data,
+        flags=flags,
+        uvws=uvws,
+        time_centroid=time_centroid,
+    )
+    
+
+async def get_baseline_data(
+    ms_tab: table,
+    spw_tab: table,
+    field_tab: table,
     ant_1: int,
     ant_2: int,
     data_column: str = "DATA",
 ) -> BaselineData:
-    ms_path = baselines.ms_path
-    logger.info(f"Opening {ms_path=} - getting baseline {ant_1} {ant_2}")
-    with (
-        table(str(ms_path), ack=False, readonly=True) as ms_tab,
-        table(str(ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=True) as spw_tab,
-        table(str(ms_path / "FIELD"), ack=False, readonly=True) as field_tab,
-    ):
-        _ = ms_tab
-        freq_chan = spw_tab.getcol("CHAN_FREQ")
-        phase_dir = field_tab.getcol("PHASE_DIR")
 
-        logger.debug(f"Processing {ant_1=} {ant_2=}")
-        with taql(
-            "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
-        ) as subtab:
-            logger.info(f"Opening subtable for baseline {ant_1} {ant_2}")
-            data = subtab.getcol(data_column)
-            flags = subtab.getcol("FLAG")
-            uvws = subtab.getcol("UVW")
-            time_centroid = subtab.getcol("TIME_CENTROID")
+    logger.info(f"Getting baseline {ant_1} {ant_2}")
 
-        freq_chan = freq_chan.squeeze() * u.Hz
-        target = SkyCoord(*(phase_dir * u.rad).squeeze())
-        uvws_phase_center = np.swapaxes(uvws * u.m, 0, 1)
-        time = Time(
-            time_centroid.squeeze() * u.s,
-            format="mjd",
-            scale="utc",
-        )
+    freq_chan = spw_tab.getcol("CHAN_FREQ")
+    phase_dir = field_tab.getcol("PHASE_DIR")
+
+    logger.debug(f"Processing {ant_1=} {ant_2=}")
+
+    data, flags, uvws, time_centroid = await asyncio.to_thread(
+        _get_baseline_data,
+        ms_tab=ms_tab,
+        ant_1=ant_1,
+        ant_2=ant_2,
+        data_column=data_column,
+    )
+
+    freq_chan = freq_chan.squeeze() * u.Hz
+    target = SkyCoord(*(phase_dir * u.rad).squeeze())
+    uvws_phase_center = np.swapaxes(uvws * u.m, 0, 1)
+    time = Time(
+        time_centroid.squeeze() * u.s,
+        format="mjd",
+        scale="utc",
+    )
     masked_data = np.ma.masked_array(data, mask=flags)
 
     logger.info(f"Got data for baseline {ant_1} {ant_2} with shape {masked_data.shape}")
@@ -200,28 +228,28 @@ def data_to_delay_rate(
 
 
 def add_output_column(
-    ms_path: Path,
+    tab: table,
     data_column: str = "DATA",
     output_column: str = "CORRECTED_DATA",
     overwrite: bool = False,
 ) -> None:
-    with table((str(ms_path)), readonly=False) as tab:
-        colnames = tab.colnames()
-        if output_column in colnames:
-            if not overwrite:
-                msg = f"Output column {output_column} already exists in the measurement set. Not overwriting."
-                raise ValueError(msg)
 
-            logger.warning(
-                f"Output column {output_column} already exists in the measurement set. Will be overwritten!"
-            )
-            return
-        logger.info(f"Adding {output_column=}")
-        desc = makecoldesc(data_column, tab.getcoldesc(data_column))
-        desc["name"] = output_column
-        tab.addcols(desc)
-        tab.flush()
-        taql(f"UPDATE $tab SET {output_column}={data_column}")
+    colnames = tab.colnames()
+    if output_column in colnames:
+        if not overwrite:
+            msg = f"Output column {output_column} already exists in the measurement set. Not overwriting."
+            raise ValueError(msg)
+
+        logger.warning(
+            f"Output column {output_column} already exists in the measurement set. Will be overwritten!"
+        )
+        return
+    logger.info(f"Adding {output_column=}")
+    desc = makecoldesc(data_column, tab.getcoldesc(data_column))
+    desc["name"] = output_column
+    tab.addcols(desc)
+    tab.flush()
+    taql(f"UPDATE $tab SET {output_column}={data_column}")
 
 
 def write_output_column(
@@ -283,14 +311,17 @@ def plot_baseline_data(
 
 
 async def _tukey_tractor_baseline(
+    ms_tab: table,
+    spw_tab: table,
+    field_tab: table,
     ant_1: int,
     ant_2: int,
-    baselines: Baselines,
     tukey_tractor_options: TukeyTractorOptions,
 ) -> None:
-    baseline_data = await asyncio.to_thread(
-        get_baseline_data,
-        baselines=baselines,
+    baseline_data = await get_baseline_data(
+        ms_tab=ms_tab,
+        spw_tab=spw_tab,
+        field_tab=field_tab,
         ant_1=ant_1,
         ant_2=ant_2,
         data_column=tukey_tractor_options.data_column,
@@ -363,26 +394,33 @@ async def dumb_tukey_tractor(
     baselines = get_baselines_from_ms(tukey_tractor_options.ms_path)
     antennas_for_baselines = baselines.b_map.keys()
 
-    if not tukey_tractor_options.dry_run:
-        add_output_column(
-            ms_path=tukey_tractor_options.ms_path,
-            output_column=tukey_tractor_options.output_column,
-            data_column=tukey_tractor_options.data_column,
-            overwrite=tukey_tractor_options.overwrite,
-        )
+    with (
+        table(str(tukey_tractor_options.ms_path), ack=False, readonly= tukey_tractor_options.dry_run) as ms_tab,
+        table(str(tukey_tractor_options.ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=True) as spw_tab,
+        table(str(tukey_tractor_options.ms_path / "FIELD"), ack=False, readonly=True) as field_tab,
+    ):
+        if not tukey_tractor_options.dry_run:
+            add_output_column(
+                tab=ms_tab,
+                output_column=tukey_tractor_options.output_column,
+                data_column=tukey_tractor_options.data_column,
+                overwrite=tukey_tractor_options.overwrite,
+            )
 
-    coros = []
-    for ant_1, ant_2 in antennas_for_baselines:
-        coro = _limited_tukey_tractor_baseline(
-            ant_1=ant_1,
-            ant_2=ant_2,
-            baselines=baselines,
-            tukey_tractor_options=tukey_tractor_options,
-        )
-        # coros.append(coro)
-        # task = asyncio.create_task(coro)
-        coros.append(coro)
-    await tqdm.gather(*coros)
+        coros = []
+        for ant_1, ant_2 in antennas_for_baselines:
+            coro = _limited_tukey_tractor_baseline(
+                ms_tab=ms_tab,
+                spw_tab=spw_tab,
+                field_tab=field_tab,
+                ant_1=ant_1,
+                ant_2=ant_2,
+                tukey_tractor_options=tukey_tractor_options,
+            )
+            # coros.append(coro)
+            # task = asyncio.create_task(coro)
+            coros.append(coro)
+        await tqdm.gather(*coros)
 
 def get_parser() -> ArgumentParser:
     """Create the CLI argument parser
