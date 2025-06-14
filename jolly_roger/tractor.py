@@ -79,25 +79,30 @@ def get_baseline_data(
         table(str(ms_path / "FIELD"), ack=False, readonly=True) as field_tab,
     ):
         _ = ms_tab
-        freq_chan = spw_tab.getcol("CHAN_FREQ")[:].squeeze() * u.Hz
-        phase_dir = field_tab.getcol("PHASE_DIR")[:]
-        target = SkyCoord(*(phase_dir * u.rad).squeeze())
+        freq_chan = spw_tab.getcol("CHAN_FREQ")
+        phase_dir = field_tab.getcol("PHASE_DIR")
+
         logger.debug(f"Processing {ant_1=} {ant_2=}")
         with taql(
             "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
         ) as subtab:
-            data = subtab.getcol(data_column)[:]
-            flags = subtab.getcol("FLAG")[:]
-            uvws = subtab.getcol("UVW")[:]
-            uvws_phase_center = np.swapaxes(uvws * u.m, 0, 1)
-            time_centroid = subtab.getcol("TIME_CENTROID")[:].squeeze()
-            time = Time(
-                time_centroid * u.s,
-                format="mjd",
-                scale="utc",
-            )
+            logger.info(f"Opening subtable for baseline {ant_1} {ant_2}")
+            data = subtab.getcol(data_column)
+            flags = subtab.getcol("FLAG")
+            uvws = subtab.getcol("UVW")
+            time_centroid = subtab.getcol("TIME_CENTROID")
+
+        freq_chan = freq_chan.squeeze() * u.Hz
+        target = SkyCoord(*(phase_dir * u.rad).squeeze())
+        uvws_phase_center = np.swapaxes(uvws * u.m, 0, 1)
+        time = Time(
+            time_centroid.squeeze() * u.s,
+            format="mjd",
+            scale="utc",
+        )
     masked_data = np.ma.masked_array(data, mask=flags)
 
+    logger.info(f"Got data for baseline {ant_1} {ant_2} with shape {masked_data.shape}")
     return BaselineData(
         masked_data=masked_data,
         freq_chan=freq_chan,
@@ -290,6 +295,8 @@ async def _tukey_tractor_baseline(
         ant_2=ant_2,
         data_column=tukey_tractor_options.data_column,
     )
+    logger.info(f"{baseline_data.masked_data.shape=}")
+    return
 
     delay_time = data_to_delay_time(baseline_data=baseline_data)
 
@@ -343,6 +350,13 @@ class TukeyTractorOptions:
     make_plots: bool = False
     overwrite: bool = False
 
+
+semaphore = asyncio.Semaphore(4)  # Start with 4; tune higher if I/O allows
+
+async def _limited_tukey_tractor_baseline(*args, **kwargs):
+    async with semaphore:
+        return await _tukey_tractor_baseline(*args, **kwargs)
+
 async def dumb_tukey_tractor(
     tukey_tractor_options: TukeyTractorOptions,
 ) -> None:
@@ -359,7 +373,7 @@ async def dumb_tukey_tractor(
 
     coros = []
     for ant_1, ant_2 in antennas_for_baselines:
-        coro = _tukey_tractor_baseline(
+        coro = _limited_tukey_tractor_baseline(
             ant_1=ant_1,
             ant_2=ant_2,
             baselines=baselines,
