@@ -11,13 +11,16 @@ import numpy as np
 from astropy.coordinates import (
     SkyCoord,
 )
+from astropy.constants import c as speed_of_light
 from astropy.time import Time
 from casacore.tables import makecoldesc, table, taql
 from tqdm.auto import tqdm
 from tqdm.asyncio import tqdm as tqdm_async
 
 from jolly_roger.baselines import Baselines, get_baselines_from_ms
+from jolly_roger.hour_angles import make_hour_angles_for_ms
 from jolly_roger.logging import logger
+from jolly_roger.uvws import xyz_to_uvw
 
 
 def tukey_taper(
@@ -251,6 +254,7 @@ def write_output_column(
 def plot_baseline_data(
     baseline_data: BaselineData,
     output_dir: Path,
+    suffix: str = "",
 ) -> None:
     import matplotlib.pyplot as plt
     from astropy.visualization import quantity_support, time_support
@@ -273,7 +277,7 @@ def plot_baseline_data(
             ylabel=f"Frequency / {baseline_data.freq_chan.unit:latex_inline}",
             title=f"Ant {baseline_data.ant_1} - Ant {baseline_data.ant_2}",
         )
-        output_path = output_dir / f"baseline_data_{baseline_data.ant_1}_{baseline_data.ant_2}.png"
+        output_path = output_dir / f"baseline_data_{baseline_data.ant_1}_{baseline_data.ant_2}{suffix}.png"
         fig.savefig(output_path)
 
 
@@ -329,6 +333,7 @@ async def _tukey_tractor_baseline(
         plot_baseline_data(
             baseline_data=tapered_baseline_data,
             output_dir=output_dir,
+            suffix="_tukey_tapered",
         )
         logger.info(f"Plots saved to {output_dir}")
 
@@ -365,10 +370,142 @@ async def dumb_tukey_tractor(
             baselines=baselines,
             tukey_tractor_options=tukey_tractor_options,
         )
-        # coros.append(coro)
-        # task = asyncio.create_task(coro)
         coros.append(coro)
     await tqdm.gather(*coros)
+
+@dataclass
+class TractorOptions:
+    """Options for the Jolly Roger Tractor."""
+    ms_path: Path
+    """Path to the measurement set to process."""
+    object: str = "sun"
+    """Target position to use for the tractor. Defaults to 'sun'."""
+    dry_run: bool = False
+    """If set, the tractor will not write any output, but will log what it would do."""
+    data_column: str = "DATA"
+    """The data column to use for the tractor. Defaults to 'DATA'."""
+    output_column: str = "CORRECTED_DATA"
+    """The output column to write the tractor results to. Defaults to 'CORRECTED_DATA'."""
+    make_plots: bool = False
+    """If set, the tractor will make plots of the results."""
+
+def plot_tractor_baseline(
+        baseline_data: BaselineData,
+        delay_time: DelayTime,
+        delay_object: u.Quantity,
+        delay_phase_center: u.Quantity,
+        output_dir: Path,
+):
+    import matplotlib.pyplot as plt
+    from astropy.visualization import quantity_support, time_support
+    with quantity_support(), time_support():
+
+        ant_1 = baseline_data.ant_1
+        ant_2 = baseline_data.ant_2
+        time = baseline_data.time
+        delay = delay_time.delay
+        delay_time_xx = delay_time.delay_time[..., 0]
+        delay_time_yy = delay_time.delay_time[..., -1]
+        delay_time_stokesi = (delay_time_xx + delay_time_yy) / 2
+
+        fig, ax = plt.subplots()
+        im = ax.pcolormesh(
+            time,
+            delay,
+            np.abs(delay_time_stokesi).T,
+            norm=plt.cm.colors.LogNorm()
+        )
+        ax.set(
+            ylabel=f"Delay / {delay.unit:latex_inline}",
+            title=f"Baseline {ant_1} - {ant_2}",
+        )
+        fig.colorbar(im, ax=ax, label="Amplitude")
+        ax.plot(time, delay_object, "k--", label="Sun", alpha=1, lw=1)
+        ax.plot(
+            time,
+            delay_phase_center,
+            "w-",
+            label="phase center",
+            alpha=0.5,
+        )
+        output_path = output_dir / f"tractor_baseline_{ant_1}_{ant_2}.png"
+        fig.savefig(output_path)
+
+async def tractor_baseline(
+    ant_1: int,
+    ant_2: int,
+    baselines: Baselines,
+    uvws_object_baseline: u.Quantity,
+    options: TractorOptions,
+) -> None:
+    baseline_data = await asyncio.to_thread(
+        get_baseline_data,
+        baselines=baselines,
+        ant_1=ant_1,
+        ant_2=ant_2,
+        data_column=options.data_column,
+    )
+
+    delay_time = data_to_delay_time(baseline_data=baseline_data)
+
+    _, _, w_coords_object = uvws_object_baseline
+    _, _, w_coords_phase_center = baseline_data.uvws_phase_center
+
+    # Subtract 
+    delay_object = ((w_coords_object - w_coords_phase_center) / speed_of_light).decompose()
+    delay_phase_center = (
+        (w_coords_phase_center - w_coords_phase_center) / speed_of_light
+    ).decompose()
+
+    if options.make_plots:
+        output_dir = options.ms_path.parent / "plots"
+        output_dir.mkdir(exist_ok=True)
+        plot_baseline_data(
+            baseline_data=baseline_data,
+            output_dir=output_dir,
+            suffix="_original",
+        )
+        plot_tractor_baseline(
+            baseline_data=baseline_data,
+            delay_time=delay_time,
+            delay_object=delay_object,
+            delay_phase_center=delay_phase_center,
+            output_dir=output_dir,
+        )
+        logger.info(f"Plots saved to {output_dir}")
+
+async def tractor(
+        options: TractorOptions,
+) -> None:
+    baselines = get_baselines_from_ms(options.ms_path)
+    antennas_for_baselines = baselines.b_map.keys()
+    hour_angles_object = make_hour_angles_for_ms(
+        ms_path=options.ms_path,
+        position=options.object,
+    )
+    uvws_object = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_object)
+
+    if not options.dry_run:
+        add_output_column(
+            ms_path=options.ms_path,
+            output_column=options.output_column,
+            data_column=options.data_column,
+            overwrite=options.overwrite,
+        )
+
+    coros = []
+    for ant_1, ant_2 in antennas_for_baselines:
+        b_idx = baselines.b_map[(ant_1, ant_2)]
+        coro = tractor_baseline(
+            ant_1=ant_1,
+            ant_2=ant_2,
+            baselines=baselines,
+            uvws_object_baseline=uvws_object.uvws[:, b_idx],
+            options=options,
+        )
+        coros.append(coro)
+    await tqdm.gather(*coros)
+
 
 def get_parser() -> ArgumentParser:
     """Create the CLI argument parser
