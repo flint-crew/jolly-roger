@@ -72,7 +72,14 @@ class BaselineArrays:
     uvws: np.typing.NDArray[np.floating]
     time_centroid: np.typing.NDArray[np.floating]
 
-def _get_baseline_data(
+def getcol_async(
+    tab: table,
+    column_name: str,
+) -> np.typing.NDArray[Any]:
+    logger.info(f"Getting column {column_name} from table {tab.name()}")
+    return asyncio.to_thread(tab.getcol, column_name)
+
+async def _get_baseline_data(
     ms_tab: table,
     ant_1: int,
     ant_2: int,
@@ -83,10 +90,17 @@ def _get_baseline_data(
         "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
     ) as subtab:
         logger.info(f"Opening subtable for baseline {ant_1} {ant_2}")
-        data = subtab.getcol(data_column)[:]
-        flags = subtab.getcol("FLAG")[:]
-        uvws = subtab.getcol("UVW")[:]
-        time_centroid = subtab.getcol("TIME_CENTROID")[:]
+        data_coro = getcol_async(subtab, data_column)
+        flags_coro = getcol_async(subtab, "FLAG")
+        uvws_coro = getcol_async(subtab, "UVW")
+        time_centroid_coro = getcol_async(subtab, "TIME_CENTROID")
+
+        data, flags, uvws, time_centroid = await asyncio.gather(
+            data_coro,
+            flags_coro,
+            uvws_coro,
+            time_centroid_coro,
+        )
 
     return BaselineArrays(
         data=data,
@@ -112,8 +126,7 @@ async def get_baseline_data(
 
     logger.debug(f"Processing {ant_1=} {ant_2=}")
 
-    data, flags, uvws, time_centroid = await asyncio.to_thread(
-        _get_baseline_data,
+    baseline_data = await _get_baseline_data(
         ms_tab=ms_tab,
         ant_1=ant_1,
         ant_2=ant_2,
@@ -122,13 +135,13 @@ async def get_baseline_data(
 
     freq_chan = freq_chan.squeeze() * u.Hz
     target = SkyCoord(*(phase_dir * u.rad).squeeze())
-    uvws_phase_center = np.swapaxes(uvws * u.m, 0, 1)
+    uvws_phase_center = np.swapaxes(baseline_data.uvws * u.m, 0, 1)
     time = Time(
-        time_centroid.squeeze() * u.s,
+        baseline_data.time_centroid.squeeze() * u.s,
         format="mjd",
         scale="utc",
     )
-    masked_data = np.ma.masked_array(data, mask=flags)
+    masked_data = np.ma.masked_array(baseline_data.data, mask=baseline_data.flags)
 
     logger.info(f"Got data for baseline {ant_1} {ant_2} with shape {masked_data.shape}")
     return BaselineData(
@@ -382,7 +395,7 @@ class TukeyTractorOptions:
     overwrite: bool = False
 
 
-semaphore = asyncio.Semaphore(4)  # Start with 4; tune higher if I/O allows
+semaphore = asyncio.Semaphore(64)  # Start with 4; tune higher if I/O allows
 
 async def _limited_tukey_tractor_baseline(*args, **kwargs):
     async with semaphore:
@@ -395,7 +408,7 @@ async def dumb_tukey_tractor(
     antennas_for_baselines = baselines.b_map.keys()
 
     with (
-        table(str(tukey_tractor_options.ms_path), ack=False, readonly= tukey_tractor_options.dry_run) as ms_tab,
+        table(str(tukey_tractor_options.ms_path), ack=False, readonly=tukey_tractor_options.dry_run) as ms_tab,
         table(str(tukey_tractor_options.ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=True) as spw_tab,
         table(str(tukey_tractor_options.ms_path / "FIELD"), ack=False, readonly=True) as field_tab,
     ):
@@ -420,6 +433,7 @@ async def dumb_tukey_tractor(
             # coros.append(coro)
             # task = asyncio.create_task(coro)
             coros.append(coro)
+            # _ = await coro
         await tqdm.gather(*coros)
 
 def get_parser() -> ArgumentParser:
