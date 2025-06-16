@@ -72,12 +72,18 @@ class BaselineArrays:
     uvws: np.typing.NDArray[np.floating]
     time_centroid: np.typing.NDArray[np.floating]
 
+def _getcol_into_memory(
+    tab: table,
+    column_name: str,
+) -> np.typing.NDArray[Any]:
+    return np.array(tab.getcol(column_name)[:], copy=True)
+
 def getcol_async(
     tab: table,
     column_name: str,
 ) -> np.typing.NDArray[Any]:
     logger.info(f"Getting column {column_name} from table {tab.name()}")
-    return asyncio.to_thread(tab.getcol, column_name)
+    return asyncio.to_thread(_getcol_into_memory, tab, column_name)
 
 async def _get_baseline_data(
     ms_tab: table,
@@ -395,7 +401,7 @@ class TukeyTractorOptions:
     overwrite: bool = False
 
 
-semaphore = asyncio.Semaphore(64)  # Start with 4; tune higher if I/O allows
+semaphore = asyncio.Semaphore(12)  # Start with 4; tune higher if I/O allows
 
 async def _limited_tukey_tractor_baseline(*args, **kwargs):
     async with semaphore:
@@ -408,9 +414,9 @@ async def dumb_tukey_tractor(
     antennas_for_baselines = baselines.b_map.keys()
 
     with (
-        table(str(tukey_tractor_options.ms_path), ack=False, readonly=tukey_tractor_options.dry_run) as ms_tab,
-        table(str(tukey_tractor_options.ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=True) as spw_tab,
-        table(str(tukey_tractor_options.ms_path / "FIELD"), ack=False, readonly=True) as field_tab,
+        table(str(tukey_tractor_options.ms_path), ack=True, readonly=True, lockoptions="autonoread") as ms_tab,
+        table(str(tukey_tractor_options.ms_path / "SPECTRAL_WINDOW"), ack=True, readonly=True, lockoptions="autonoread") as spw_tab,
+        table(str(tukey_tractor_options.ms_path / "FIELD"), ack=True, readonly=True, lockoptions="autonoread") as field_tab,
     ):
         if not tukey_tractor_options.dry_run:
             add_output_column(
