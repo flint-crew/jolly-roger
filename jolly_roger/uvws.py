@@ -44,12 +44,11 @@ def xyz_to_uvw(
     """
     b_xyz = baselines.b_xyz
 
-    # Getting the units right is important, mate
-    ha = hour_angles.hour_angle
-    ha = ha.to(u.rad)
+    # Convert HA to geocentric hour angle (at Greenwich meridian)
+    # This is why we subtract the location's longitude
+    ha = hour_angles.hour_angle - hour_angles.location.lon
 
     declination = hour_angles.position.dec
-    declination = declination.to(u.rad)
 
     # This is necessary for broadcastung in the matrix to work.
     # Should the position be a solar object like the sub its position
@@ -79,9 +78,9 @@ def xyz_to_uvw(
     )
 
     # Every time this confuses me and I need the first mate to look over.
-    # b_xyz shape: (baselines, coord) where coord is XYZ
+    # b_xyz shape: (baselines, 3) where coord is XYZ
     # mat shape: (3, 3, timesteps)
-    # uvw shape: (baseline, coord, timesteps) where coord is UVW
+    # uvw shape: (3, baseline, timesteps) where coord is UVW
     uvw = np.einsum("ijk,lj->ilk", mat, b_xyz, optimize=True)  # codespell:ignore ilk
     # i,j,k -> (3, 3, time)
     # l,j -> (baseline, 3)
