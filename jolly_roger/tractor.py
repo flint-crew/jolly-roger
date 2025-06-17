@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from argparse import ArgumentParser
-import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,9 +14,6 @@ from astropy.constants import c as speed_of_light
 from astropy.time import Time
 from casacore.tables import makecoldesc, table, taql
 from tqdm.auto import tqdm
-from tqdm.asyncio import tqdm as tqdm_async
-from daskms import xds_from_table, xds_to_table
-import xarray as xr
 
 from jolly_roger.baselines import Baselines, get_baselines_from_ms
 from jolly_roger.hour_angles import make_hour_angles_for_ms
@@ -83,14 +79,8 @@ def _getcol_into_memory(
 ) -> np.typing.NDArray[Any]:
     return np.array(tab.getcol(column_name)[:], copy=True)
 
-def getcol_async(
-    tab: table,
-    column_name: str,
-) -> np.typing.NDArray[Any]:
-    logger.info(f"Getting column {column_name} from table {tab.name()}")
-    return asyncio.to_thread(_getcol_into_memory, tab, column_name)
 
-async def _get_baseline_data(
+def _get_baseline_data(
     ms_tab: table,
     ant_1: int,
     ant_2: int,
@@ -101,17 +91,10 @@ async def _get_baseline_data(
         "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
     ) as subtab:
         logger.info(f"Opening subtable for baseline {ant_1} {ant_2}")
-        data_coro = getcol_async(subtab, data_column)
-        flags_coro = getcol_async(subtab, "FLAG")
-        uvws_coro = getcol_async(subtab, "UVW")
-        time_centroid_coro = getcol_async(subtab, "TIME_CENTROID")
-
-        data, flags, uvws, time_centroid = await asyncio.gather(
-            data_coro,
-            flags_coro,
-            uvws_coro,
-            time_centroid_coro,
-        )
+        data = subtab.getcol(data_column)
+        flags = subtab.getcol("FLAG")
+        uvws = subtab.getcol("UVW")
+        time_centroid = subtab.getcol("TIME_CENTROID")
 
     return BaselineArrays(
         data=data,
@@ -121,7 +104,7 @@ async def _get_baseline_data(
     )
     
 
-async def get_baseline_data(
+def get_baseline_data(
     ms_tab: table,
     spw_tab: table,
     field_tab: table,
@@ -137,7 +120,7 @@ async def get_baseline_data(
 
     logger.debug(f"Processing {ant_1=} {ant_2=}")
 
-    baseline_data = await _get_baseline_data(
+    baseline_data = _get_baseline_data(
         ms_tab=ms_tab,
         ant_1=ant_1,
         ant_2=ant_2,
@@ -176,7 +159,7 @@ class DelayTime:
     """The delay values corresponding to the delay time data."""
 
 
-def data_to_delay_time(baseline_xds: xr.Dataset) -> xr.Dataset:
+def data_to_delay_time(baseline_data: BaselineData) -> DelayTime:
     logger.info("Converting freq-time to delay-time")
     delay_time = np.fft.fftshift(
         np.fft.fft(baseline_data.masked_data.filled(0 + 0j), axis=1), axes=1
@@ -336,11 +319,11 @@ def plot_baseline_data(
 
 
 def _tukey_tractor_baseline(
-    baseline_xds: xr.Dataset,
+    baseline_data: BaselineData,
     tukey_tractor_options: TukeyTractorOptions,
 ) -> None:
 
-    delay_time = data_to_delay_time(baseline_xds=baseline_xds)
+    delay_time = data_to_delay_time(baseline_data=baseline_data)
 
     taper = tukey_taper(
         x=delay_time.delay,
@@ -361,15 +344,14 @@ def _tukey_tractor_baseline(
         original_baseline_data=baseline_data,
     )
     if not tukey_tractor_options.dry_run:
-        await asyncio.to_thread(
-            write_output_column,
+        write_output_column(
             ms_path=tukey_tractor_options.ms_path,
             output_column=tukey_tractor_options.output_column,
             baseline_data=tapered_baseline_data,
         )
     else:
         logger.info(
-            f"Dry run: would write {tukey_tractor_options.output_column} for baseline {ant_1} {ant_2}"
+            f"Dry run: would write {tukey_tractor_options.output_column} for baseline {baseline_data.ant_1} {baseline_data.ant_2}"
         )
 
     if tukey_tractor_options.make_plots:
@@ -394,21 +376,16 @@ class TukeyTractorOptions:
     overwrite: bool = False
 
 
-semaphore = asyncio.Semaphore(12)  # Start with 4; tune higher if I/O allows
-
-# async def _limited_tukey_tractor_baseline(*args, **kwargs):
-#     async with semaphore:
-#         return await _tukey_tractor_baseline(*args, **kwargs)
-
-async def dumb_tukey_tractor(
+def dumb_tukey_tractor(
     tukey_tractor_options: TukeyTractorOptions,
+    data_column: str = "DATA"
 ) -> None:
     baselines = get_baselines_from_ms(tukey_tractor_options.ms_path)
     antennas_for_baselines = baselines.b_map.keys()
 
-    main_xds = xds_from_table(tukey_tractor_options.ms_path)[0]
-    spw_xds = xds_from_table(tukey_tractor_options.ms_path / "SPECTRAL_WINDOW")[0]
-    field_xds = xds_from_table(tukey_tractor_options.ms_path / "FIELD")[0]
+    main_table = table(str(tukey_tractor_options.ms_path))
+    spw_table = table(str(tukey_tractor_options.ms_path / "SPECTRAL_WINDOW"))
+    field_table = table(str(tukey_tractor_options.ms_path / "FIELD"))
 
     # if not tukey_tractor_options.dry_run:
     #     add_output_column(
@@ -420,16 +397,18 @@ async def dumb_tukey_tractor(
 
     coros = []
     for ant_1, ant_2 in antennas_for_baselines:
-        baseline_mask = ((main_xds.ANTENNA1 == 0) & (main_xds.ANTENNA2 == 1)).compute()
-        coro = _tukey_tractor_baseline(
-            baseline_xds=main_xds.isel(row=np.where(mask)[0]),
-            tukey_tractor_options=tukey_tractor_options,
+        baseline_data = get_baseline_data(
+            ms_tab=main_table,
+            spw_tab=spw_table,
+            field_tab=field_table,
+            ant_1=ant_1,
+            ant_2=ant_2,
+            data_column=data_column
         )
-        # coros.append(coro)
-        # task = asyncio.create_task(coro)
-        coros.append(coro)
-        # _ = await coro
-    await tqdm.gather(*coros)
+        _tukey_tractor_baseline(
+                baseline_table=baseline_data,
+                tukey_tractor_options=tukey_tractor_options,
+            )
 
 @dataclass
 class TractorOptions:
@@ -496,8 +475,7 @@ async def tractor_baseline(
     uvws_object_baseline: u.Quantity,
     options: TractorOptions,
 ) -> None:
-    baseline_data = await asyncio.to_thread(
-        get_baseline_data,
+    baseline_data = get_baseline_data(
         baselines=baselines,
         ant_1=ant_1,
         ant_2=ant_2,
@@ -532,7 +510,7 @@ async def tractor_baseline(
         )
         logger.info(f"Plots saved to {output_dir}")
 
-async def tractor(
+def tractor(
         options: TractorOptions,
 ) -> None:
     baselines = get_baselines_from_ms(options.ms_path)
@@ -551,18 +529,16 @@ async def tractor(
             overwrite=options.overwrite,
         )
 
-    coros = []
     for ant_1, ant_2 in antennas_for_baselines:
         b_idx = baselines.b_map[(ant_1, ant_2)]
-        coro = tractor_baseline(
+        tractor_baseline(
             ant_1=ant_1,
             ant_2=ant_2,
             baselines=baselines,
             uvws_object_baseline=uvws_object.uvws[:, b_idx],
             options=options,
         )
-        coros.append(coro)
-    await tqdm.gather(*coros)
+        
 
 
 def get_parser() -> ArgumentParser:
@@ -641,7 +617,7 @@ def cli() -> None:
             make_plots=args.make_plots,
             overwrite=args.overwrite,
         )
-        asyncio.run(dumb_tukey_tractor(tukey_tractor_options=tukey_tractor_options))
+        dumb_tukey_tractor(tukey_tractor_options=tukey_tractor_options)
     else:
         parser.print_help()
 
