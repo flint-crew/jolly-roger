@@ -3,7 +3,7 @@ from __future__ import annotations
 from argparse import ArgumentParser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 
 import astropy.units as u
 import numpy as np
@@ -73,11 +73,76 @@ class BaselineArrays:
     uvws: np.typing.NDArray[np.floating]
     time_centroid: np.typing.NDArray[np.floating]
 
-def _getcol_into_memory(
-    tab: table,
-    column_name: str,
+@dataclass
+class DataChunkArray:
+    """Container for a chunk of data"""
+    data: np.typing.NDArray[np.complexfloating]
+    flags: np.typing.NDArray[np.bool_]
+    uvws: np.typing.NDArray[np.floating]
+    time_centroid: np.typing.NDArray[np.floating]
+    ant_1: np.typing.NDAArray[int]
+    ant_2: np.typing.NDAArray[int]
+    row_start: int
+    chunk_size: int
+
+def _list_to_array(
+    list_of_rows: list[dict[str, Any]],
+    key: str
 ) -> np.typing.NDArray[Any]:
-    return np.array(tab.getcol(column_name)[:], copy=True)
+    """Helper to make a simple numpy object from list of items"""
+    return np.array([row[key] for row in list_of_rows])
+
+def _get_data_chunk_from_main_table(
+    ms_table: table,
+    chunk_size: int,
+    data_column: str,
+) -> Generator[DataChunkArray, None, None]:
+    """Return an appropriately size data chunk from the main
+    table of a measurement set. The data chunk is intended
+    to be used to form `Delay` quantities from. These are
+    returned in the native order of the measurement set.
+
+    Args:
+        ms_table (table): The opened main table of a measurement set
+        chunk_size (int): The size of the data to chunk and return
+        data_column (str): The data column to be returned
+
+    Yields:
+        Generator[DataChunkArray, None, None]: A segment of rows and columns
+    """
+    
+    table_length = len(ms_table)
+    logger.info(f"Length of open table: {table_length} rows")
+    
+    lower_row = 0
+    upper_row = chunk_size
+    
+    while lower_row < table_length:
+        
+        rows: list[dict[str, Any]] = ms_table[lower_row:upper_row]
+        
+        data = _list_to_array(list_of_rows=rows, key=data_column)
+        flags = _list_to_array(list_of_rows=rows, key="FLAG")
+        uvws = _list_to_array(list_of_rows=rows, key="UVW")
+        time_centroid = _list_to_array(list_of_rows=rows, key="TIME_CENTROID")
+        ant_1 = _list_to_array(list_of_rows=rows, key="ANTENNA1")
+        ant_2 = _list_to_array(list_of_rows=rows, key="ANTENNA2")
+        
+        yield DataChunkArray(
+            data=data, 
+            flags=flags, 
+            uvws=uvws, 
+            time_centroid=time_centroid, 
+            ant_1=ant_1, 
+            ant_2=ant_2, 
+            row_start=lower_row, 
+            chunk_size=chunk_size
+        )
+        
+        lower_row += chunk_size
+        upper_row += chunk_size
+    
+    pass    
 
 
 def _get_baseline_data(
@@ -374,11 +439,11 @@ class TukeyTractorOptions:
     dry_run: bool = False
     make_plots: bool = False
     overwrite: bool = False
+    chunk_size: int = 1000
 
 
 def dumb_tukey_tractor(
     tukey_tractor_options: TukeyTractorOptions,
-    data_column: str = "DATA"
 ) -> None:
     baselines = get_baselines_from_ms(tukey_tractor_options.ms_path)
     antennas_for_baselines = baselines.b_map.keys()
@@ -395,18 +460,9 @@ def dumb_tukey_tractor(
     #         overwrite=tukey_tractor_options.overwrite,
     #     )
 
-    coros = []
-    for ant_1, ant_2 in antennas_for_baselines:
-        baseline_data = get_baseline_data(
-            ms_tab=main_table,
-            spw_tab=spw_table,
-            field_tab=field_table,
-            ant_1=ant_1,
-            ant_2=ant_2,
-            data_column=data_column
-        )
+    for data_chunk in _get_data_chunk_from_main_table(ms_table=main_table, chunk_size=tukey_tractor_options.chunk_size):
         _tukey_tractor_baseline(
-                baseline_table=baseline_data,
+                baseline_table=data_chunk,
                 tukey_tractor_options=tukey_tractor_options,
             )
 
