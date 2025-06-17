@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from astropy.coordinates import EarthLocation
+
 
 def test_askap_position() -> None:
     """Ensure that the EarthLocation for ASKAP is correctly formed"""
     from jolly_roger.hour_angles import ASKAP
 
-    assert ASKAP.x.value == -2556146.66356375
-    assert ASKAP.y.value == 5097426.58592797
-    assert ASKAP.z.value == -2848333.08164107
+    askap_astropy = EarthLocation.of_site("ASKAP")
+
+    assert ASKAP.x.value == askap_astropy.x.value
+    assert ASKAP.y.value == askap_astropy.y.value
+    assert ASKAP.z.value == askap_astropy.z.value
