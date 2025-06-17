@@ -44,12 +44,11 @@ def xyz_to_uvw(
     """
     b_xyz = baselines.b_xyz
 
-    # Getting the units right is important, mate
-    ha = hour_angles.hour_angle
-    ha = ha.to(u.rad)
+    # Convert HA to geocentric hour angle (at Greenwich meridian)
+    # This is why we subtract the location's longitude
+    ha = hour_angles.hour_angle - hour_angles.location.lon
 
     declination = hour_angles.position.dec
-    declination = declination.to(u.rad)
 
     # This is necessary for broadcastung in the matrix to work.
     # Should the position be a solar object like the sub its position
