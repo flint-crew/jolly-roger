@@ -438,6 +438,7 @@ def add_output_column(
     desc["name"] = output_column
     tab.addcols(desc)
     tab.flush()
+    logger.info(f"Copying {data_column=} to {output_column=}")
     taql(f"UPDATE $tab SET {output_column}={data_column}")
 
 
