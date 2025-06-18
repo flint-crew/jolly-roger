@@ -511,7 +511,13 @@ def plot_baseline_comparison_data(
     suffix: str = "",
 ) -> Path:
     import matplotlib.pyplot as plt
-    from astropy.visualization import quantity_support, time_support
+    from astropy.visualization import (
+        ImageNormalize,
+        SqrtStretch,
+        ZScaleInterval,
+        quantity_support,
+        time_support,
+    )
 
     with quantity_support(), time_support():
         before_amp_stokesi = np.abs(
@@ -528,14 +534,17 @@ def plot_baseline_comparison_data(
             )
             / 2
         )
-        before_max_amp = np.max(before_amp_stokesi)
+
+        norm = ImageNormalize(
+            after_amp_stokesi, interval=ZScaleInterval(), stretch=SqrtStretch()
+        )
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
         im = ax1.pcolormesh(
             before_baseline_data.time,
             before_baseline_data.freq_chan,
             before_amp_stokesi.T,
-            vmax=before_max_amp,
+            norm=norm,
         )
         ax1.set(
             ylabel=f"Frequency / {before_baseline_data.freq_chan.unit:latex_inline}",
@@ -545,7 +554,7 @@ def plot_baseline_comparison_data(
             after_baseline_data.time,
             after_baseline_data.freq_chan,
             after_amp_stokesi.T,
-            vmax=before_max_amp,
+            norm=norm,
         )
         ax2.set(
             ylabel=f"Frequency / {after_baseline_data.freq_chan.unit:latex_inline}",
