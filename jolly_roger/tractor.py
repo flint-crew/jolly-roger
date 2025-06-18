@@ -214,14 +214,16 @@ def get_data_chunks(
         )
 
         yield DataChunk(
-        masked_data=masked_data,
-        freq_chan=freq_chan,
-        phase_center=target,
-        uvws_phase_center=uvws_phase_center,
-        time=time,
-        ant_1=data_chunk_array.ant_1,
-        ant_2=data_chunk_array.ant_2,
-    )
+            masked_data=masked_data,
+            freq_chan=freq_chan,
+            phase_center=target,
+            uvws_phase_center=uvws_phase_center,
+            time=time,
+            ant_1=data_chunk_array.ant_1,
+            ant_2=data_chunk_array.ant_2,
+            row_start=data_chunk_array.row_start,
+            chunk_size=data_chunk_array.chunk_size,
+        )
 
 
 
@@ -323,8 +325,8 @@ def data_to_delay_time(data: BaselineData | DataChunkArray) -> DelayTime:
 
 def delay_time_to_data(
     delay_time: DelayTime,
-    original_baseline_data: BaselineData,
-) -> BaselineData:
+    original_data: DataChunk,
+) -> DataChunk:
     """Convert delay time data back to the original data format."""
     logger.info("Converting delay-time to freq-time")
     new_data = np.fft.ifft(
@@ -333,11 +335,11 @@ def delay_time_to_data(
     )
     new_data_masked = np.ma.masked_array(
         new_data,
-        mask=original_baseline_data.masked_data.mask,
+        mask=original_data.masked_data.mask,
     )
-    new_baseline_data = original_baseline_data
-    new_baseline_data.masked_data = new_data_masked
-    return new_baseline_data
+    new_data = original_data
+    new_data.masked_data = new_data_masked
+    return new_data
 
 
 @dataclass
@@ -356,6 +358,10 @@ def data_to_delay_rate(
     baseline_data: BaselineData,
 ) -> DelayRate:
     """Convert baseline data to delay rate."""
+    # This only makes sense when running on time data. Hence
+    # asserting the type of BaelineData
+    
+    assert isinstance(baseline_data, BaselineData), f"baseline_data is type={type(baseline_data)}, but needs to be BaselineData"
 
     logger.info("Converting freq-time to delay-rate")
     delay_rate = np.fft.fftshift(np.fft.fft2(baseline_data.masked_data.filled(0 + 0j)))
@@ -466,7 +472,7 @@ def plot_baseline_data(
 def _tukey_tractor(
     data_chunk: DataChunkArray,
     tukey_tractor_options: TukeyTractorOptions,
-) -> None:
+) -> NDArray[np.complex128]:
 
     delay_time = data_to_delay_time(data=data_chunk)
 
@@ -488,8 +494,9 @@ def _tukey_tractor(
         delay_time=tapered_delay_time,
         original_baseline_data=data_chunk,
     )
+    logger.debug(f"{tapered_data.shape=} {tapered_data.dtype}")
     
-
+    return tapered_data
     
 @dataclass
 class TukeyTractorOptions:
@@ -514,24 +521,39 @@ def dumb_tukey_tractor(
     spw_table = table(str(tukey_tractor_options.ms_path / "SPECTRAL_WINDOW"))
     field_table = table(str(tukey_tractor_options.ms_path / "FIELD"))
 
-    # if not tukey_tractor_options.dry_run:
-    #     add_output_column(
-    #         tab=ms_tab,
-    #         output_column=tukey_tractor_options.output_column,
-    #         data_column=tukey_tractor_options.data_column,
-    #         overwrite=tukey_tractor_options.overwrite,
-    #     )
+    if not tukey_tractor_options.dry_run:
+        add_output_column(
+            tab=main_table,
+            output_column=tukey_tractor_options.output_column,
+            data_column=tukey_tractor_options.data_column,
+            overwrite=tukey_tractor_options.overwrite,
+        )
 
-    for data_chunk in get_data_chunks(
-        ms_table=main_table,
-        spw_table=spw_table,
-        field_table=field_table, 
-        chunk_size=tukey_tractor_options.chunk_size,
-        data_column=tukey_tractor_options.data_column
-    ):
-        _tukey_tractor(
-                baseline_table=data_chunk,
-                tukey_tractor_options=tukey_tractor_options,
+    with tqdm(total=len(main_table)) as pbar:
+        
+        for data_chunk in get_data_chunks(
+            ms_table=main_table,
+            spw_table=spw_table,
+            field_table=field_table, 
+            chunk_size=tukey_tractor_options.chunk_size,
+            data_column=tukey_tractor_options.data_column
+        ):
+            taper_data_chunk: DataChunk = _tukey_tractor(
+                    data_chunk=data_chunk,
+                    tukey_tractor_options=tukey_tractor_options,
+                )
+            
+            pbar.update(len(taper_data_chunk.masked_data))
+            
+            if tukey_tractor_options.dry_run:
+                # Do not apply the data
+                continue
+            
+            main_table.putcol(
+                columnname=tukey_tractor_options.output_column,
+                value=taper_data_chunk.masked_data,
+                startrow=taper_data_chunk.row_start,
+                nrow=taper_data_chunk.chunk_size
             )
 
 @dataclass
