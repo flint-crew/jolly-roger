@@ -503,6 +503,95 @@ def plot_baseline_data(
         fig.savefig(output_path)
 
 
+def plot_baseline_comparison_data(
+    before_baseline_data: BaselineData,
+    after_baseline_data: BaselineData,
+    output_dir: Path,
+    suffix: str = "",
+) -> Path:
+    import matplotlib.pyplot as plt
+    from astropy.visualization import quantity_support, time_support
+
+    with quantity_support(), time_support():
+        before_amp_stokesi = np.abs(
+            (
+                before_baseline_data.masked_data[..., 0]
+                + before_baseline_data.masked_data[..., -1]
+            )
+            / 2
+        )
+        after_amp_stokesi = np.abs(
+            (
+                after_baseline_data.masked_data[..., 0]
+                + after_baseline_data.masked_data[..., -1]
+            )
+            / 2
+        )
+        before_max_amp = np.max(before_amp_stokesi)
+
+        fig, (ax1, ax2) = plt.subplots(1, 2)
+        im = ax1.pcolormesh(
+            before_baseline_data.time,
+            before_baseline_data.freq_chan,
+            before_amp_stokesi.T,
+            vmax=before_max_amp,
+        )
+        ax1.set(
+            ylabel=f"Frequency / {before_baseline_data.freq_chan.unit:latex_inline}",
+            title=f"Before Ant {before_baseline_data.ant_1} - Ant {before_baseline_data.ant_2}",
+        )
+        ax2.pcolormesh(
+            after_baseline_data.time,
+            after_baseline_data.freq_chan,
+            after_amp_stokesi.T,
+            vmax=before_max_amp,
+        )
+        ax2.set(
+            ylabel=f"Frequency / {after_baseline_data.freq_chan.unit:latex_inline}",
+            title=f"After Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}",
+        )
+        output_path = (
+            output_dir
+            / f"baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}{suffix}.png"
+        )
+        fig.colorbar(im, ax=ax2, label="Stokes I Amplitude / Jy")
+        fig.tight_layout()
+        fig.savefig(output_path)
+
+        return output_path
+
+
+def make_plot_results(
+    open_ms_tables: OpenMSTables, data_column: str, output_column: str
+) -> list[Path]:
+    output_paths = []
+    output_dir = open_ms_tables.ms_path.parent / "plots"
+    output_dir.mkdir(exist_ok=True, parents=True)
+    for i in range(10):
+        logger.info(f"Plotting baseline={i + 1}")
+        before_baseline_data = get_baseline_data(
+            open_ms_tables=open_ms_tables,
+            ant_1=0,
+            ant_2=i + 1,
+            data_column=data_column,
+        )
+        after_baseline_data = get_baseline_data(
+            open_ms_tables=open_ms_tables,
+            ant_1=0,
+            ant_2=i + 1,
+            data_column=output_column,
+        )
+        plot_path = plot_baseline_comparison_data(
+            before_baseline_data=before_baseline_data,
+            after_baseline_data=after_baseline_data,
+            output_dir=output_dir,
+            suffix="_comparison",
+        )
+        output_paths.append(plot_path)
+
+    return output_paths
+
+
 def _tukey_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
@@ -583,41 +672,20 @@ def dumb_tukey_tractor(
             )
 
     if tukey_tractor_options.make_plots and not tukey_tractor_options.dry_run:
-        output_dir = tukey_tractor_options.ms_path.parent / "plots"
-        output_dir.mkdir(exist_ok=True, parents=True)
-        for i in range(10):
-            logger.info(f"Plotting baseline={i + 1}")
-            baseline_data = get_baseline_data(
-                open_ms_tables=open_ms_tables,
-                ant_1=0,
-                ant_2=i + 1,
-                data_column=tukey_tractor_options.data_column,
-            )
-            plot_baseline_data(
-                baseline_data=baseline_data,
-                output_dir=output_dir,
-                suffix="_original",
-            )
-            baseline_data = get_baseline_data(
-                open_ms_tables=open_ms_tables,
-                ant_1=0,
-                ant_2=i + 1,
-                data_column=tukey_tractor_options.output_column,
-            )
-            plot_baseline_data(
-                baseline_data=baseline_data,
-                output_dir=output_dir,
-                suffix="_post",
-            )
+        plot_paths: list[Path] = make_plot_results(
+            open_ms_tables=open_ms_tables,
+            data_column=tukey_tractor_options.data_column,
+            output_column=tukey_tractor_options.output_column,
+        )
 
-            # plot_tractor_baseline(
-            #     baseline_data=baseline_data,
-            #     delay_time=delay_time,
-            #     delay_object=delay_object,
-            #     delay_phase_center=delay_phase_center,
-            #     output_dir=output_dir,
-            # )
-            logger.info(f"Plots saved to {output_dir}")
+        # plot_tractor_baseline(
+        #     baseline_data=baseline_data,
+        #     delay_time=delay_time,
+        #     delay_object=delay_object,
+        #     delay_phase_center=delay_phase_center,
+        #     output_dir=output_dir,
+        # )
+        logger.info(f"Made {len(plot_paths)} output plots")
 
 
 @dataclass
