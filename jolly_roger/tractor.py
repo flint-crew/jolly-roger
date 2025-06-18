@@ -492,7 +492,7 @@ def _tukey_tractor(
 
     tapered_data = delay_time_to_data(
         delay_time=tapered_delay_time,
-        original_baseline_data=data_chunk,
+        original_data=data_chunk,
     )
     logger.debug(f"{tapered_data.shape=} {tapered_data.dtype}")
     
