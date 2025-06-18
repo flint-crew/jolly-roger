@@ -7,6 +7,7 @@ from typing import Any, Generator
 
 import astropy.units as u
 import numpy as np
+from numpy.typing import NDArray
 from astropy.coordinates import (
     SkyCoord,
 )
@@ -68,22 +69,48 @@ class BaselineData:
 
 @dataclass
 class BaselineArrays:
-    data: np.typing.NDArray[np.complexfloating]
-    flags: np.typing.NDArray[np.bool_]
-    uvws: np.typing.NDArray[np.floating]
-    time_centroid: np.typing.NDArray[np.floating]
+    data: NDArray[np.complexfloating]
+    flags: NDArray[np.bool_]
+    uvws: NDArray[np.floating]
+    time_centroid: NDArray[np.floating]
 
 @dataclass
 class DataChunkArray:
     """Container for a chunk of data"""
-    data: np.typing.NDArray[np.complexfloating]
-    flags: np.typing.NDArray[np.bool_]
-    uvws: np.typing.NDArray[np.floating]
-    time_centroid: np.typing.NDArray[np.floating]
-    ant_1: np.typing.NDAArray[int]
-    ant_2: np.typing.NDAArray[int]
+    data: NDArray[np.complexfloating]
+    flags: NDArray[np.bool_]
+    uvws: NDArray[np.floating]
+    time_centroid: NDArray[np.floating]
+    ant_1: NDArray[np.int64]
+    ant_2: NDArray[np.int64]
     row_start: int
     chunk_size: int
+
+@dataclass
+class DataChunk:
+    """Container for a collection of data and associated metadata.
+    Here data are drawn from a series of rows.
+    """
+
+    masked_data: np.ma.MaskedArray
+    """The baseline data, masked where flags are set. shape=(time, chan, pol)"""
+    freq_chan: u.Quantity
+    """The frequency channels corresponding to the data."""
+    phase_center: SkyCoord
+    """The target sky coordinate for the baseline."""
+    uvws_phase_center: u.Quantity
+    """The UVW coordinates of the phase center of the baseline."""
+    time: Time
+    """The time of the observations."""
+    ant_1: NDArray[np.int64]
+    """The first antenna in the baseline."""
+    ant_2: NDArray[np.int64]
+    """The second antenna in the baseline."""
+    row_start: int
+    """Starting row index of the data"""
+    chunk_size: int
+    """Size of the chunked portion of the data"""
+
 
 def _list_to_array(
     list_of_rows: list[dict[str, Any]],
@@ -98,9 +125,9 @@ def _get_data_chunk_from_main_table(
     data_column: str,
 ) -> Generator[DataChunkArray, None, None]:
     """Return an appropriately size data chunk from the main
-    table of a measurement set. The data chunk is intended
-    to be used to form `Delay` quantities from. These are
-    returned in the native order of the measurement set.
+    table of a measurement set. These data are ase they are
+    in the measurement set without any additional scaling
+    or unit adjustments.
 
     Args:
         ms_table (table): The opened main table of a measurement set
@@ -142,7 +169,60 @@ def _get_data_chunk_from_main_table(
         lower_row += chunk_size
         upper_row += chunk_size
     
-    pass    
+
+def get_data_chunks(
+    ms_table: table,
+    spw_table: table,
+    field_table: table,
+    chunk_size: int,
+    data_column: str,
+) -> Generator[DataChunk, None, None]:
+    """Yield a collection of rows with appropriate units
+    attached to the quantities. These quantities are not
+    the same data encoded in the measurement set, e.g. 
+    masked array has been formed, astropy units have 
+    been attached.
+
+    Args:
+        ms_table (table): The main table of the measurement set to iterate over
+        spw_table (table): The table describing the spectral windows
+        field_table (table): The table describing the fields
+        chunk_size (int): The number of rows to return at a time 
+        data_column (str): The data column that would be modified
+
+    Yields:
+        Generator[DataChunk, None, None]: Representation of the current chunk of rows
+    """
+    freq_chan = spw_table.getcol("CHAN_FREQ")
+    phase_dir = field_table.getcol("PHASE_DIR")
+
+    freq_chan = freq_chan.squeeze() * u.Hz
+    target = SkyCoord(*(phase_dir * u.rad).squeeze())
+    
+    for data_chunk_array in _get_data_chunk_from_main_table(
+        ms_table=ms_table, chunk_size=chunk_size, data_column=data_column
+    ):
+        # Transform the native arrays but attach astropy quantities
+        uvws_phase_center = data_chunk_array.uvws * u.m
+        time = Time(
+            data_chunk_array.time_centroid.squeeze() * u.s,
+            format="mjd",
+            scale="utc",
+        )
+        masked_data = np.ma.masked_array(
+            data_chunk_array.data, mask=data_chunk_array.flags
+        )
+
+        yield DataChunk(
+        masked_data=masked_data,
+        freq_chan=freq_chan,
+        phase_center=target,
+        uvws_phase_center=uvws_phase_center,
+        time=time,
+        ant_1=data_chunk_array.ant_1,
+        ant_2=data_chunk_array.ant_2,
+    )
+
 
 
 def _get_baseline_data(
@@ -224,15 +304,15 @@ class DelayTime:
     """The delay values corresponding to the delay time data."""
 
 
-def data_to_delay_time(baseline_data: BaselineData) -> DelayTime:
+def data_to_delay_time(data: BaselineData | DataChunkArray) -> DelayTime:
     logger.info("Converting freq-time to delay-time")
     delay_time = np.fft.fftshift(
-        np.fft.fft(baseline_data.masked_data.filled(0 + 0j), axis=1), axes=1
+        np.fft.fft(data.masked_data.filled(0 + 0j), axis=1), axes=1
     )
     delay = np.fft.fftshift(
         np.fft.fftfreq(
-            n=len(baseline_data.freq_chan),
-            d=np.diff(baseline_data.freq_chan).mean(),
+            n=len(data.freq_chan),
+            d=np.diff(data.freq_chan).mean(),
         ).decompose()
     )
     return DelayTime(
@@ -383,12 +463,12 @@ def plot_baseline_data(
         fig.savefig(output_path)
 
 
-def _tukey_tractor_baseline(
-    baseline_data: BaselineData,
+def _tukey_tractor(
+    data_chunk: DataChunkArray,
     tukey_tractor_options: TukeyTractorOptions,
 ) -> None:
 
-    delay_time = data_to_delay_time(baseline_data=baseline_data)
+    delay_time = data_to_delay_time(data=data_chunk)
 
     taper = tukey_taper(
         x=delay_time.delay,
@@ -404,31 +484,13 @@ def _tukey_tractor_baseline(
     tapered_delay_time = delay_time
     tapered_delay_time.delay_time = tapered_delay_time_data
 
-    tapered_baseline_data = delay_time_to_data(
+    tapered_data = delay_time_to_data(
         delay_time=tapered_delay_time,
-        original_baseline_data=baseline_data,
+        original_baseline_data=data_chunk,
     )
-    if not tukey_tractor_options.dry_run:
-        write_output_column(
-            ms_path=tukey_tractor_options.ms_path,
-            output_column=tukey_tractor_options.output_column,
-            baseline_data=tapered_baseline_data,
-        )
-    else:
-        logger.info(
-            f"Dry run: would write {tukey_tractor_options.output_column} for baseline {baseline_data.ant_1} {baseline_data.ant_2}"
-        )
+    
 
-    if tukey_tractor_options.make_plots:
-        output_dir = tukey_tractor_options.ms_path.parent / "plots"
-        output_dir.mkdir(exist_ok=True)
-        plot_baseline_data(
-            baseline_data=tapered_baseline_data,
-            output_dir=output_dir,
-            suffix="_tukey_tapered",
-        )
-        logger.info(f"Plots saved to {output_dir}")
-
+    
 @dataclass
 class TukeyTractorOptions:
     ms_path: Path
@@ -460,8 +522,14 @@ def dumb_tukey_tractor(
     #         overwrite=tukey_tractor_options.overwrite,
     #     )
 
-    for data_chunk in _get_data_chunk_from_main_table(ms_table=main_table, chunk_size=tukey_tractor_options.chunk_size):
-        _tukey_tractor_baseline(
+    for data_chunk in get_data_chunks(
+        ms_table=main_table,
+        spw_table=spw_table,
+        field_table=field_table, 
+        chunk_size=tukey_tractor_options.chunk_size,
+        data_column=tukey_tractor_options.data_column
+    ):
+        _tukey_tractor(
                 baseline_table=data_chunk,
                 tukey_tractor_options=tukey_tractor_options,
             )
@@ -524,7 +592,7 @@ def plot_tractor_baseline(
         output_path = output_dir / f"tractor_baseline_{ant_1}_{ant_2}.png"
         fig.savefig(output_path)
 
-async def tractor_baseline(
+def tractor_baseline(
     ant_1: int,
     ant_2: int,
     baselines: Baselines,
@@ -565,36 +633,7 @@ async def tractor_baseline(
             output_dir=output_dir,
         )
         logger.info(f"Plots saved to {output_dir}")
-
-def tractor(
-        options: TractorOptions,
-) -> None:
-    baselines = get_baselines_from_ms(options.ms_path)
-    antennas_for_baselines = baselines.b_map.keys()
-    hour_angles_object = make_hour_angles_for_ms(
-        ms_path=options.ms_path,
-        position=options.object,
-    )
-    uvws_object = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_object)
-
-    if not options.dry_run:
-        add_output_column(
-            ms_path=options.ms_path,
-            output_column=options.output_column,
-            data_column=options.data_column,
-            overwrite=options.overwrite,
-        )
-
-    for ant_1, ant_2 in antennas_for_baselines:
-        b_idx = baselines.b_map[(ant_1, ant_2)]
-        tractor_baseline(
-            ant_1=ant_1,
-            ant_2=ant_2,
-            baselines=baselines,
-            uvws_object_baseline=uvws_object.uvws[:, b_idx],
-            options=options,
-        )
-        
+    
 
 
 def get_parser() -> ArgumentParser:
