@@ -1,25 +1,58 @@
 from __future__ import annotations
 
 from argparse import ArgumentParser
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
 import astropy.units as u
 import numpy as np
-from numpy.typing import NDArray
 from astropy.coordinates import (
     SkyCoord,
 )
-from astropy.constants import c as speed_of_light
 from astropy.time import Time
 from casacore.tables import makecoldesc, table, taql
+from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
-from jolly_roger.baselines import Baselines, get_baselines_from_ms
-from jolly_roger.hour_angles import make_hour_angles_for_ms
 from jolly_roger.logging import logger
-from jolly_roger.uvws import xyz_to_uvw
+
+
+@dataclass(frozen=True)
+class OpenMSTables:
+    """Open MS table references"""
+
+    main_table: table
+    """The main MS table"""
+    spw_table: table
+    """The spectral window table"""
+    field_table: table
+    """The field table"""
+    ms_path: Path
+    """The path to the MS used to open tables"""
+
+
+def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
+    """Open up the set of MS table and sub-tables necessary for tractoring.
+
+    Args:
+        ms_path (Path): The path to the measurement set
+        read_only (bool, optional): Whether to open in a read-only mode. Defaults to True.
+
+    Returns:
+        OpenMSTables: Set of open table references
+    """
+    main_table = table(str(ms_path), ack=False, readonly=read_only)
+    spw_table = table(str(ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=read_only)
+    field_table = table(str(ms_path / "FIELD"), ack=False, readonly=read_only)
+
+    return OpenMSTables(
+        main_table=main_table,
+        spw_table=spw_table,
+        field_table=field_table,
+        ms_path=ms_path,
+    )
 
 
 def tukey_taper(
@@ -67,6 +100,7 @@ class BaselineData:
     ant_2: int
     """The second antenna in the baseline."""
 
+
 @dataclass
 class BaselineArrays:
     data: NDArray[np.complexfloating]
@@ -74,9 +108,11 @@ class BaselineArrays:
     uvws: NDArray[np.floating]
     time_centroid: NDArray[np.floating]
 
+
 @dataclass
 class DataChunkArray:
     """Container for a chunk of data"""
+
     data: NDArray[np.complexfloating]
     flags: NDArray[np.bool_]
     uvws: NDArray[np.floating]
@@ -85,6 +121,7 @@ class DataChunkArray:
     ant_2: NDArray[np.int64]
     row_start: int
     chunk_size: int
+
 
 @dataclass
 class DataChunk:
@@ -113,11 +150,11 @@ class DataChunk:
 
 
 def _list_to_array(
-    list_of_rows: list[dict[str, Any]],
-    key: str
+    list_of_rows: list[dict[str, Any]], key: str
 ) -> np.typing.NDArray[Any]:
     """Helper to make a simple numpy object from list of items"""
     return np.array([row[key] for row in list_of_rows])
+
 
 def _get_data_chunk_from_main_table(
     ms_table: table,
@@ -137,70 +174,67 @@ def _get_data_chunk_from_main_table(
     Yields:
         Generator[DataChunkArray, None, None]: A segment of rows and columns
     """
-    
+
     table_length = len(ms_table)
-    logger.info(f"Length of open table: {table_length} rows")
-    
+    logger.debug(f"Length of open table: {table_length} rows")
+
     lower_row = 0
     upper_row = chunk_size
-    
+
     while lower_row < table_length:
-        
         rows: list[dict[str, Any]] = ms_table[lower_row:upper_row]
-        
+
         data = _list_to_array(list_of_rows=rows, key=data_column)
         flags = _list_to_array(list_of_rows=rows, key="FLAG")
         uvws = _list_to_array(list_of_rows=rows, key="UVW")
         time_centroid = _list_to_array(list_of_rows=rows, key="TIME_CENTROID")
         ant_1 = _list_to_array(list_of_rows=rows, key="ANTENNA1")
         ant_2 = _list_to_array(list_of_rows=rows, key="ANTENNA2")
-        
+
         yield DataChunkArray(
-            data=data, 
-            flags=flags, 
-            uvws=uvws, 
-            time_centroid=time_centroid, 
-            ant_1=ant_1, 
-            ant_2=ant_2, 
-            row_start=lower_row, 
-            chunk_size=chunk_size
+            data=data,
+            flags=flags,
+            uvws=uvws,
+            time_centroid=time_centroid,
+            ant_1=ant_1,
+            ant_2=ant_2,
+            row_start=lower_row,
+            chunk_size=chunk_size,
         )
-        
+
         lower_row += chunk_size
         upper_row += chunk_size
-    
+
 
 def get_data_chunks(
-    ms_table: table,
-    spw_table: table,
-    field_table: table,
+    open_ms_tables: OpenMSTables,
     chunk_size: int,
     data_column: str,
 ) -> Generator[DataChunk, None, None]:
     """Yield a collection of rows with appropriate units
     attached to the quantities. These quantities are not
-    the same data encoded in the measurement set, e.g. 
-    masked array has been formed, astropy units have 
+    the same data encoded in the measurement set, e.g.
+    masked array has been formed, astropy units have
     been attached.
 
     Args:
-        ms_table (table): The main table of the measurement set to iterate over
-        spw_table (table): The table describing the spectral windows
-        field_table (table): The table describing the fields
-        chunk_size (int): The number of rows to return at a time 
+        open_ms_tables (OpenMSTables): References to open tables from the measurement set
+        chunk_size (int): The number of rows to return at a time
         data_column (str): The data column that would be modified
 
     Yields:
         Generator[DataChunk, None, None]: Representation of the current chunk of rows
     """
-    freq_chan = spw_table.getcol("CHAN_FREQ")
-    phase_dir = field_table.getcol("PHASE_DIR")
+    freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ")
+    phase_dir = open_ms_tables.field_table.getcol("PHASE_DIR")
 
     freq_chan = freq_chan.squeeze() * u.Hz
     target = SkyCoord(*(phase_dir * u.rad).squeeze())
-    
+
     for data_chunk_array in _get_data_chunk_from_main_table(
-        ms_table=ms_table, chunk_size=chunk_size, data_column=data_column
+        ms_table=open_ms_tables.main_table,
+        chunk_size=chunk_size,
+        data_column=data_column,
     ):
         # Transform the native arrays but attach astropy quantities
         uvws_phase_center = data_chunk_array.uvws * u.m
@@ -226,7 +260,6 @@ def get_data_chunks(
         )
 
 
-
 def _get_baseline_data(
     ms_tab: table,
     ant_1: int,
@@ -249,26 +282,23 @@ def _get_baseline_data(
         uvws=uvws,
         time_centroid=time_centroid,
     )
-    
+
 
 def get_baseline_data(
-    ms_tab: table,
-    spw_tab: table,
-    field_tab: table,
+    open_ms_tables: OpenMSTables,
     ant_1: int,
     ant_2: int,
     data_column: str = "DATA",
 ) -> BaselineData:
-
     logger.info(f"Getting baseline {ant_1} {ant_2}")
 
-    freq_chan = spw_tab.getcol("CHAN_FREQ")
-    phase_dir = field_tab.getcol("PHASE_DIR")
+    freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ")
+    phase_dir = open_ms_tables.field_table.getcol("PHASE_DIR")
 
     logger.debug(f"Processing {ant_1=} {ant_2=}")
 
     baseline_data = _get_baseline_data(
-        ms_tab=ms_tab,
+        ms_tab=open_ms_tables.main_table,
         ant_1=ant_1,
         ant_2=ant_2,
         data_column=data_column,
@@ -306,8 +336,8 @@ class DelayTime:
     """The delay values corresponding to the delay time data."""
 
 
-def data_to_delay_time(data: BaselineData | DataChunkArray) -> DelayTime:
-    logger.info("Converting freq-time to delay-time")
+def data_to_delay_time(data: BaselineData | DataChunk) -> DelayTime:
+    logger.debug("Converting freq-time to delay-time")
     delay_time = np.fft.fftshift(
         np.fft.fft(data.masked_data.filled(0 + 0j), axis=1), axes=1
     )
@@ -328,7 +358,7 @@ def delay_time_to_data(
     original_data: DataChunk,
 ) -> DataChunk:
     """Convert delay time data back to the original data format."""
-    logger.info("Converting delay-time to freq-time")
+    logger.debug("Converting delay-time to freq-time")
     new_data = np.fft.ifft(
         np.fft.ifftshift(delay_time.delay_time, axes=1),
         axis=1,
@@ -360,8 +390,10 @@ def data_to_delay_rate(
     """Convert baseline data to delay rate."""
     # This only makes sense when running on time data. Hence
     # asserting the type of BaelineData
-    
-    assert isinstance(baseline_data, BaselineData), f"baseline_data is type={type(baseline_data)}, but needs to be BaselineData"
+
+    assert isinstance(baseline_data, BaselineData), (
+        f"baseline_data is type={type(baseline_data)}, but needs to be BaselineData"
+    )
 
     logger.info("Converting freq-time to delay-rate")
     delay_rate = np.fft.fftshift(np.fft.fft2(baseline_data.masked_data.filled(0 + 0j)))
@@ -391,7 +423,6 @@ def add_output_column(
     output_column: str = "CORRECTED_DATA",
     overwrite: bool = False,
 ) -> None:
-
     colnames = tab.colnames()
     if output_column in colnames:
         if not overwrite:
@@ -419,7 +450,7 @@ def write_output_column(
     """Write the output column to the measurement set."""
     ant_1 = baseline_data.ant_1
     ant_2 = baseline_data.ant_2
-    _ = ant_1, ant_2 
+    _ = ant_1, ant_2
     logger.info(f"Writing {output_column=} for baseline {ant_1} {ant_2}")
     with table(str(ms_path), readonly=False) as tab:
         colnames = tab.colnames()
@@ -446,13 +477,13 @@ def plot_baseline_data(
 ) -> None:
     import matplotlib.pyplot as plt
     from astropy.visualization import quantity_support, time_support
+
     with quantity_support(), time_support():
         data_masked = baseline_data.masked_data
         data_xx = data_masked[..., 0]
         data_yy = data_masked[..., -1]
         data_stokesi = (data_xx + data_yy) / 2
         amp_stokesi = np.abs(data_stokesi)
-
 
         fig, ax = plt.subplots()
         im = ax.pcolormesh(
@@ -465,15 +496,17 @@ def plot_baseline_data(
             ylabel=f"Frequency / {baseline_data.freq_chan.unit:latex_inline}",
             title=f"Ant {baseline_data.ant_1} - Ant {baseline_data.ant_2}",
         )
-        output_path = output_dir / f"baseline_data_{baseline_data.ant_1}_{baseline_data.ant_2}{suffix}.png"
+        output_path = (
+            output_dir
+            / f"baseline_data_{baseline_data.ant_1}_{baseline_data.ant_2}{suffix}.png"
+        )
         fig.savefig(output_path)
 
 
 def _tukey_tractor(
-    data_chunk: DataChunkArray,
+    data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
 ) -> NDArray[np.complex128]:
-
     delay_time = data_to_delay_time(data=data_chunk)
 
     taper = tukey_taper(
@@ -484,9 +517,7 @@ def _tukey_tractor(
 
     # Delay-time is a 3D array: (time, delay, pol)
     # Taper is 1D: (delay,)
-    tapered_delay_time_data = (
-        delay_time.delay_time * taper[np.newaxis, :, np.newaxis]
-    )
+    tapered_delay_time_data = delay_time.delay_time * taper[np.newaxis, :, np.newaxis]
     tapered_delay_time = delay_time
     tapered_delay_time.delay_time = tapered_delay_time_data
 
@@ -494,10 +525,11 @@ def _tukey_tractor(
         delay_time=tapered_delay_time,
         original_data=data_chunk,
     )
-    logger.debug(f"{tapered_data.shape=} {tapered_data.dtype}")
-    
+    logger.debug(f"{tapered_data.masked_data.shape=} {tapered_data.masked_data.dtype}")
+
     return tapered_data
-    
+
+
 @dataclass
 class TukeyTractorOptions:
     ms_path: Path
@@ -514,51 +546,84 @@ class TukeyTractorOptions:
 def dumb_tukey_tractor(
     tukey_tractor_options: TukeyTractorOptions,
 ) -> None:
-    baselines = get_baselines_from_ms(tukey_tractor_options.ms_path)
-    antennas_for_baselines = baselines.b_map.keys()
-
-    main_table = table(str(tukey_tractor_options.ms_path))
-    spw_table = table(str(tukey_tractor_options.ms_path / "SPECTRAL_WINDOW"))
-    field_table = table(str(tukey_tractor_options.ms_path / "FIELD"))
+    open_ms_tables = get_open_ms_tables(
+        ms_path=tukey_tractor_options.ms_path, read_only=False
+    )
 
     if not tukey_tractor_options.dry_run:
         add_output_column(
-            tab=main_table,
+            tab=open_ms_tables.main_table,
             output_column=tukey_tractor_options.output_column,
             data_column=tukey_tractor_options.data_column,
             overwrite=tukey_tractor_options.overwrite,
         )
 
-    with tqdm(total=len(main_table)) as pbar:
-        
+    with tqdm(total=len(open_ms_tables.main_table)) as pbar:
         for data_chunk in get_data_chunks(
-            ms_table=main_table,
-            spw_table=spw_table,
-            field_table=field_table, 
+            open_ms_tables=open_ms_tables,
             chunk_size=tukey_tractor_options.chunk_size,
-            data_column=tukey_tractor_options.data_column
+            data_column=tukey_tractor_options.data_column,
         ):
             taper_data_chunk: DataChunk = _tukey_tractor(
-                    data_chunk=data_chunk,
-                    tukey_tractor_options=tukey_tractor_options,
-                )
-            
+                data_chunk=data_chunk,
+                tukey_tractor_options=tukey_tractor_options,
+            )
+
             pbar.update(len(taper_data_chunk.masked_data))
-            
+
             if tukey_tractor_options.dry_run:
                 # Do not apply the data
                 continue
-            
-            main_table.putcol(
+
+            open_ms_tables.main_table.putcol(
                 columnname=tukey_tractor_options.output_column,
                 value=taper_data_chunk.masked_data,
                 startrow=taper_data_chunk.row_start,
-                nrow=taper_data_chunk.chunk_size
+                nrow=taper_data_chunk.chunk_size,
             )
+
+    if tukey_tractor_options.make_plots and not tukey_tractor_options.dry_run:
+        output_dir = tukey_tractor_options.ms_path.parent / "plots"
+        output_dir.mkdir(exist_ok=True, parents=True)
+        for i in range(10):
+            logger.info(f"Plotting baseline={i + 1}")
+            baseline_data = get_baseline_data(
+                open_ms_tables=open_ms_tables,
+                ant_1=0,
+                ant_2=i + 1,
+                data_column=tukey_tractor_options.data_column,
+            )
+            plot_baseline_data(
+                baseline_data=baseline_data,
+                output_dir=output_dir,
+                suffix="_original",
+            )
+            baseline_data = get_baseline_data(
+                open_ms_tables=open_ms_tables,
+                ant_1=0,
+                ant_2=i + 1,
+                data_column=tukey_tractor_options.output_column,
+            )
+            plot_baseline_data(
+                baseline_data=baseline_data,
+                output_dir=output_dir,
+                suffix="_post",
+            )
+
+            # plot_tractor_baseline(
+            #     baseline_data=baseline_data,
+            #     delay_time=delay_time,
+            #     delay_object=delay_object,
+            #     delay_phase_center=delay_phase_center,
+            #     output_dir=output_dir,
+            # )
+            logger.info(f"Plots saved to {output_dir}")
+
 
 @dataclass
 class TractorOptions:
     """Options for the Jolly Roger Tractor."""
+
     ms_path: Path
     """Path to the measurement set to process."""
     object: str = "sun"
@@ -572,17 +637,18 @@ class TractorOptions:
     make_plots: bool = False
     """If set, the tractor will make plots of the results."""
 
+
 def plot_tractor_baseline(
-        baseline_data: BaselineData,
-        delay_time: DelayTime,
-        delay_object: u.Quantity,
-        delay_phase_center: u.Quantity,
-        output_dir: Path,
-):
+    baseline_data: BaselineData,
+    delay_time: DelayTime,
+    delay_object: u.Quantity,
+    delay_phase_center: u.Quantity,
+    output_dir: Path,
+) -> Path:
     import matplotlib.pyplot as plt
     from astropy.visualization import quantity_support, time_support
-    with quantity_support(), time_support():
 
+    with quantity_support(), time_support():
         ant_1 = baseline_data.ant_1
         ant_2 = baseline_data.ant_2
         time = baseline_data.time
@@ -593,10 +659,7 @@ def plot_tractor_baseline(
 
         fig, ax = plt.subplots()
         im = ax.pcolormesh(
-            time,
-            delay,
-            np.abs(delay_time_stokesi).T,
-            norm=plt.cm.colors.LogNorm()
+            time, delay, np.abs(delay_time_stokesi).T, norm=plt.cm.colors.LogNorm()
         )
         ax.set(
             ylabel=f"Delay / {delay.unit:latex_inline}",
@@ -614,48 +677,53 @@ def plot_tractor_baseline(
         output_path = output_dir / f"tractor_baseline_{ant_1}_{ant_2}.png"
         fig.savefig(output_path)
 
-def tractor_baseline(
-    ant_1: int,
-    ant_2: int,
-    baselines: Baselines,
-    uvws_object_baseline: u.Quantity,
-    options: TractorOptions,
-) -> None:
-    baseline_data = get_baseline_data(
-        baselines=baselines,
-        ant_1=ant_1,
-        ant_2=ant_2,
-        data_column=options.data_column,
-    )
+        return output_path
 
-    delay_time = data_to_delay_time(baseline_data=baseline_data)
 
-    _, _, w_coords_object = uvws_object_baseline
-    _, _, w_coords_phase_center = baseline_data.uvws_phase_center
+# def tractor_baseline(
+#     ant_1: int,
+#     ant_2: int,
+#     baselines: Baselines,
+#     uvws_object_baseline: u.Quantity,
+#     options: TractorOptions,
+# ) -> None:
+#     open_ms_tables = get_open_ms_tables()
+#     baseline_data = get_baseline_data(
+#         baselines=baselines,
+#         ant_1=ant_1,
+#         ant_2=ant_2,
+#         data_column=options.data_column,
+#     )
 
-    # Subtract 
-    delay_object = ((w_coords_object - w_coords_phase_center) / speed_of_light).decompose()
-    delay_phase_center = (
-        (w_coords_phase_center - w_coords_phase_center) / speed_of_light
-    ).decompose()
+#     delay_time = data_to_delay_time(data=baseline_data)
 
-    if options.make_plots:
-        output_dir = options.ms_path.parent / "plots"
-        output_dir.mkdir(exist_ok=True)
-        plot_baseline_data(
-            baseline_data=baseline_data,
-            output_dir=output_dir,
-            suffix="_original",
-        )
-        plot_tractor_baseline(
-            baseline_data=baseline_data,
-            delay_time=delay_time,
-            delay_object=delay_object,
-            delay_phase_center=delay_phase_center,
-            output_dir=output_dir,
-        )
-        logger.info(f"Plots saved to {output_dir}")
-    
+#     _, _, w_coords_object = uvws_object_baseline
+#     _, _, w_coords_phase_center = baseline_data.uvws_phase_center
+
+#     # Subtract
+#     delay_object = (
+#         (w_coords_object - w_coords_phase_center) / speed_of_light
+#     ).decompose()
+#     delay_phase_center = (
+#         (w_coords_phase_center - w_coords_phase_center) / speed_of_light
+#     ).decompose()
+
+#     if options.make_plots:
+#         output_dir = options.ms_path.parent / "plots"
+#         output_dir.mkdir(exist_ok=True, parents=True)
+#         plot_baseline_data(
+#             baseline_data=baseline_data,
+#             output_dir=output_dir,
+#             suffix="_original",
+#         )
+#         plot_tractor_baseline(
+#             baseline_data=baseline_data,
+#             delay_time=delay_time,
+#             delay_object=delay_object,
+#             delay_phase_center=delay_phase_center,
+#             output_dir=output_dir,
+#         )
+#         logger.info(f"Plots saved to {output_dir}")
 
 
 def get_parser() -> ArgumentParser:
@@ -714,9 +782,15 @@ def get_parser() -> ArgumentParser:
         action="store_true",
         help="If set, the Tukey tractor will overwrite the output column if it already exists",
     )
-
+    tukey_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10009,
+        help="The number of rows to process in one chunk. Larger numbers require more memory but fewer interactions with I/O.",
+    )
 
     return parser
+
 
 def cli() -> None:
     """Command line interface for the Jolly Roger Tractor."""
@@ -733,10 +807,12 @@ def cli() -> None:
             dry_run=args.dry_run,
             make_plots=args.make_plots,
             overwrite=args.overwrite,
+            chunk_size=args.chunk_size,
         )
         dumb_tukey_tractor(tukey_tractor_options=tukey_tractor_options)
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     cli()
