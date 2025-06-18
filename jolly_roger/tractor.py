@@ -529,7 +529,7 @@ def plot_baseline_comparison_data(
         )
         before_max_amp = np.max(before_amp_stokesi)
 
-        fig, (ax1, ax2) = plt.subplots(1, 2)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
         im = ax1.pcolormesh(
             before_baseline_data.time,
             before_baseline_data.freq_chan,
@@ -538,7 +538,7 @@ def plot_baseline_comparison_data(
         )
         ax1.set(
             ylabel=f"Frequency / {before_baseline_data.freq_chan.unit:latex_inline}",
-            title=f"Before Ant {before_baseline_data.ant_1} - Ant {before_baseline_data.ant_2}",
+            title="Before",
         )
         ax2.pcolormesh(
             after_baseline_data.time,
@@ -548,13 +548,16 @@ def plot_baseline_comparison_data(
         )
         ax2.set(
             ylabel=f"Frequency / {after_baseline_data.freq_chan.unit:latex_inline}",
-            title=f"After Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}",
+            title="After",
         )
         output_path = (
             output_dir
             / f"baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}{suffix}.png"
         )
         fig.colorbar(im, ax=ax2, label="Stokes I Amplitude / Jy")
+        fig.suptitle(
+            f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}"
+        )
         fig.tight_layout()
         fig.savefig(output_path)
 
@@ -635,6 +638,9 @@ class TukeyTractorOptions:
 def dumb_tukey_tractor(
     tukey_tractor_options: TukeyTractorOptions,
 ) -> None:
+    logger.info("jolly-roger")
+    logger.info(f"Options: {tukey_tractor_options}")
+
     open_ms_tables = get_open_ms_tables(
         ms_path=tukey_tractor_options.ms_path, read_only=False
     )
