@@ -567,28 +567,28 @@ def plot_baseline_comparison_data(
         before_delays = data_to_delay_time(data=before_baseline_data)
         after_delays = data_to_delay_time(data=after_baseline_data)
 
-        before_delaysi = np.abs(
+        before_delays_i = np.abs(
             (before_delays.delay_time[:, :, 0] + before_delays.delay_time[:, :, 3]) / 2
         )
-        after_delaysi = np.abs(
+        after_delays_i = np.abs(
             (after_delays.delay_time[:, :, 0] + after_delays.delay_time[:, :, 3]) / 2
         )
 
         delay_norm = ImageNormalize(
-            after_delaysi, interval=ZScaleInterval(), stretch=SqrtStretch()
+            after_delays_i, interval=ZScaleInterval(), stretch=SqrtStretch()
         )
 
         im = ax3.pcolormesh(
             before_baseline_data.time,
             before_delays.delay,
-            before_delaysi.T,
+            before_delays_i.T,
             norm=delay_norm,
         )
         ax3.set(ylabel="Delay / s", title="Before")
         ax4.pcolormesh(
             after_baseline_data.time,
             after_delays.delay,
-            after_delaysi.T,
+            after_delays_i.T,
             norm=delay_norm,
         )
         ax4.set(ylabel="Delay / s", title="After")
