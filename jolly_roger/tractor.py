@@ -16,6 +16,7 @@ from casacore.tables import makecoldesc, table, taql
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
+from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
 from jolly_roger.logging import logger
 
 
@@ -326,97 +327,6 @@ def get_baseline_data(
     )
 
 
-@dataclass
-class DelayTime:
-    """Container for delay time and associated metadata."""
-
-    delay_time: np.typing.NDArray[np.complexfloating]
-    """ The delay vs time data. shape=(time, delay, pol)"""
-    delay: u.Quantity
-    """The delay values corresponding to the delay time data."""
-
-
-def data_to_delay_time(data: BaselineData | DataChunk) -> DelayTime:
-    logger.debug("Converting freq-time to delay-time")
-    delay_time = np.fft.fftshift(
-        np.fft.fft(data.masked_data.filled(0 + 0j), axis=1), axes=1
-    )
-    delay = np.fft.fftshift(
-        np.fft.fftfreq(
-            n=len(data.freq_chan),
-            d=np.diff(data.freq_chan).mean(),
-        ).decompose()
-    )
-    return DelayTime(
-        delay_time=delay_time,
-        delay=delay,
-    )
-
-
-def delay_time_to_data(
-    delay_time: DelayTime,
-    original_data: DataChunk,
-) -> DataChunk:
-    """Convert delay time data back to the original data format."""
-    logger.debug("Converting delay-time to freq-time")
-    new_data = np.fft.ifft(
-        np.fft.ifftshift(delay_time.delay_time, axes=1),
-        axis=1,
-    )
-    new_data_masked = np.ma.masked_array(
-        new_data,
-        mask=original_data.masked_data.mask,
-    )
-    new_data = original_data
-    new_data.masked_data = new_data_masked
-    return new_data
-
-
-@dataclass
-class DelayRate:
-    """Container for delay rate and associated metadata."""
-
-    delay_rate: np.ndarray
-    """The delay rate vs time data. shape=(rate, delay, pol)"""
-    delay: u.Quantity
-    """The delay values corresponding to the delay rate data."""
-    rate: u.Quantity
-    """The delay rate values corresponding to the delay rate data."""
-
-
-def data_to_delay_rate(
-    baseline_data: BaselineData,
-) -> DelayRate:
-    """Convert baseline data to delay rate."""
-    # This only makes sense when running on time data. Hence
-    # asserting the type of BaelineData
-
-    assert isinstance(baseline_data, BaselineData), (
-        f"baseline_data is type={type(baseline_data)}, but needs to be BaselineData"
-    )
-
-    logger.info("Converting freq-time to delay-rate")
-    delay_rate = np.fft.fftshift(np.fft.fft2(baseline_data.masked_data.filled(0 + 0j)))
-    delay = np.fft.fftshift(
-        np.fft.fftfreq(
-            n=len(baseline_data.freq_chan),
-            d=np.diff(baseline_data.freq_chan).mean(),
-        ).decompose()
-    )
-    rate = np.fft.fftshift(
-        np.fft.fftfreq(
-            n=len(baseline_data.time),
-            d=np.diff(baseline_data.time.mjd * u.day).mean(),
-        ).decompose()
-    )
-
-    return DelayRate(
-        delay_rate=delay_rate,
-        delay=delay,
-        rate=rate,
-    )
-
-
 def add_output_column(
     tab: table,
     data_column: str = "DATA",
@@ -513,6 +423,8 @@ def plot_baseline_comparison_data(
     import matplotlib.pyplot as plt
     from astropy.visualization import (
         ImageNormalize,
+        LogStretch,
+        MinMaxInterval,
         SqrtStretch,
         ZScaleInterval,
         quantity_support,
@@ -568,14 +480,14 @@ def plot_baseline_comparison_data(
         after_delays = data_to_delay_time(data=after_baseline_data)
 
         before_delays_i = np.abs(
-            (before_delays.delay_time[:, :, 0] + before_delays.delay_time[:, :, 3]) / 2
+            (before_delays.delay_time[:, :, 0] + before_delays.delay_time[:, :, -1]) / 2
         )
         after_delays_i = np.abs(
-            (after_delays.delay_time[:, :, 0] + after_delays.delay_time[:, :, 3]) / 2
+            (after_delays.delay_time[:, :, 0] + after_delays.delay_time[:, :, -1]) / 2
         )
 
         delay_norm = ImageNormalize(
-            after_delays_i, interval=ZScaleInterval(), stretch=SqrtStretch()
+            before_delays_i, interval=MinMaxInterval(), stretch=LogStretch()
         )
 
         im = ax3.pcolormesh(
@@ -652,7 +564,15 @@ def _tukey_tractor(
 
     # Delay-time is a 3D array: (time, delay, pol)
     # Taper is 1D: (delay,)
-    tapered_delay_time_data = delay_time.delay_time * taper[np.newaxis, :, np.newaxis]
+    tapered_delay_time_data_real = (
+        delay_time.delay_time.real * taper[np.newaxis, :, np.newaxis]
+    )
+    tapered_delay_time_data_imag = (
+        delay_time.delay_time.imag * taper[np.newaxis, :, np.newaxis]
+    )
+    tapered_delay_time_data = (
+        tapered_delay_time_data_real + 1j * tapered_delay_time_data_imag
+    )
     tapered_delay_time = delay_time
     tapered_delay_time.delay_time = tapered_delay_time_data
 
