@@ -51,9 +51,9 @@ def xyz_to_uvw(
     declination = hour_angles.position.dec
 
     # This is necessary for broadcastung in the matrix to work.
-    # Should the position be a solar object like the sub its position
+    # Should the position be a solar object like the sun its position
     # will change throughout the observation. but it will have
-    ## been created consistently with the hour angles. If it is fixed
+    # been created consistently with the hour angles. If it is fixed
     # then the use of the numpy ones like will ensure the same shape.
     declination = (np.ones(len(ha)) * declination).decompose()
 

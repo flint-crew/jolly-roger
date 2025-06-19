@@ -438,8 +438,8 @@ def add_output_column(
     desc["name"] = output_column
     tab.addcols(desc)
     tab.flush()
-    logger.info(f"Copying {data_column=} to {output_column=}")
-    taql(f"UPDATE $tab SET {output_column}={data_column}")
+    # logger.info(f"Copying {data_column=} to {output_column=}")
+    # taql(f"UPDATE $tab SET {output_column}={data_column}")
 
 
 def write_output_column(
@@ -539,7 +539,7 @@ def plot_baseline_comparison_data(
             after_amp_stokesi, interval=ZScaleInterval(), stretch=SqrtStretch()
         )
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(10, 10))
         im = ax1.pcolormesh(
             before_baseline_data.time,
             before_baseline_data.freq_chan,
@@ -560,11 +560,44 @@ def plot_baseline_comparison_data(
             ylabel=f"Frequency / {after_baseline_data.freq_chan.unit:latex_inline}",
             title="After",
         )
+        fig.colorbar(im, ax=ax2, label="Stokes I Amplitude / Jy")
+
+        # TODO: Move these delay calculations outside of the plotting function
+        # And here we calculate the delay information
+        before_delays = data_to_delay_time(data=before_baseline_data)
+        after_delays = data_to_delay_time(data=after_baseline_data)
+
+        before_delaysi = np.abs(
+            (before_delays.delay_time[:, :, 0] + before_delays.delay_time[:, :, 3]) / 2
+        )
+        after_delaysi = np.abs(
+            (after_delays.delay_time[:, :, 0] + after_delays.delay_time[:, :, 3]) / 2
+        )
+
+        delay_norm = ImageNormalize(
+            after_delaysi, interval=ZScaleInterval(), stretch=SqrtStretch()
+        )
+
+        im = ax3.pcolormesh(
+            before_baseline_data.time,
+            before_delays.delay,
+            before_delaysi.T,
+            norm=delay_norm,
+        )
+        ax3.set(ylabel="Delay / s", title="Before")
+        ax4.pcolormesh(
+            after_baseline_data.time,
+            after_delays.delay,
+            after_delaysi.T,
+            norm=delay_norm,
+        )
+        ax4.set(ylabel="Delay / s", title="After")
+        fig.colorbar(im, ax=ax4, label="Stokes I Amplitude / Jy")
+
         output_path = (
             output_dir
             / f"baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}{suffix}.png"
         )
-        fig.colorbar(im, ax=ax2, label="Stokes I Amplitude / Jy")
         fig.suptitle(
             f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}"
         )
@@ -694,13 +727,6 @@ def dumb_tukey_tractor(
             output_column=tukey_tractor_options.output_column,
         )
 
-        # plot_tractor_baseline(
-        #     baseline_data=baseline_data,
-        #     delay_time=delay_time,
-        #     delay_object=delay_object,
-        #     delay_phase_center=delay_phase_center,
-        #     output_dir=output_dir,
-        # )
         logger.info(f"Made {len(plot_paths)} output plots")
 
 
