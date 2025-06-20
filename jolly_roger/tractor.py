@@ -68,10 +68,12 @@ def tukey_taper(
     tukey_x_offset: NDArray[np.floating] | None = None,
 ) -> np.ndarray:
     x_freq = np.linspace(-np.pi, np.pi, len(x))
+
+    if tukey_x_offset is not None:
+        x_freq = x_freq[:, None] * tukey_x_offset[None, :]
+
     taper = np.ones_like(x_freq)
-
-    _ = tukey_x_offset
-
+    logger.info(f"{x_freq.shape=} {type(x_freq)=}")
     # Fully zero region
     taper[np.abs(x_freq) > outer_width] = 0
 
@@ -464,6 +466,33 @@ def make_plot_results(
     return output_paths
 
 
+def _get_baseline_time_indicies(
+    w_delays: WDelays, data_chunk: DataChunk
+) -> tuple[NDArray[int], NDArray[int]]:
+    """Extract the mappings into the data array"""
+
+    # When computing uvws we have ignored auto-correlations!
+    # TODO: Either extend the uvw calculations to include auto-correlations
+    # or ignore them during iterations. Certainly the former is the better
+    # approach.
+
+    # Again, note the auto-correlations are ignored!!! Here be pirates mate
+    baseline_idx = np.array(
+        [
+            w_delays.b_map[(int(ant_1), int(ant_2))] if ant_1 != ant_2 else 0
+            for ant_1, ant_2 in zip(  # type: ignore[call-overload]
+                data_chunk.ant_1, data_chunk.ant_2, strict=False
+            )
+        ]
+    )
+
+    time_idx = np.array(
+        [w_delays.time_map[time * u.s] for time in data_chunk.time_mjds]
+    )
+
+    return baseline_idx, time_idx
+
+
 def _tukey_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
@@ -487,29 +516,24 @@ def _tukey_tractor(
     Returns:
         NDArray[np.complex128]: Scaled complex visibilities
     """
-    # Look up the delay offset if requested
-    tukey_x_offset: None | NDArray[np.floating] = None
-    if w_delays is not None:
-        # When computing uvws we have ignored auto-correlations!
-        # TODO: Either extend the uvw calculations to include auto-correlations
-        # or ignore them during iterations. Certainly the former is the better
-        # approach.
-        baseline_idx = np.array(
-            [
-                w_delays.b_map[(int(ant_1), int(ant_2))] if ant_1 != ant_2 else 0
-                for ant_1, ant_2 in zip(  # type: ignore[call-overload]
-                    data_chunk.ant_1, data_chunk.ant_2, strict=False
-                )
-            ]
-        )
 
-        logger.info(w_delays.time_map.keys())
-        time_idx = np.array(
-            [w_delays.time_map[time * u.s] for time in data_chunk.time_mjds]
+    delay_time = data_to_delay_time(data=data_chunk)
+
+    # Look up the delay offset if requested
+    tukey_x_offset: u.Quantity = np.zeros_like(delay_time.delay)
+
+    if w_delays is not None:
+        baseline_idx, time_idx = _get_baseline_time_indicies(
+            w_delays=w_delays, data_chunk=data_chunk
         )
         tukey_x_offset = w_delays.w_delays[baseline_idx, time_idx]
 
-    delay_time = data_to_delay_time(data=data_chunk)
+        # need to scale the x offsert to the -pi to pi
+        # The delay should be symmetric
+        tukey_x_offset = (
+            tukey_x_offset * (delay_time.delay[0] / np.pi).decompose()
+        ).value
+        logger.info(f"{tukey_x_offset=}")
 
     taper = tukey_taper(
         x=delay_time.delay,
@@ -517,6 +541,7 @@ def _tukey_tractor(
         tukey_width=tukey_tractor_options.tukey_width,
         tukey_x_offset=tukey_x_offset,
     )
+    # taper = taper[:,:, None]
 
     # Delay-time is a 3D array: (time, delay, pol)
     # Taper is 1D: (delay,)
