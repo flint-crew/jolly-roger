@@ -157,3 +157,5 @@ Thumbs.db
 *~
 *.swp
 jolly_roger/_version.py
+subtractor_uvw.ipynb
+subtractor.ipynb
