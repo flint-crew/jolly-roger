@@ -21,7 +21,7 @@ class UVWs:
     """A small container to represent uvws"""
 
     uvws: np.ndarray
-    """The (U,V,W) coordinates"""
+    """The (U,V,W) coordinatesm shape [coord, baseline, time]"""
     hour_angles: PositionHourAngles
     """The hour angle information used to construct the UVWs"""
     baselines: Baselines

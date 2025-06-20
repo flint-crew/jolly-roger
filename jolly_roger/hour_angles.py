@@ -99,7 +99,7 @@ def _process_position(
 def make_hour_angles_for_ms(
     ms_path: Path,
     location: EarthLocation = ASKAP,
-    position: SkyCoord | str | None = None,
+    position: SkyCoord | Literal["sun"] | None = None,
     whole_day: bool = False,
 ) -> PositionHourAngles:
     """Calculate hour-angle and time quantities for a given position using time information
@@ -108,7 +108,7 @@ def make_hour_angles_for_ms(
     Args:
         ms_path (Path): Measurement set to usefor time and sky-position information
         location (EarthLocation, optional): The location to use when calculate LST. Defaults to ASKAP.
-        position (SkyCoord | str | None, optional): The sky-direction hour-angles will be calculated towards. Defaults to None.
+        position (SkyCoord | Literal["sun"] | None, optional): The sky-direction hour-angles will be calculated towards. Defaults to None.
         whole_day (bool, optional): Calaculate for a 24 hour persion starting from the first time step. Defaults to False.
 
     Returns:

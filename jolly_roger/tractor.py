@@ -8,6 +8,7 @@ from typing import Any
 
 import astropy.units as u
 import numpy as np
+from astropy.constants import c as speed_of_light
 from astropy.coordinates import (
     SkyCoord,
 )
@@ -16,9 +17,12 @@ from casacore.tables import makecoldesc, table, taql
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
-from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
+from jolly_roger.baselines import Baselines, get_baselines_from_ms
+from jolly_roger.delays import data_to_delay_time, delay_time_to_data
+from jolly_roger.hour_angles import PositionHourAngles, make_hour_angles_for_ms
 from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
+from jolly_roger.uvws import UVWs, xyz_to_uvw
 
 
 @dataclass(frozen=True)
@@ -61,9 +65,12 @@ def tukey_taper(
     x: np.typing.NDArray[np.floating],
     outer_width: float = np.pi / 4,
     tukey_width: float = np.pi / 8,
+    tukey_x_offset: NDArray[np.floating] | None = None,
 ) -> np.ndarray:
     x_freq = np.linspace(-np.pi, np.pi, len(x))
     taper = np.ones_like(x_freq)
+
+    _ = tukey_x_offset
 
     # Fully zero region
     taper[np.abs(x_freq) > outer_width] = 0
@@ -149,6 +156,8 @@ class DataChunk:
     """The UVW coordinates of the phase center of the baseline."""
     time: Time
     """The time of the observations."""
+    time_mjds: NDArray[np.floating]
+    """The raw time extracted from the measurement set in MJDs"""
     ant_1: NDArray[np.int64]
     """The first antenna in the baseline."""
     ant_2: NDArray[np.int64]
@@ -263,6 +272,7 @@ def get_data_chunks(
             phase_center=target,
             uvws_phase_center=uvws_phase_center,
             time=time,
+            time_mjds=data_chunk_array.time_centroid,
             ant_1=data_chunk_array.ant_1,
             ant_2=data_chunk_array.ant_2,
             row_start=data_chunk_array.row_start,
@@ -300,6 +310,17 @@ def get_baseline_data(
     ant_2: int,
     data_column: str = "DATA",
 ) -> BaselineData:
+    """Get data of a baseline from a measurement set
+
+    Args:
+        open_ms_tables (OpenMSTables): The measurement set to draw data from
+        ant_1 (int): The first antenna of the baseline
+        ant_2 (int): The second antenna of the baseline
+        data_column (str, optional): The data column to extract. Defaults to "DATA".
+
+    Returns:
+        BaselineData:  Extracted baseline data
+    """
     logger.info(f"Getting baseline {ant_1} {ant_2}")
 
     freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ")
@@ -446,13 +467,55 @@ def make_plot_results(
 def _tukey_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
+    w_delays: WDelays | None = None,
 ) -> NDArray[np.complex128]:
+    """Compute a tukey taper for a dataset and then apply it
+    to the dataset. Here the data corresponds to a (chan, time, pol)
+    array. Data is not necessarily a single baseline.
+
+    If a `w_delays` is provided it represents the delay (in seconds)
+    between the phase direction of the measurement set and the Sun.
+    This quantity may be derived in a number of ways, but in `jolly_roger`
+    it is based on the difference of the w-coordinated towards these
+    two directions. It should have a shape of [baselines, time]
+
+    Args:
+        data_chunk (DataChunk): The representation of the data with attached units
+        tukey_tractor_options (TukeyTractorOptions): Options for the tukey taper
+        w_delays (WDelays | None, optional): The w-derived delays to apply. If None taper is applied to large delays. Defaults to None.
+
+    Returns:
+        NDArray[np.complex128]: Scaled complex visibilities
+    """
+    # Look up the delay offset if requested
+    tukey_x_offset: None | NDArray[np.floating] = None
+    if w_delays is not None:
+        # When computing uvws we have ignored auto-correlations!
+        # TODO: Either extend the uvw calculations to include auto-correlations
+        # or ignore them during iterations. Certainly the former is the better
+        # approach.
+        baseline_idx = np.array(
+            [
+                w_delays.b_map[(int(ant_1), int(ant_2))] if ant_1 != ant_2 else 0
+                for ant_1, ant_2 in zip(  # type: ignore[call-overload]
+                    data_chunk.ant_1, data_chunk.ant_2, strict=False
+                )
+            ]
+        )
+
+        logger.info(w_delays.time_map.keys())
+        time_idx = np.array(
+            [w_delays.time_map[time * u.s] for time in data_chunk.time_mjds]
+        )
+        tukey_x_offset = w_delays.w_delays[baseline_idx, time_idx]
+
     delay_time = data_to_delay_time(data=data_chunk)
 
     taper = tukey_taper(
         x=delay_time.delay,
         outer_width=tukey_tractor_options.outer_width,
         tukey_width=tukey_tractor_options.tukey_width,
+        tukey_x_offset=tukey_x_offset,
     )
 
     # Delay-time is a 3D array: (time, delay, pol)
@@ -480,23 +543,88 @@ def _tukey_tractor(
 
 @dataclass
 class TukeyTractorOptions:
+    """Options to describe the tukey taper to apply"""
+
     ms_path: Path
+    """Measurement set to be modified"""
     outer_width: float = np.pi / 4
+    """The start of the tapering in frequency space"""
     tukey_width: float = np.pi / 8
+    """The width of the tapered region in frequency space"""
     data_column: str = "DATA"
+    """The visibility column to modify"""
     output_column: str = "CORRECTED_DATA"
+    """The output column to be created with the modified data"""
     dry_run: bool = False
+    """Indicates whether the data will be written back to the measurement set"""
     make_plots: bool = False
+    """Create a small set of diagnostic plots"""
     overwrite: bool = False
+    """If the output column exists it will be overwritten"""
     chunk_size: int = 1000
+    """Size of the row-wise chunking iterator"""
+    apply_towards_sun: bool = False
+    """apply the taper using the delay towards the Sun"""
+
+
+@dataclass(frozen=True)
+class WDelays:
+    """Representation and mappings for the w-coordinate derived delays"""
+
+    w_delays: u.Quantity
+    """The w-derived delay. Shape is [baseline, time]"""
+    b_map: dict[tuple[int, int], int]
+    """The mapping between (ANTENNA1,ANTENNA2) to baseline index"""
+    time_map: dict[float, int]
+    """The mapping between time (MJDs from measurement set) to index"""
+
+
+def get_sun_delay_for_ms(ms_path: Path) -> WDelays:
+    # Generate the two sets of uvw coordinate objects
+    baselines: Baselines = get_baselines_from_ms(ms_path=ms_path)
+    hour_angles_phase: PositionHourAngles = make_hour_angles_for_ms(
+        ms_path=ms_path,
+        position=None,  # gets the position form phase direction
+    )
+    uvws_phase: UVWs = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_phase)
+
+    hour_angles_sun: PositionHourAngles = make_hour_angles_for_ms(
+        ms_path=ms_path,
+        position="sun",  # gets the position form phase direction
+    )
+    uvws_sun: UVWs = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_sun)
+
+    # Subtract the w-coordinates out. Since these uvws have
+    # been computed towards different directions the difference
+    # in w-coordinate is the delay distance
+    w_diffs = uvws_sun.uvws[2] - uvws_phase.uvws[2]
+
+    delay_object = (w_diffs / speed_of_light).decompose()
+
+    return WDelays(
+        w_delays=delay_object,
+        b_map=baselines.b_map,
+        time_map=hour_angles_phase.time_map,
+    )
 
 
 def dumb_tukey_tractor(
     tukey_tractor_options: TukeyTractorOptions,
 ) -> None:
+    """Iterate row-wise over a specified measurement set and
+    apply a tukey taper operation to the delay data. Iteration
+    is performed based on a chunk soize, indicating the number
+    of rows to read in at a time.
+
+    Full description of options are outlined in `TukeyTaperOptions`.
+
+    Args:
+        tukey_tractor_options (TukeyTractorOptions): The settings to use during the taper, and measurement set to apply them to.
+    """
     logger.info("jolly-roger")
     logger.info(f"Options: {tukey_tractor_options}")
 
+    # acquire all the tables necessary to get unit information and data from
     open_ms_tables = get_open_ms_tables(
         ms_path=tukey_tractor_options.ms_path, read_only=False
     )
@@ -509,6 +637,13 @@ def dumb_tukey_tractor(
             overwrite=tukey_tractor_options.overwrite,
         )
 
+    # Generate the delay for all baselines and time steps
+    w_delays: WDelays | None = None
+    if tukey_tractor_options.apply_towards_sun:
+        logger.info("Pre-calculating delays towards the Sun")
+        w_delays = get_sun_delay_for_ms(ms_path=tukey_tractor_options.ms_path)
+        assert len(w_delays.w_delays.shape) == 2
+
     with tqdm(total=len(open_ms_tables.main_table)) as pbar:
         for data_chunk in get_data_chunks(
             open_ms_tables=open_ms_tables,
@@ -518,6 +653,7 @@ def dumb_tukey_tractor(
             taper_data_chunk: DataChunk = _tukey_tractor(
                 data_chunk=data_chunk,
                 tukey_tractor_options=tukey_tractor_options,
+                w_delays=w_delays,
             )
 
             pbar.update(len(taper_data_chunk.masked_data))
@@ -526,6 +662,7 @@ def dumb_tukey_tractor(
                 # Do not apply the data
                 continue
 
+            # only put if not a dry run
             open_ms_tables.main_table.putcol(
                 columnname=tukey_tractor_options.output_column,
                 value=taper_data_chunk.masked_data,
@@ -559,48 +696,6 @@ class TractorOptions:
     """The output column to write the tractor results to. Defaults to 'CORRECTED_DATA'."""
     make_plots: bool = False
     """If set, the tractor will make plots of the results."""
-
-
-def plot_tractor_baseline(
-    baseline_data: BaselineData,
-    delay_time: DelayTime,
-    delay_object: u.Quantity,
-    delay_phase_center: u.Quantity,
-    output_dir: Path,
-) -> Path:
-    import matplotlib.pyplot as plt
-    from astropy.visualization import quantity_support, time_support
-
-    with quantity_support(), time_support():
-        ant_1 = baseline_data.ant_1
-        ant_2 = baseline_data.ant_2
-        time = baseline_data.time
-        delay = delay_time.delay
-        delay_time_xx = delay_time.delay_time[..., 0]
-        delay_time_yy = delay_time.delay_time[..., -1]
-        delay_time_stokesi = (delay_time_xx + delay_time_yy) / 2
-
-        fig, ax = plt.subplots()
-        im = ax.pcolormesh(
-            time, delay, np.abs(delay_time_stokesi).T, norm=plt.cm.colors.LogNorm()
-        )
-        ax.set(
-            ylabel=f"Delay / {delay.unit:latex_inline}",
-            title=f"Baseline {ant_1} - {ant_2}",
-        )
-        fig.colorbar(im, ax=ax, label="Amplitude")
-        ax.plot(time, delay_object, "k--", label="Sun", alpha=1, lw=1)
-        ax.plot(
-            time,
-            delay_phase_center,
-            "w-",
-            label="phase center",
-            alpha=0.5,
-        )
-        output_path = output_dir / f"tractor_baseline_{ant_1}_{ant_2}.png"
-        fig.savefig(output_path)
-
-        return output_path
 
 
 # def tractor_baseline(
@@ -711,6 +806,11 @@ def get_parser() -> ArgumentParser:
         default=10009,
         help="The number of rows to process in one chunk. Larger numbers require more memory but fewer interactions with I/O.",
     )
+    tukey_parser.add_argument(
+        "--apply-towards-sun",
+        action="store_true",
+        help="Whether the tukey taper is applied towards the sun",
+    )
 
     return parser
 
@@ -731,6 +831,7 @@ def cli() -> None:
             make_plots=args.make_plots,
             overwrite=args.overwrite,
             chunk_size=args.chunk_size,
+            apply_towards_sun=args.apply_towards_sun,
         )
         dumb_tukey_tractor(tukey_tractor_options=tukey_tractor_options)
     else:
