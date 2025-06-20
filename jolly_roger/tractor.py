@@ -18,6 +18,7 @@ from tqdm.auto import tqdm
 
 from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
 from jolly_roger.logging import logger
+from jolly_roger.plots import plot_baseline_comparison_data
 
 
 @dataclass(frozen=True)
@@ -115,13 +116,21 @@ class DataChunkArray:
     """Container for a chunk of data"""
 
     data: NDArray[np.complexfloating]
+    """The data from the nominated data column loaded"""
     flags: NDArray[np.bool_]
+    """Flags that correspond to the loaded data"""
     uvws: NDArray[np.floating]
+    """The uvw coordinates for each loaded data record"""
     time_centroid: NDArray[np.floating]
+    """The time of each data record"""
     ant_1: NDArray[np.int64]
+    """Antenna 1 that formed the baseline"""
     ant_2: NDArray[np.int64]
+    """Antenna 2 that formed the baseline"""
     row_start: int
+    """The starting row of the portion of data loaded"""
     chunk_size: int
+    """The size of the data chunk loaded (may be larger if this is the last record)"""
 
 
 @dataclass
@@ -332,7 +341,21 @@ def add_output_column(
     data_column: str = "DATA",
     output_column: str = "CORRECTED_DATA",
     overwrite: bool = False,
+    copy_column_data: bool = False,
 ) -> None:
+    """Add in the output data column where the modified data
+    will be recorded
+
+    Args:
+        tab (table): Open reference to the table to modify
+        data_column (str, optional): The base data column the new will be based from. Defaults to "DATA".
+        output_column (str, optional): The new data column to be created. Defaults to "CORRECTED_DATA".
+        overwrite (bool, optional): Whether to overwrite the new output column. Defaults to False.
+        copy_column_data (bool, optional): Copy the original data over to the output column. Defaults to False.
+
+    Raises:
+        ValueError: Raised if the output column already exists and overwrite is False
+    """
     colnames = tab.colnames()
     if output_column in colnames:
         if not overwrite:
@@ -348,8 +371,9 @@ def add_output_column(
     desc["name"] = output_column
     tab.addcols(desc)
     tab.flush()
-    # logger.info(f"Copying {data_column=} to {output_column=}")
-    # taql(f"UPDATE $tab SET {output_column}={data_column}")
+    if copy_column_data:
+        logger.info(f"Copying {data_column=} to {output_column=}")
+        taql(f"UPDATE $tab SET {output_column}={data_column}")
 
 
 def write_output_column(
@@ -381,144 +405,6 @@ def write_output_column(
             subtab.flush()
 
 
-def plot_baseline_data(
-    baseline_data: BaselineData,
-    output_dir: Path,
-    suffix: str = "",
-) -> None:
-    import matplotlib.pyplot as plt
-    from astropy.visualization import quantity_support, time_support
-
-    with quantity_support(), time_support():
-        data_masked = baseline_data.masked_data
-        data_xx = data_masked[..., 0]
-        data_yy = data_masked[..., -1]
-        data_stokesi = (data_xx + data_yy) / 2
-        amp_stokesi = np.abs(data_stokesi)
-
-        fig, ax = plt.subplots()
-        im = ax.pcolormesh(
-            baseline_data.time,
-            baseline_data.freq_chan,
-            amp_stokesi.T,
-        )
-        fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
-        ax.set(
-            ylabel=f"Frequency / {baseline_data.freq_chan.unit:latex_inline}",
-            title=f"Ant {baseline_data.ant_1} - Ant {baseline_data.ant_2}",
-        )
-        output_path = (
-            output_dir
-            / f"baseline_data_{baseline_data.ant_1}_{baseline_data.ant_2}{suffix}.png"
-        )
-        fig.savefig(output_path)
-
-
-def plot_baseline_comparison_data(
-    before_baseline_data: BaselineData,
-    after_baseline_data: BaselineData,
-    output_dir: Path,
-    suffix: str = "",
-) -> Path:
-    import matplotlib.pyplot as plt
-    from astropy.visualization import (
-        ImageNormalize,
-        LogStretch,
-        MinMaxInterval,
-        SqrtStretch,
-        ZScaleInterval,
-        quantity_support,
-        time_support,
-    )
-
-    with quantity_support(), time_support():
-        before_amp_stokesi = np.abs(
-            (
-                before_baseline_data.masked_data[..., 0]
-                + before_baseline_data.masked_data[..., -1]
-            )
-            / 2
-        )
-        after_amp_stokesi = np.abs(
-            (
-                after_baseline_data.masked_data[..., 0]
-                + after_baseline_data.masked_data[..., -1]
-            )
-            / 2
-        )
-
-        norm = ImageNormalize(
-            after_amp_stokesi, interval=ZScaleInterval(), stretch=SqrtStretch()
-        )
-
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(10, 10))
-        im = ax1.pcolormesh(
-            before_baseline_data.time,
-            before_baseline_data.freq_chan,
-            before_amp_stokesi.T,
-            norm=norm,
-        )
-        ax1.set(
-            ylabel=f"Frequency / {before_baseline_data.freq_chan.unit:latex_inline}",
-            title="Before",
-        )
-        ax2.pcolormesh(
-            after_baseline_data.time,
-            after_baseline_data.freq_chan,
-            after_amp_stokesi.T,
-            norm=norm,
-        )
-        ax2.set(
-            ylabel=f"Frequency / {after_baseline_data.freq_chan.unit:latex_inline}",
-            title="After",
-        )
-        fig.colorbar(im, ax=ax2, label="Stokes I Amplitude / Jy")
-
-        # TODO: Move these delay calculations outside of the plotting function
-        # And here we calculate the delay information
-        before_delays = data_to_delay_time(data=before_baseline_data)
-        after_delays = data_to_delay_time(data=after_baseline_data)
-
-        before_delays_i = np.abs(
-            (before_delays.delay_time[:, :, 0] + before_delays.delay_time[:, :, -1]) / 2
-        )
-        after_delays_i = np.abs(
-            (after_delays.delay_time[:, :, 0] + after_delays.delay_time[:, :, -1]) / 2
-        )
-
-        delay_norm = ImageNormalize(
-            before_delays_i, interval=MinMaxInterval(), stretch=LogStretch()
-        )
-
-        im = ax3.pcolormesh(
-            before_baseline_data.time,
-            before_delays.delay,
-            before_delays_i.T,
-            norm=delay_norm,
-        )
-        ax3.set(ylabel="Delay / s", title="Before")
-        ax4.pcolormesh(
-            after_baseline_data.time,
-            after_delays.delay,
-            after_delays_i.T,
-            norm=delay_norm,
-        )
-        ax4.set(ylabel="Delay / s", title="After")
-        fig.colorbar(im, ax=ax4, label="Stokes I Amplitude / Jy")
-
-        output_path = (
-            output_dir
-            / f"baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}{suffix}.png"
-        )
-        fig.suptitle(
-            f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}"
-        )
-        fig.tight_layout()
-        fig.savefig(output_path)
-
-        return output_path
-
-
 def make_plot_results(
     open_ms_tables: OpenMSTables, data_column: str, output_column: str
 ) -> list[Path]:
@@ -539,9 +425,16 @@ def make_plot_results(
             ant_2=i + 1,
             data_column=output_column,
         )
+        before_delays = data_to_delay_time(data=before_baseline_data)
+        after_delays = data_to_delay_time(data=after_baseline_data)
+
+        # TODO: the baseline data and delay times could be put into a single
+        # structure to pass around easier.
         plot_path = plot_baseline_comparison_data(
             before_baseline_data=before_baseline_data,
             after_baseline_data=after_baseline_data,
+            before_delays=before_delays,
+            after_delays=after_delays,
             output_dir=output_dir,
             suffix="_comparison",
         )
