@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import astropy.units as u
 import numpy as np
@@ -43,7 +42,7 @@ class PositionHourAngles:
 
 
 def _process_position(
-    position: SkyCoord | Literal["sun"] | None = None,
+    position: SkyCoord | str | None = None,
     ms_path: Path | None = None,
     times: Time | None = None,
 ) -> SkyCoord:
@@ -54,7 +53,7 @@ def _process_position(
     set
 
     Args:
-        position (SkyCoord | Literal[&quot;sun&quot;] | None, optional): The position to be considered. Defaults to None.
+        position (SkyCoord | str | None, optional): The position to be considered. Defaults to None.
         ms_path (Path | None, optional): The path with the PHASE_DIR to use should `position` be None. Defaults to None.
         times (Time | None, optional): Times to used if they are required in the lookup. Defaults to None.
 
@@ -99,7 +98,7 @@ def _process_position(
 def make_hour_angles_for_ms(
     ms_path: Path,
     location: EarthLocation = ASKAP,
-    position: SkyCoord | Literal["sun"] | None = None,
+    position: SkyCoord | str | None = None,
     whole_day: bool = False,
 ) -> PositionHourAngles:
     """Calculate hour-angle and time quantities for a given position using time information
@@ -108,7 +107,7 @@ def make_hour_angles_for_ms(
     Args:
         ms_path (Path): Measurement set to usefor time and sky-position information
         location (EarthLocation, optional): The location to use when calculate LST. Defaults to ASKAP.
-        position (SkyCoord | Literal["sun"] | None, optional): The sky-direction hour-angles will be calculated towards. Defaults to None.
+        position (SkyCoord | str | None, optional): The sky-direction hour-angles will be calculated towards. Defaults to None.
         whole_day (bool, optional): Calaculate for a 24 hour persion starting from the first time step. Defaults to False.
 
     Returns:

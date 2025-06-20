@@ -70,7 +70,7 @@ def tukey_taper(
     x_freq = np.linspace(-np.pi, np.pi, len(x))
 
     if tukey_x_offset is not None:
-        x_freq = x_freq[:, None] * tukey_x_offset[None, :]
+        x_freq = x_freq[:, None] - tukey_x_offset[None, :]
 
     taper = np.ones_like(x_freq)
     logger.info(f"{x_freq.shape=} {type(x_freq)=}")
@@ -468,7 +468,7 @@ def make_plot_results(
 
 def _get_baseline_time_indicies(
     w_delays: WDelays, data_chunk: DataChunk
-) -> tuple[NDArray[int], NDArray[int]]:
+) -> tuple[NDArray[np.int_], NDArray[np.int_]]:
     """Extract the mappings into the data array"""
 
     # When computing uvws we have ignored auto-correlations!
@@ -527,13 +527,14 @@ def _tukey_tractor(
             w_delays=w_delays, data_chunk=data_chunk
         )
         tukey_x_offset = w_delays.w_delays[baseline_idx, time_idx]
+        # logger.info(f"{tukey_x_offset=}")
 
         # need to scale the x offsert to the -pi to pi
         # The delay should be symmetric
         tukey_x_offset = (
-            tukey_x_offset * (delay_time.delay[0] / np.pi).decompose()
+            tukey_x_offset / (np.max(delay_time.delay) / np.pi).decompose()
         ).value
-        logger.info(f"{tukey_x_offset=}")
+        # logger.info(f"{tukey_x_offset=}")
 
     taper = tukey_taper(
         x=delay_time.delay,
@@ -541,16 +542,26 @@ def _tukey_tractor(
         tukey_width=tukey_tractor_options.tukey_width,
         tukey_x_offset=tukey_x_offset,
     )
-    # taper = taper[:,:, None]
+    if w_delays is not None:
+        # The use of the `tukey_x_offset` changes the
+        # shape of the output array. The internals of that
+        # function returns a different shape via the broadcasting
+        taper = np.swapaxes(taper[:, :, None], 0, 1)
+
+        # Since we want to dampen the sun we invert the taper
+        taper = 1.0 - taper
+
+        # Delay with the elevation of the sun
+        elevation_mask = w_delays.sun_elevation_curve > (-3 * u.deg)
+        taper[elevation_mask[time_idx], :, :] = 1.0
+
+    else:
+        taper = taper[None, :, None]
 
     # Delay-time is a 3D array: (time, delay, pol)
     # Taper is 1D: (delay,)
-    tapered_delay_time_data_real = (
-        delay_time.delay_time.real * taper[np.newaxis, :, np.newaxis]
-    )
-    tapered_delay_time_data_imag = (
-        delay_time.delay_time.imag * taper[np.newaxis, :, np.newaxis]
-    )
+    tapered_delay_time_data_real = delay_time.delay_time.real * taper
+    tapered_delay_time_data_imag = delay_time.delay_time.imag * taper
     tapered_delay_time_data = (
         tapered_delay_time_data_real + 1j * tapered_delay_time_data_imag
     )
@@ -602,6 +613,8 @@ class WDelays:
     """The mapping between (ANTENNA1,ANTENNA2) to baseline index"""
     time_map: dict[float, int]
     """The mapping between time (MJDs from measurement set) to index"""
+    sun_elevation_curve: NDArray[np.floating]
+    """The elevation of the sun in time order of steps in the MS"""
 
 
 def get_sun_delay_for_ms(ms_path: Path) -> WDelays:
@@ -630,6 +643,7 @@ def get_sun_delay_for_ms(ms_path: Path) -> WDelays:
         w_delays=delay_object,
         b_map=baselines.b_map,
         time_map=hour_angles_phase.time_map,
+        sun_elevation_curve=hour_angles_sun.elevation,
     )
 
 
