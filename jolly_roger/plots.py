@@ -140,10 +140,16 @@ def plot_baseline_comparison_data(
         fig.colorbar(im, ax=ax4, label="Stokes I Amplitude / Jy")
 
         if w_delays is not None:
-            for ax in (ax3, ax4):
+            for ax, baseline_data in zip(  # type:ignore[call-overload]
+                (ax3, ax4),
+                (before_baseline_data, after_baseline_data),
+                strict=True,
+            ):
+                ant_1, ant_2 = baseline_data.ant_1, baseline_data.ant_2
+                b_idx = w_delays.b_map[ant_1, ant_2]
                 ax.plot(
-                    before_baseline_data.time,
-                    w_delays.w_delays,
+                    baseline_data.time,
+                    w_delays.w_delays[b_idx],
                     color="k",
                     linestyle="--",
                     label=f"Delay for {w_delays.object_name}",

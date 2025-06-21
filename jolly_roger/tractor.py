@@ -50,6 +50,11 @@ def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
     spw_table = table(str(ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=read_only)
     field_table = table(str(ms_path / "FIELD"), ack=False, readonly=read_only)
 
+    # TODO: Get the data without auto-correlations e.g.
+    # no_auto_main_table = taql(
+    #     "select from $main_table where ANTENNA1 != ANTENNA2",
+    # )
+
     return OpenMSTables(
         main_table=main_table,
         spw_table=spw_table,
