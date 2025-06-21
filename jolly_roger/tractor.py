@@ -549,12 +549,19 @@ def _tukey_tractor(
         # function returns a different shape via the broadcasting
         taper = np.swapaxes(taper[:, :, None], 0, 1)
 
-        # Since we want to dampen the sun we invert the taper
+        # Since we want to dampen the target object we invert the taper
         taper = 1.0 - taper
 
-        # Delay with the elevation of the sun
+        # Delay with the elevation of the target object
         elevation_mask = w_delays.elevation > (-3 * u.deg)
         taper[elevation_mask[time_idx], :, :] = 1.0
+
+        # TODO: Handle case of aliased delays
+
+        # TODO: Create hueristic to determine where baseline is long enough to 
+        # ignore the tapering. Aliasing may give us this though...
+
+        # TODO: Create flags where delay is 'close' to 0
 
     else:
         taper = taper[None, :, None]
