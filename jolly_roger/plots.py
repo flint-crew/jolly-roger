@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import matplotlib.pyplot as plt
 import numpy as np
 
+from jolly_roger.uvws import WDelays
+
 if TYPE_CHECKING:
     from jolly_roger.delays import DelayTime
     from jolly_roger.tractor import BaselineData
@@ -52,6 +54,7 @@ def plot_baseline_comparison_data(
     after_delays: DelayTime,
     output_dir: Path,
     suffix: str = "",
+    w_delays: WDelays | None = None,
 ) -> Path:
     from astropy.visualization import (
         ImageNormalize,
@@ -135,6 +138,17 @@ def plot_baseline_comparison_data(
         )
         ax4.set(ylabel="Delay / s", title="After")
         fig.colorbar(im, ax=ax4, label="Stokes I Amplitude / Jy")
+
+        if w_delays is not None:
+            for ax in (ax3, ax4):
+                ax.plot(
+                    before_delays.time,
+                    w_delays.w_delay,
+                    color="k",
+                    linestyle="--",
+                    label=f"Delay for {w_delays.object_name}",
+                )
+                ax.legend()
 
         output_path = (
             output_dir

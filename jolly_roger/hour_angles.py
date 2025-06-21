@@ -25,13 +25,13 @@ class PositionHourAngles:
 
     hour_angle: u.rad
     """The hour angle across sampled time intervales of a source for a Earth location"""
-    time_mjds: np.ndarray
+    time_mjds: u.Quantity
     """The MJD time in seconds from which other quantities are evalauted against. Should be drawn from a measurement set."""
     location: EarthLocation
     """The location these quantities have been derived from."""
     position: SkyCoord
     """The sky-position that is being used to calculate quantities towards"""
-    elevation: np.ndarray
+    elevation: u.Quantity
     """The elevation of the ``position` direction across time"""
     time: Time
     """Representation of the `time_mjds` attribute"""
@@ -70,8 +70,8 @@ def _process_position(
         if times is None:
             msg = f"{times=}, but needs to be set when position is a name"
             raise ValueError(msg)
-        if position == "sun":
-            logger.info("Getting sky-position of the sun")
+        if position.lower() == "sun":
+            logger.info("Getting sky-position of the Sun")
             position = get_sun(times)
         else:
             logger.info(f"Getting sky-position of {position=}")

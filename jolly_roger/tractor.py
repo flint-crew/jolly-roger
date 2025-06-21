@@ -8,7 +8,6 @@ from typing import Any
 
 import astropy.units as u
 import numpy as np
-from astropy.constants import c as speed_of_light
 from astropy.coordinates import (
     SkyCoord,
 )
@@ -17,12 +16,10 @@ from casacore.tables import makecoldesc, table, taql
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
-from jolly_roger.baselines import Baselines, get_baselines_from_ms
 from jolly_roger.delays import data_to_delay_time, delay_time_to_data
-from jolly_roger.hour_angles import PositionHourAngles, make_hour_angles_for_ms
 from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
-from jolly_roger.uvws import UVWs, xyz_to_uvw
+from jolly_roger.uvws import WDelays, get_object_delay_for_ms
 
 
 @dataclass(frozen=True)
@@ -429,7 +426,10 @@ def write_output_column(
 
 
 def make_plot_results(
-    open_ms_tables: OpenMSTables, data_column: str, output_column: str
+    open_ms_tables: OpenMSTables,
+    data_column: str,
+    output_column: str,
+    w_delays: WDelays | None = None,
 ) -> list[Path]:
     output_paths = []
     output_dir = open_ms_tables.ms_path.parent / "plots"
@@ -460,6 +460,7 @@ def make_plot_results(
             after_delays=after_delays,
             output_dir=output_dir,
             suffix="_comparison",
+            w_delays=w_delays,
         )
         output_paths.append(plot_path)
 
@@ -599,55 +600,13 @@ class TukeyTractorOptions:
     """If the output column exists it will be overwritten"""
     chunk_size: int = 1000
     """Size of the row-wise chunking iterator"""
-    apply_towards_sun: bool = False
-    """apply the taper using the delay towards the Sun"""
+    apply_towards_object: bool = False
+    """apply the taper using the delay towards the a target object."""
+    target_object: str = "Sun"
+    """The target object to apply the delay towards."""
 
 
-@dataclass(frozen=True)
-class WDelays:
-    """Representation and mappings for the w-coordinate derived delays"""
-
-    w_delays: u.Quantity
-    """The w-derived delay. Shape is [baseline, time]"""
-    b_map: dict[tuple[int, int], int]
-    """The mapping between (ANTENNA1,ANTENNA2) to baseline index"""
-    time_map: dict[float, int]
-    """The mapping between time (MJDs from measurement set) to index"""
-    sun_elevation_curve: NDArray[np.floating]
-    """The elevation of the sun in time order of steps in the MS"""
-
-
-def get_sun_delay_for_ms(ms_path: Path) -> WDelays:
-    # Generate the two sets of uvw coordinate objects
-    baselines: Baselines = get_baselines_from_ms(ms_path=ms_path)
-    hour_angles_phase: PositionHourAngles = make_hour_angles_for_ms(
-        ms_path=ms_path,
-        position=None,  # gets the position form phase direction
-    )
-    uvws_phase: UVWs = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_phase)
-
-    hour_angles_sun: PositionHourAngles = make_hour_angles_for_ms(
-        ms_path=ms_path,
-        position="sun",  # gets the position form phase direction
-    )
-    uvws_sun: UVWs = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_sun)
-
-    # Subtract the w-coordinates out. Since these uvws have
-    # been computed towards different directions the difference
-    # in w-coordinate is the delay distance
-    w_diffs = uvws_sun.uvws[2] - uvws_phase.uvws[2]
-
-    delay_object = (w_diffs / speed_of_light).decompose()
-
-    return WDelays(
-        w_delays=delay_object,
-        b_map=baselines.b_map,
-        time_map=hour_angles_phase.time_map,
-        sun_elevation_curve=hour_angles_sun.elevation,
-    )
-
-
-def dumb_tukey_tractor(
+def tukey_tractor(
     tukey_tractor_options: TukeyTractorOptions,
 ) -> None:
     """Iterate row-wise over a specified measurement set and
@@ -679,8 +638,13 @@ def dumb_tukey_tractor(
     # Generate the delay for all baselines and time steps
     w_delays: WDelays | None = None
     if tukey_tractor_options.apply_towards_sun:
-        logger.info("Pre-calculating delays towards the Sun")
-        w_delays = get_sun_delay_for_ms(ms_path=tukey_tractor_options.ms_path)
+        logger.info(
+            f"Pre-calculating delays towards the target: {tukey_tractor_options.target_object}"
+        )
+        w_delays = get_object_delay_for_ms(
+            ms_path=tukey_tractor_options.ms_path,
+            object_name=tukey_tractor_options.target_object,
+        )
         assert len(w_delays.w_delays.shape) == 2
 
     with tqdm(total=len(open_ms_tables.main_table)) as pbar:
@@ -689,7 +653,7 @@ def dumb_tukey_tractor(
             chunk_size=tukey_tractor_options.chunk_size,
             data_column=tukey_tractor_options.data_column,
         ):
-            taper_data_chunk: DataChunk = _tukey_tractor(
+            taper_data_chunk = _tukey_tractor(
                 data_chunk=data_chunk,
                 tukey_tractor_options=tukey_tractor_options,
                 w_delays=w_delays,
@@ -710,10 +674,11 @@ def dumb_tukey_tractor(
             )
 
     if tukey_tractor_options.make_plots and not tukey_tractor_options.dry_run:
-        plot_paths: list[Path] = make_plot_results(
+        plot_paths = make_plot_results(
             open_ms_tables=open_ms_tables,
             data_column=tukey_tractor_options.data_column,
             output_column=tukey_tractor_options.output_column,
+            w_delays=w_delays,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
@@ -735,52 +700,6 @@ class TractorOptions:
     """The output column to write the tractor results to. Defaults to 'CORRECTED_DATA'."""
     make_plots: bool = False
     """If set, the tractor will make plots of the results."""
-
-
-# def tractor_baseline(
-#     ant_1: int,
-#     ant_2: int,
-#     baselines: Baselines,
-#     uvws_object_baseline: u.Quantity,
-#     options: TractorOptions,
-# ) -> None:
-#     open_ms_tables = get_open_ms_tables()
-#     baseline_data = get_baseline_data(
-#         baselines=baselines,
-#         ant_1=ant_1,
-#         ant_2=ant_2,
-#         data_column=options.data_column,
-#     )
-
-#     delay_time = data_to_delay_time(data=baseline_data)
-
-#     _, _, w_coords_object = uvws_object_baseline
-#     _, _, w_coords_phase_center = baseline_data.uvws_phase_center
-
-#     # Subtract
-#     delay_object = (
-#         (w_coords_object - w_coords_phase_center) / speed_of_light
-#     ).decompose()
-#     delay_phase_center = (
-#         (w_coords_phase_center - w_coords_phase_center) / speed_of_light
-#     ).decompose()
-
-#     if options.make_plots:
-#         output_dir = options.ms_path.parent / "plots"
-#         output_dir.mkdir(exist_ok=True, parents=True)
-#         plot_baseline_data(
-#             baseline_data=baseline_data,
-#             output_dir=output_dir,
-#             suffix="_original",
-#         )
-#         plot_tractor_baseline(
-#             baseline_data=baseline_data,
-#             delay_time=delay_time,
-#             delay_object=delay_object,
-#             delay_phase_center=delay_phase_center,
-#             output_dir=output_dir,
-#         )
-#         logger.info(f"Plots saved to {output_dir}")
 
 
 def get_parser() -> ArgumentParser:
@@ -846,9 +765,15 @@ def get_parser() -> ArgumentParser:
         help="The number of rows to process in one chunk. Larger numbers require more memory but fewer interactions with I/O.",
     )
     tukey_parser.add_argument(
-        "--apply-towards-sun",
+        "--target-object",
+        type=str,
+        default="Sun",
+        help="The target object to apply the delay towards. Defaults to 'Sun'.",
+    )
+    tukey_parser.add_argument(
+        "--apply-towards-object",
         action="store_true",
-        help="Whether the tukey taper is applied towards the sun",
+        help="Whether the tukey taper is applied towards the target object (e.g. the Sun). If not set, the taper is applied towards large delays.",
     )
 
     return parser
@@ -870,9 +795,10 @@ def cli() -> None:
             make_plots=args.make_plots,
             overwrite=args.overwrite,
             chunk_size=args.chunk_size,
-            apply_towards_sun=args.apply_towards_sun,
+            target_object=args.target_object,
+            apply_towards_object=args.apply_towards_object,
         )
-        dumb_tukey_tractor(tukey_tractor_options=tukey_tractor_options)
+        tukey_tractor(tukey_tractor_options=tukey_tractor_options)
     else:
         parser.print_help()
 

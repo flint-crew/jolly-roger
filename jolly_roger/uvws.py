@@ -9,11 +9,62 @@ import astropy.units as u
 import numpy as np
 from astropy.constants import c as speed_of_light
 from casacore.tables import table, taql
+from numpy.typing import NDArray
 from tqdm import tqdm
 
-from jolly_roger.baselines import Baselines
-from jolly_roger.hour_angles import PositionHourAngles
+from jolly_roger.baselines import Baselines, get_baselines_from_ms
+from jolly_roger.hour_angles import PositionHourAngles, make_hour_angles_for_ms
 from jolly_roger.logging import logger
+
+
+@dataclass(frozen=True)
+class WDelays:
+    """Representation and mappings for the w-coordinate derived delays"""
+
+    object_name: str
+    """The name of the object that the delays are derived towards"""
+    w_delays: u.Quantity
+    """The w-derived delay. Shape is [baseline, time]"""
+    b_map: dict[tuple[int, int], int]
+    """The mapping between (ANTENNA1,ANTENNA2) to baseline index"""
+    time_map: dict[float, int]
+    """The mapping between time (MJDs from measurement set) to index"""
+    elevation: NDArray[np.floating]
+    """The elevation of the target object in time order of steps in the MS"""
+
+
+def get_object_delay_for_ms(
+    ms_path: Path,
+    object_name: str = "sun",
+) -> WDelays:
+    # Generate the two sets of uvw coordinate objects
+    baselines: Baselines = get_baselines_from_ms(ms_path=ms_path)
+    hour_angles_phase = make_hour_angles_for_ms(
+        ms_path=ms_path,
+        position=None,  # gets the position form phase direction
+    )
+    uvws_phase: UVWs = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_phase)
+
+    hour_angles_object = make_hour_angles_for_ms(
+        ms_path=ms_path,
+        position=object_name,  # gets the position form phase direction
+    )
+    uvws_object: UVWs = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_object)
+
+    # Subtract the w-coordinates out. Since these uvws have
+    # been computed towards different directions the difference
+    # in w-coordinate is the delay distance
+    w_diffs = uvws_object.uvws[2] - uvws_phase.uvws[2]
+
+    delay_object = (w_diffs / speed_of_light).decompose()
+
+    return WDelays(
+        object_name=object_name,
+        w_delays=delay_object,
+        b_map=baselines.b_map,
+        time_map=hour_angles_phase.time_map,
+        elevation=hour_angles_object.elevation,
+    )
 
 
 @dataclass
