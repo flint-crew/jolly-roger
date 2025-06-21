@@ -86,7 +86,9 @@ def plot_baseline_comparison_data(
             after_amp_stokesi, interval=ZScaleInterval(), stretch=SqrtStretch()
         )
 
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(10, 10))
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(
+            2, 2, figsize=(10, 10), sharex=True, sharey="row"
+        )
         im = ax1.pcolormesh(
             before_baseline_data.time,
             before_baseline_data.freq_chan,

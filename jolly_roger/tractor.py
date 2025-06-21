@@ -559,7 +559,7 @@ def _tukey_tractor(
         taper = 1.0 - taper
 
         # Delay with the elevation of the target object
-        elevation_mask = w_delays.elevation > (-3 * u.deg)
+        elevation_mask = w_delays.elevation < (-3 * u.deg)
         taper[elevation_mask[time_idx], :, :] = 1.0
 
         # TODO: Handle case of aliased delays
