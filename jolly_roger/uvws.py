@@ -27,9 +27,9 @@ class WDelays:
     """The w-derived delay. Shape is [baseline, time]"""
     b_map: dict[tuple[int, int], int]
     """The mapping between (ANTENNA1,ANTENNA2) to baseline index"""
-    time_map: dict[float, int]
+    time_map: dict[u.Quantity, int]
     """The mapping between time (MJDs from measurement set) to index"""
-    elevation: NDArray[np.floating]
+    elevation: u.Quantity
     """The elevation of the target object in time order of steps in the MS"""
 
 
