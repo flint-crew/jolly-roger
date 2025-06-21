@@ -559,7 +559,7 @@ def _tukey_tractor(
 
         # TODO: Handle case of aliased delays
 
-        # TODO: Create hueristic to determine where baseline is long enough to
+        # TODO: Create heuristic to determine where baseline is long enough to
         # ignore the tapering. Aliasing may give us this though...
 
         # TODO: Create flags where delay is 'close' to 0
