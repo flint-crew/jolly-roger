@@ -142,8 +142,8 @@ def plot_baseline_comparison_data(
         if w_delays is not None:
             for ax in (ax3, ax4):
                 ax.plot(
-                    before_delays.time,
-                    w_delays.w_delay,
+                    before_baseline_data.time,
+                    w_delays.w_delays,
                     color="k",
                     linestyle="--",
                     label=f"Delay for {w_delays.object_name}",

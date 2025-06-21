@@ -553,7 +553,7 @@ def _tukey_tractor(
         taper = 1.0 - taper
 
         # Delay with the elevation of the sun
-        elevation_mask = w_delays.sun_elevation_curve > (-3 * u.deg)
+        elevation_mask = w_delays.elevation > (-3 * u.deg)
         taper[elevation_mask[time_idx], :, :] = 1.0
 
     else:
@@ -637,7 +637,7 @@ def tukey_tractor(
 
     # Generate the delay for all baselines and time steps
     w_delays: WDelays | None = None
-    if tukey_tractor_options.apply_towards_sun:
+    if tukey_tractor_options.apply_towards_object:
         logger.info(
             f"Pre-calculating delays towards the target: {tukey_tractor_options.target_object}"
         )
