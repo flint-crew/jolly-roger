@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import matplotlib.pyplot as plt
 import numpy as np
 
+from jolly_roger.uvws import WDelays
+
 if TYPE_CHECKING:
     from jolly_roger.delays import DelayTime
     from jolly_roger.tractor import BaselineData
@@ -52,6 +54,7 @@ def plot_baseline_comparison_data(
     after_delays: DelayTime,
     output_dir: Path,
     suffix: str = "",
+    w_delays: WDelays | None = None,
 ) -> Path:
     from astropy.visualization import (
         ImageNormalize,
@@ -83,7 +86,9 @@ def plot_baseline_comparison_data(
             after_amp_stokesi, interval=ZScaleInterval(), stretch=SqrtStretch()
         )
 
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(10, 10))
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(
+            2, 2, figsize=(10, 10), sharex=True, sharey="row"
+        )
         im = ax1.pcolormesh(
             before_baseline_data.time,
             before_baseline_data.freq_chan,
@@ -135,6 +140,23 @@ def plot_baseline_comparison_data(
         )
         ax4.set(ylabel="Delay / s", title="After")
         fig.colorbar(im, ax=ax4, label="Stokes I Amplitude / Jy")
+
+        if w_delays is not None:
+            for ax, baseline_data in zip(  # type:ignore[call-overload]
+                (ax3, ax4),
+                (before_baseline_data, after_baseline_data),
+                strict=True,
+            ):
+                ant_1, ant_2 = baseline_data.ant_1, baseline_data.ant_2
+                b_idx = w_delays.b_map[ant_1, ant_2]
+                ax.plot(
+                    baseline_data.time,
+                    w_delays.w_delays[b_idx],
+                    color="k",
+                    linestyle="--",
+                    label=f"Delay for {w_delays.object_name}",
+                )
+                ax.legend()
 
         output_path = (
             output_dir
