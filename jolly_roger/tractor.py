@@ -70,7 +70,7 @@ def tukey_taper(
         x_freq = x_freq[:, None] - tukey_x_offset[None, :]
 
     taper = np.ones_like(x_freq)
-    logger.info(f"{x_freq.shape=} {type(x_freq)=}")
+    logger.debug(f"{x_freq.shape=} {type(x_freq)=}")
     # Fully zero region
     taper[np.abs(x_freq) > outer_width] = 0
 
@@ -385,12 +385,13 @@ def add_output_column(
         logger.warning(
             f"Output column {output_column} already exists in the measurement set. Will be overwritten!"
         )
-        return
-    logger.info(f"Adding {output_column=}")
-    desc = makecoldesc(data_column, tab.getcoldesc(data_column))
-    desc["name"] = output_column
-    tab.addcols(desc)
-    tab.flush()
+    else:
+        logger.info(f"Adding {output_column=}")
+        desc = makecoldesc(data_column, tab.getcoldesc(data_column))
+        desc["name"] = output_column
+        tab.addcols(desc)
+        tab.flush()
+
     if copy_column_data:
         logger.info(f"Copying {data_column=} to {output_column=}")
         taql(f"UPDATE $tab SET {output_column}={data_column}")
@@ -599,6 +600,8 @@ class TukeyTractorOptions:
     """The visibility column to modify"""
     output_column: str = "CORRECTED_DATA"
     """The output column to be created with the modified data"""
+    copy_column_data: bool = False
+    """Copy the data from the data column to the output column before applying the taper"""
     dry_run: bool = False
     """Indicates whether the data will be written back to the measurement set"""
     make_plots: bool = False
@@ -640,6 +643,7 @@ def tukey_tractor(
             output_column=tukey_tractor_options.output_column,
             data_column=tukey_tractor_options.data_column,
             overwrite=tukey_tractor_options.overwrite,
+            copy_column_data=tukey_tractor_options.copy_column_data,
         )
 
     # Generate the delay for all baselines and time steps
@@ -654,33 +658,30 @@ def tukey_tractor(
         )
         assert len(w_delays.w_delays.shape) == 2
 
-    with tqdm(total=len(open_ms_tables.main_table)) as pbar:
-        for data_chunk in get_data_chunks(
-            open_ms_tables=open_ms_tables,
-            chunk_size=tukey_tractor_options.chunk_size,
-            data_column=tukey_tractor_options.data_column,
-        ):
-            taper_data_chunk = _tukey_tractor(
-                data_chunk=data_chunk,
-                tukey_tractor_options=tukey_tractor_options,
-                w_delays=w_delays,
-            )
+    if not tukey_tractor_options.dry_run:
+        with tqdm(total=len(open_ms_tables.main_table)) as pbar:
+            for data_chunk in get_data_chunks(
+                open_ms_tables=open_ms_tables,
+                chunk_size=tukey_tractor_options.chunk_size,
+                data_column=tukey_tractor_options.data_column,
+            ):
+                taper_data_chunk = _tukey_tractor(
+                    data_chunk=data_chunk,
+                    tukey_tractor_options=tukey_tractor_options,
+                    w_delays=w_delays,
+                )
 
-            pbar.update(len(taper_data_chunk.masked_data))
+                pbar.update(len(taper_data_chunk.masked_data))
 
-            if tukey_tractor_options.dry_run:
-                # Do not apply the data
-                continue
+                # only put if not a dry run
+                open_ms_tables.main_table.putcol(
+                    columnname=tukey_tractor_options.output_column,
+                    value=taper_data_chunk.masked_data,
+                    startrow=taper_data_chunk.row_start,
+                    nrow=taper_data_chunk.chunk_size,
+                )
 
-            # only put if not a dry run
-            open_ms_tables.main_table.putcol(
-                columnname=tukey_tractor_options.output_column,
-                value=taper_data_chunk.masked_data,
-                startrow=taper_data_chunk.row_start,
-                nrow=taper_data_chunk.chunk_size,
-            )
-
-    if tukey_tractor_options.make_plots and not tukey_tractor_options.dry_run:
+    if tukey_tractor_options.make_plots:
         plot_paths = make_plot_results(
             open_ms_tables=open_ms_tables,
             data_column=tukey_tractor_options.data_column,
@@ -689,24 +690,6 @@ def tukey_tractor(
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
-
-
-@dataclass
-class TractorOptions:
-    """Options for the Jolly Roger Tractor."""
-
-    ms_path: Path
-    """Path to the measurement set to process."""
-    object: str = "sun"
-    """Target position to use for the tractor. Defaults to 'sun'."""
-    dry_run: bool = False
-    """If set, the tractor will not write any output, but will log what it would do."""
-    data_column: str = "DATA"
-    """The data column to use for the tractor. Defaults to 'DATA'."""
-    output_column: str = "CORRECTED_DATA"
-    """The output column to write the tractor results to. Defaults to 'CORRECTED_DATA'."""
-    make_plots: bool = False
-    """If set, the tractor will make plots of the results."""
 
 
 def get_parser() -> ArgumentParser:
@@ -751,6 +734,11 @@ def get_parser() -> ArgumentParser:
         help="The output column to write the Tukey tractor results to",
     )
     tukey_parser.add_argument(
+        "--copy-column-data",
+        action="store_true",
+        help="If set, the Tukey tractor will copy the data from the data column to the output column before applying the taper",
+    )
+    tukey_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="If set, the Tukey tractor will not write any output, but will log what it would do",
@@ -768,7 +756,7 @@ def get_parser() -> ArgumentParser:
     tukey_parser.add_argument(
         "--chunk-size",
         type=int,
-        default=10009,
+        default=10000,
         help="The number of rows to process in one chunk. Larger numbers require more memory but fewer interactions with I/O.",
     )
     tukey_parser.add_argument(
@@ -798,6 +786,7 @@ def cli() -> None:
             tukey_width=args.tukey_width,
             data_column=args.data_column,
             output_column=args.output_column,
+            copy_column_data=args.copy_column_data,
             dry_run=args.dry_run,
             make_plots=args.make_plots,
             overwrite=args.overwrite,

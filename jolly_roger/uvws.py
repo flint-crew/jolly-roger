@@ -9,7 +9,6 @@ import astropy.units as u
 import numpy as np
 from astropy.constants import c as speed_of_light
 from casacore.tables import table, taql
-from numpy.typing import NDArray
 from tqdm import tqdm
 
 from jolly_roger.baselines import Baselines, get_baselines_from_ms

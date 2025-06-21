@@ -141,7 +141,7 @@ def make_hour_angles_for_ms(
     lst = times.sidereal_time("apparent", longitude=location.lon)
     hour_angle = (lst - sky_position.ra).wrap_at(12 * u.hourangle)
 
-    logger.info("Creatring elevation curve")
+    logger.info("Creating elevation curve")
     altaz = sky_position.transform_to(AltAz(obstime=times, location=location))
 
     return PositionHourAngles(
