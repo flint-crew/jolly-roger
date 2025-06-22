@@ -560,7 +560,7 @@ def _tukey_tractor(
 
         # Delay with the elevation of the target object
         # TODO: Allow elevation to be a user parameter
-        elevation_mask = w_delays.elevation < (0 * u.deg)
+        elevation_mask = w_delays.elevation < tukey_tractor_options.elevation_cut
         taper[elevation_mask[time_idx], :, :] = 1.0
 
         # TODO: Handle case of aliased delays
@@ -620,6 +620,8 @@ class TukeyTractorOptions:
     """apply the taper using the delay towards the target object."""
     target_object: str = "Sun"
     """The target object to apply the delay towards."""
+    elevation_cut: u.Quantity = 0 * u.deg
+    """The elevation cut-off for the target object. Defaults to 0 degrees."""
 
 
 def tukey_tractor(
