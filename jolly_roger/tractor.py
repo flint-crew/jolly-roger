@@ -202,7 +202,6 @@ def _get_data_chunk_from_main_table(
     logger.debug(f"Length of open table: {table_length} rows")
 
     lower_row = 0
-    upper_row = chunk_size
 
     while lower_row < table_length:
         data = ms_table.getcol(data_column, startrow=lower_row, nrow=chunk_size)
@@ -226,7 +225,6 @@ def _get_data_chunk_from_main_table(
         )
 
         lower_row += chunk_size
-        upper_row += chunk_size
 
 
 def get_data_chunks(
