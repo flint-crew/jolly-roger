@@ -205,14 +205,14 @@ def _get_data_chunk_from_main_table(
     upper_row = chunk_size
 
     while lower_row < table_length:
-        rows: list[dict[str, Any]] = ms_table[lower_row:upper_row]
-
-        data = _list_to_array(list_of_rows=rows, key=data_column)
-        flags = _list_to_array(list_of_rows=rows, key="FLAG")
-        uvws = _list_to_array(list_of_rows=rows, key="UVW")
-        time_centroid = _list_to_array(list_of_rows=rows, key="TIME_CENTROID")
-        ant_1 = _list_to_array(list_of_rows=rows, key="ANTENNA1")
-        ant_2 = _list_to_array(list_of_rows=rows, key="ANTENNA2")
+        data = ms_table.getcol(data_column, startrow=lower_row, nrow=chunk_size)
+        flags = ms_table.getcol("FLAG", startrow=lower_row, nrow=chunk_size)
+        uvws = ms_table.getcol("UVW", startrow=lower_row, nrow=chunk_size)
+        time_centroid = ms_table.getcol(
+            "TIME_CENTROID", startrow=lower_row, nrow=chunk_size
+        )
+        ant_1 = ms_table.getcol("ANTENNA1", startrow=lower_row, nrow=chunk_size)
+        ant_2 = ms_table.getcol("ANTENNA2", startrow=lower_row, nrow=chunk_size)
 
         yield DataChunkArray(
             data=data,
