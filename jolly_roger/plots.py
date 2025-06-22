@@ -88,7 +88,7 @@ def plot_baseline_comparison_data(
         cmap = plt.cm.binary_r
 
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(
-            2, 2, figsize=(10, 10), sharex=True, sharey="row"
+            2, 2, figsize=(12, 10), sharex=True, sharey="row"
         )
         im = ax1.pcolormesh(
             before_baseline_data.time,
@@ -112,7 +112,8 @@ def plot_baseline_comparison_data(
             ylabel=f"Frequency / {after_baseline_data.freq_chan.unit:latex_inline}",
             title="After",
         )
-        fig.colorbar(im, ax=ax2, label="Stokes I Amplitude / Jy")
+        for ax in (ax1, ax2):
+            fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
         # TODO: Move these delay calculations outside of the plotting function
         # And here we calculate the delay information
@@ -145,7 +146,8 @@ def plot_baseline_comparison_data(
             cmap=cmap,
         )
         ax4.set(ylabel="Delay / s", title="After")
-        fig.colorbar(im, ax=ax4, label="Stokes I Amplitude / Jy")
+        for ax in (ax3, ax4):
+            fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
         if w_delays is not None:
             for ax, baseline_data in zip(  # type:ignore[call-overload]
@@ -159,7 +161,7 @@ def plot_baseline_comparison_data(
                     baseline_data.time,
                     w_delays.w_delays[b_idx],
                     color="tab:red",
-                    linestyle="--",
+                    linestyle="-",
                     label=f"Delay for {w_delays.object_name}",
                 )
                 ax.legend()
