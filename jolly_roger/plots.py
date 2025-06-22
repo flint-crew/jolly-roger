@@ -129,7 +129,6 @@ def plot_baseline_comparison_data(
             before_delays_i, interval=MinMaxInterval(), stretch=LogStretch()
         )
 
-
         im = ax3.pcolormesh(
             before_baseline_data.time,
             before_delays.delay,
