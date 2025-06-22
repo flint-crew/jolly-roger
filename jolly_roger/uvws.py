@@ -40,13 +40,13 @@ def get_object_delay_for_ms(
     baselines: Baselines = get_baselines_from_ms(ms_path=ms_path)
     hour_angles_phase = make_hour_angles_for_ms(
         ms_path=ms_path,
-        position=None,  # gets the position form phase direction
+        position=None,  # gets the position from phase direction
     )
     uvws_phase: UVWs = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_phase)
 
     hour_angles_object = make_hour_angles_for_ms(
         ms_path=ms_path,
-        position=object_name,  # gets the position form phase direction
+        position=object_name,  # gets the position from phase direction
     )
     uvws_object: UVWs = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_object)
 
