@@ -28,6 +28,9 @@
 
 The pirate flagger!
 
+<img src="logo.png" alt="The Jolly Roger Flag" style="width:400px;"/>
+
+
 # Installation
 
 `pip install jolly-roger`
