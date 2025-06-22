@@ -85,7 +85,7 @@ def plot_baseline_comparison_data(
         norm = ImageNormalize(
             after_amp_stokesi, interval=ZScaleInterval(), stretch=SqrtStretch()
         )
-        cmap = plt.cm.binary_r
+        cmap = plt.cm.viridis
 
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(
             2, 2, figsize=(12, 10), sharex=True, sharey="row"
