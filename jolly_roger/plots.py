@@ -85,6 +85,7 @@ def plot_baseline_comparison_data(
         norm = ImageNormalize(
             after_amp_stokesi, interval=ZScaleInterval(), stretch=SqrtStretch()
         )
+        cmap = plt.cm.binary_r
 
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(
             2, 2, figsize=(10, 10), sharex=True, sharey="row"
@@ -94,6 +95,7 @@ def plot_baseline_comparison_data(
             before_baseline_data.freq_chan,
             before_amp_stokesi.T,
             norm=norm,
+            cmap=cmap,
         )
         ax1.set(
             ylabel=f"Frequency / {before_baseline_data.freq_chan.unit:latex_inline}",
@@ -104,6 +106,7 @@ def plot_baseline_comparison_data(
             after_baseline_data.freq_chan,
             after_amp_stokesi.T,
             norm=norm,
+            cmap=cmap,
         )
         ax2.set(
             ylabel=f"Frequency / {after_baseline_data.freq_chan.unit:latex_inline}",
@@ -125,11 +128,13 @@ def plot_baseline_comparison_data(
             before_delays_i, interval=MinMaxInterval(), stretch=LogStretch()
         )
 
+
         im = ax3.pcolormesh(
             before_baseline_data.time,
             before_delays.delay,
             before_delays_i.T,
             norm=delay_norm,
+            cmap=cmap,
         )
         ax3.set(ylabel="Delay / s", title="Before")
         ax4.pcolormesh(
@@ -137,6 +142,7 @@ def plot_baseline_comparison_data(
             after_delays.delay,
             after_delays_i.T,
             norm=delay_norm,
+            cmap=cmap,
         )
         ax4.set(ylabel="Delay / s", title="After")
         fig.colorbar(im, ax=ax4, label="Stokes I Amplitude / Jy")
@@ -152,7 +158,7 @@ def plot_baseline_comparison_data(
                 ax.plot(
                     baseline_data.time,
                     w_delays.w_delays[b_idx],
-                    color="k",
+                    color="tab:red",
                     linestyle="--",
                     label=f"Delay for {w_delays.object_name}",
                 )
