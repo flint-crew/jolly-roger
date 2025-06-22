@@ -616,7 +616,7 @@ class TukeyTractorOptions:
     chunk_size: int = 1000
     """Size of the row-wise chunking iterator"""
     apply_towards_object: bool = False
-    """apply the taper using the delay towards the a target object."""
+    """apply the taper using the delay towards the target object."""
     target_object: str = "Sun"
     """The target object to apply the delay towards."""
 
