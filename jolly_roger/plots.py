@@ -85,15 +85,17 @@ def plot_baseline_comparison_data(
         norm = ImageNormalize(
             after_amp_stokesi, interval=ZScaleInterval(), stretch=SqrtStretch()
         )
+        cmap = plt.cm.viridis
 
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(
-            2, 2, figsize=(10, 10), sharex=True, sharey="row"
+            2, 2, figsize=(12, 10), sharex=True, sharey="row"
         )
         im = ax1.pcolormesh(
             before_baseline_data.time,
             before_baseline_data.freq_chan,
             before_amp_stokesi.T,
             norm=norm,
+            cmap=cmap,
         )
         ax1.set(
             ylabel=f"Frequency / {before_baseline_data.freq_chan.unit:latex_inline}",
@@ -104,12 +106,14 @@ def plot_baseline_comparison_data(
             after_baseline_data.freq_chan,
             after_amp_stokesi.T,
             norm=norm,
+            cmap=cmap,
         )
         ax2.set(
             ylabel=f"Frequency / {after_baseline_data.freq_chan.unit:latex_inline}",
             title="After",
         )
-        fig.colorbar(im, ax=ax2, label="Stokes I Amplitude / Jy")
+        for ax in (ax1, ax2):
+            fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
         # TODO: Move these delay calculations outside of the plotting function
         # And here we calculate the delay information
@@ -130,6 +134,7 @@ def plot_baseline_comparison_data(
             before_delays.delay,
             before_delays_i.T,
             norm=delay_norm,
+            cmap=cmap,
         )
         ax3.set(ylabel="Delay / s", title="Before")
         ax4.pcolormesh(
@@ -137,9 +142,11 @@ def plot_baseline_comparison_data(
             after_delays.delay,
             after_delays_i.T,
             norm=delay_norm,
+            cmap=cmap,
         )
         ax4.set(ylabel="Delay / s", title="After")
-        fig.colorbar(im, ax=ax4, label="Stokes I Amplitude / Jy")
+        for ax in (ax3, ax4):
+            fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
         if w_delays is not None:
             for ax, baseline_data in zip(  # type:ignore[call-overload]
@@ -152,8 +159,8 @@ def plot_baseline_comparison_data(
                 ax.plot(
                     baseline_data.time,
                     w_delays.w_delays[b_idx],
-                    color="k",
-                    linestyle="--",
+                    color="tab:red",
+                    linestyle="-",
                     label=f"Delay for {w_delays.object_name}",
                 )
                 ax.legend()

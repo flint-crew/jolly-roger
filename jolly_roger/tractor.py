@@ -202,17 +202,16 @@ def _get_data_chunk_from_main_table(
     logger.debug(f"Length of open table: {table_length} rows")
 
     lower_row = 0
-    upper_row = chunk_size
 
     while lower_row < table_length:
-        rows: list[dict[str, Any]] = ms_table[lower_row:upper_row]
-
-        data = _list_to_array(list_of_rows=rows, key=data_column)
-        flags = _list_to_array(list_of_rows=rows, key="FLAG")
-        uvws = _list_to_array(list_of_rows=rows, key="UVW")
-        time_centroid = _list_to_array(list_of_rows=rows, key="TIME_CENTROID")
-        ant_1 = _list_to_array(list_of_rows=rows, key="ANTENNA1")
-        ant_2 = _list_to_array(list_of_rows=rows, key="ANTENNA2")
+        data = ms_table.getcol(data_column, startrow=lower_row, nrow=chunk_size)
+        flags = ms_table.getcol("FLAG", startrow=lower_row, nrow=chunk_size)
+        uvws = ms_table.getcol("UVW", startrow=lower_row, nrow=chunk_size)
+        time_centroid = ms_table.getcol(
+            "TIME_CENTROID", startrow=lower_row, nrow=chunk_size
+        )
+        ant_1 = ms_table.getcol("ANTENNA1", startrow=lower_row, nrow=chunk_size)
+        ant_2 = ms_table.getcol("ANTENNA2", startrow=lower_row, nrow=chunk_size)
 
         yield DataChunkArray(
             data=data,
@@ -226,7 +225,6 @@ def _get_data_chunk_from_main_table(
         )
 
         lower_row += chunk_size
-        upper_row += chunk_size
 
 
 def get_data_chunks(
@@ -559,7 +557,8 @@ def _tukey_tractor(
         taper = 1.0 - taper
 
         # Delay with the elevation of the target object
-        elevation_mask = w_delays.elevation < (-3 * u.deg)
+        # TODO: Allow elevation to be a user parameter
+        elevation_mask = w_delays.elevation < tukey_tractor_options.elevation_cut
         taper[elevation_mask[time_idx], :, :] = 1.0
 
         # TODO: Handle case of aliased delays
@@ -619,6 +618,8 @@ class TukeyTractorOptions:
     """apply the taper using the delay towards the target object."""
     target_object: str = "Sun"
     """The target object to apply the delay towards."""
+    elevation_cut: u.Quantity = -1 * u.deg
+    """The elevation cut-off for the target object. Defaults to 0 degrees."""
 
 
 def tukey_tractor(
