@@ -618,7 +618,7 @@ class TukeyTractorOptions:
     """apply the taper using the delay towards the target object."""
     target_object: str = "Sun"
     """The target object to apply the delay towards."""
-    elevation_cut: u.Quantity = 0 * u.deg
+    elevation_cut: u.Quantity = -1 * u.deg
     """The elevation cut-off for the target object. Defaults to 0 degrees."""
 
 
