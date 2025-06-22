@@ -16,8 +16,10 @@ from casacore.tables import makecoldesc, table, taql
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
-from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
+from jolly_roger.delays import data_to_delay_time, delay_time_to_data
 from jolly_roger.logging import logger
+from jolly_roger.plots import plot_baseline_comparison_data
+from jolly_roger.uvws import WDelays, get_object_delay_for_ms
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,11 @@ def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
     spw_table = table(str(ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=read_only)
     field_table = table(str(ms_path / "FIELD"), ack=False, readonly=read_only)
 
+    # TODO: Get the data without auto-correlations e.g.
+    # no_auto_main_table = taql(
+    #     "select from $main_table where ANTENNA1 != ANTENNA2",
+    # )
+
     return OpenMSTables(
         main_table=main_table,
         spw_table=spw_table,
@@ -60,10 +67,15 @@ def tukey_taper(
     x: np.typing.NDArray[np.floating],
     outer_width: float = np.pi / 4,
     tukey_width: float = np.pi / 8,
+    tukey_x_offset: NDArray[np.floating] | None = None,
 ) -> np.ndarray:
     x_freq = np.linspace(-np.pi, np.pi, len(x))
-    taper = np.ones_like(x_freq)
 
+    if tukey_x_offset is not None:
+        x_freq = x_freq[:, None] - tukey_x_offset[None, :]
+
+    taper = np.ones_like(x_freq)
+    logger.debug(f"{x_freq.shape=} {type(x_freq)=}")
     # Fully zero region
     taper[np.abs(x_freq) > outer_width] = 0
 
@@ -115,13 +127,21 @@ class DataChunkArray:
     """Container for a chunk of data"""
 
     data: NDArray[np.complexfloating]
+    """The data from the nominated data column loaded"""
     flags: NDArray[np.bool_]
+    """Flags that correspond to the loaded data"""
     uvws: NDArray[np.floating]
+    """The uvw coordinates for each loaded data record"""
     time_centroid: NDArray[np.floating]
+    """The time of each data record"""
     ant_1: NDArray[np.int64]
+    """Antenna 1 that formed the baseline"""
     ant_2: NDArray[np.int64]
+    """Antenna 2 that formed the baseline"""
     row_start: int
+    """The starting row of the portion of data loaded"""
     chunk_size: int
+    """The size of the data chunk loaded (may be larger if this is the last record)"""
 
 
 @dataclass
@@ -140,6 +160,8 @@ class DataChunk:
     """The UVW coordinates of the phase center of the baseline."""
     time: Time
     """The time of the observations."""
+    time_mjds: NDArray[np.floating]
+    """The raw time extracted from the measurement set in MJDs"""
     ant_1: NDArray[np.int64]
     """The first antenna in the baseline."""
     ant_2: NDArray[np.int64]
@@ -254,6 +276,7 @@ def get_data_chunks(
             phase_center=target,
             uvws_phase_center=uvws_phase_center,
             time=time,
+            time_mjds=data_chunk_array.time_centroid,
             ant_1=data_chunk_array.ant_1,
             ant_2=data_chunk_array.ant_2,
             row_start=data_chunk_array.row_start,
@@ -291,6 +314,17 @@ def get_baseline_data(
     ant_2: int,
     data_column: str = "DATA",
 ) -> BaselineData:
+    """Get data of a baseline from a measurement set
+
+    Args:
+        open_ms_tables (OpenMSTables): The measurement set to draw data from
+        ant_1 (int): The first antenna of the baseline
+        ant_2 (int): The second antenna of the baseline
+        data_column (str, optional): The data column to extract. Defaults to "DATA".
+
+    Returns:
+        BaselineData:  Extracted baseline data
+    """
     logger.info(f"Getting baseline {ant_1} {ant_2}")
 
     freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ")
@@ -332,7 +366,21 @@ def add_output_column(
     data_column: str = "DATA",
     output_column: str = "CORRECTED_DATA",
     overwrite: bool = False,
+    copy_column_data: bool = False,
 ) -> None:
+    """Add in the output data column where the modified data
+    will be recorded
+
+    Args:
+        tab (table): Open reference to the table to modify
+        data_column (str, optional): The base data column the new will be based from. Defaults to "DATA".
+        output_column (str, optional): The new data column to be created. Defaults to "CORRECTED_DATA".
+        overwrite (bool, optional): Whether to overwrite the new output column. Defaults to False.
+        copy_column_data (bool, optional): Copy the original data over to the output column. Defaults to False.
+
+    Raises:
+        ValueError: Raised if the output column already exists and overwrite is False
+    """
     colnames = tab.colnames()
     if output_column in colnames:
         if not overwrite:
@@ -342,14 +390,16 @@ def add_output_column(
         logger.warning(
             f"Output column {output_column} already exists in the measurement set. Will be overwritten!"
         )
-        return
-    logger.info(f"Adding {output_column=}")
-    desc = makecoldesc(data_column, tab.getcoldesc(data_column))
-    desc["name"] = output_column
-    tab.addcols(desc)
-    tab.flush()
-    # logger.info(f"Copying {data_column=} to {output_column=}")
-    # taql(f"UPDATE $tab SET {output_column}={data_column}")
+    else:
+        logger.info(f"Adding {output_column=}")
+        desc = makecoldesc(data_column, tab.getcoldesc(data_column))
+        desc["name"] = output_column
+        tab.addcols(desc)
+        tab.flush()
+
+    if copy_column_data:
+        logger.info(f"Copying {data_column=} to {output_column=}")
+        taql(f"UPDATE $tab SET {output_column}={data_column}")
 
 
 def write_output_column(
@@ -381,146 +431,11 @@ def write_output_column(
             subtab.flush()
 
 
-def plot_baseline_data(
-    baseline_data: BaselineData,
-    output_dir: Path,
-    suffix: str = "",
-) -> None:
-    import matplotlib.pyplot as plt
-    from astropy.visualization import quantity_support, time_support
-
-    with quantity_support(), time_support():
-        data_masked = baseline_data.masked_data
-        data_xx = data_masked[..., 0]
-        data_yy = data_masked[..., -1]
-        data_stokesi = (data_xx + data_yy) / 2
-        amp_stokesi = np.abs(data_stokesi)
-
-        fig, ax = plt.subplots()
-        im = ax.pcolormesh(
-            baseline_data.time,
-            baseline_data.freq_chan,
-            amp_stokesi.T,
-        )
-        fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
-        ax.set(
-            ylabel=f"Frequency / {baseline_data.freq_chan.unit:latex_inline}",
-            title=f"Ant {baseline_data.ant_1} - Ant {baseline_data.ant_2}",
-        )
-        output_path = (
-            output_dir
-            / f"baseline_data_{baseline_data.ant_1}_{baseline_data.ant_2}{suffix}.png"
-        )
-        fig.savefig(output_path)
-
-
-def plot_baseline_comparison_data(
-    before_baseline_data: BaselineData,
-    after_baseline_data: BaselineData,
-    output_dir: Path,
-    suffix: str = "",
-) -> Path:
-    import matplotlib.pyplot as plt
-    from astropy.visualization import (
-        ImageNormalize,
-        LogStretch,
-        MinMaxInterval,
-        SqrtStretch,
-        ZScaleInterval,
-        quantity_support,
-        time_support,
-    )
-
-    with quantity_support(), time_support():
-        before_amp_stokesi = np.abs(
-            (
-                before_baseline_data.masked_data[..., 0]
-                + before_baseline_data.masked_data[..., -1]
-            )
-            / 2
-        )
-        after_amp_stokesi = np.abs(
-            (
-                after_baseline_data.masked_data[..., 0]
-                + after_baseline_data.masked_data[..., -1]
-            )
-            / 2
-        )
-
-        norm = ImageNormalize(
-            after_amp_stokesi, interval=ZScaleInterval(), stretch=SqrtStretch()
-        )
-
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(10, 10))
-        im = ax1.pcolormesh(
-            before_baseline_data.time,
-            before_baseline_data.freq_chan,
-            before_amp_stokesi.T,
-            norm=norm,
-        )
-        ax1.set(
-            ylabel=f"Frequency / {before_baseline_data.freq_chan.unit:latex_inline}",
-            title="Before",
-        )
-        ax2.pcolormesh(
-            after_baseline_data.time,
-            after_baseline_data.freq_chan,
-            after_amp_stokesi.T,
-            norm=norm,
-        )
-        ax2.set(
-            ylabel=f"Frequency / {after_baseline_data.freq_chan.unit:latex_inline}",
-            title="After",
-        )
-        fig.colorbar(im, ax=ax2, label="Stokes I Amplitude / Jy")
-
-        # TODO: Move these delay calculations outside of the plotting function
-        # And here we calculate the delay information
-        before_delays = data_to_delay_time(data=before_baseline_data)
-        after_delays = data_to_delay_time(data=after_baseline_data)
-
-        before_delays_i = np.abs(
-            (before_delays.delay_time[:, :, 0] + before_delays.delay_time[:, :, -1]) / 2
-        )
-        after_delays_i = np.abs(
-            (after_delays.delay_time[:, :, 0] + after_delays.delay_time[:, :, -1]) / 2
-        )
-
-        delay_norm = ImageNormalize(
-            before_delays_i, interval=MinMaxInterval(), stretch=LogStretch()
-        )
-
-        im = ax3.pcolormesh(
-            before_baseline_data.time,
-            before_delays.delay,
-            before_delays_i.T,
-            norm=delay_norm,
-        )
-        ax3.set(ylabel="Delay / s", title="Before")
-        ax4.pcolormesh(
-            after_baseline_data.time,
-            after_delays.delay,
-            after_delays_i.T,
-            norm=delay_norm,
-        )
-        ax4.set(ylabel="Delay / s", title="After")
-        fig.colorbar(im, ax=ax4, label="Stokes I Amplitude / Jy")
-
-        output_path = (
-            output_dir
-            / f"baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}{suffix}.png"
-        )
-        fig.suptitle(
-            f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}"
-        )
-        fig.tight_layout()
-        fig.savefig(output_path)
-
-        return output_path
-
-
 def make_plot_results(
-    open_ms_tables: OpenMSTables, data_column: str, output_column: str
+    open_ms_tables: OpenMSTables,
+    data_column: str,
+    output_column: str,
+    w_delays: WDelays | None = None,
 ) -> list[Path]:
     output_paths = []
     output_dir = open_ms_tables.ms_path.parent / "plots"
@@ -539,37 +454,128 @@ def make_plot_results(
             ant_2=i + 1,
             data_column=output_column,
         )
+        before_delays = data_to_delay_time(data=before_baseline_data)
+        after_delays = data_to_delay_time(data=after_baseline_data)
+
+        # TODO: the baseline data and delay times could be put into a single
+        # structure to pass around easier.
         plot_path = plot_baseline_comparison_data(
             before_baseline_data=before_baseline_data,
             after_baseline_data=after_baseline_data,
+            before_delays=before_delays,
+            after_delays=after_delays,
             output_dir=output_dir,
             suffix="_comparison",
+            w_delays=w_delays,
         )
         output_paths.append(plot_path)
 
     return output_paths
 
 
+def _get_baseline_time_indicies(
+    w_delays: WDelays, data_chunk: DataChunk
+) -> tuple[NDArray[np.int_], NDArray[np.int_]]:
+    """Extract the mappings into the data array"""
+
+    # When computing uvws we have ignored auto-correlations!
+    # TODO: Either extend the uvw calculations to include auto-correlations
+    # or ignore them during iterations. Certainly the former is the better
+    # approach.
+
+    # Again, note the auto-correlations are ignored!!! Here be pirates mate
+    baseline_idx = np.array(
+        [
+            w_delays.b_map[(int(ant_1), int(ant_2))] if ant_1 != ant_2 else 0
+            for ant_1, ant_2 in zip(  # type: ignore[call-overload]
+                data_chunk.ant_1, data_chunk.ant_2, strict=False
+            )
+        ]
+    )
+
+    time_idx = np.array(
+        [w_delays.time_map[time * u.s] for time in data_chunk.time_mjds]
+    )
+
+    return baseline_idx, time_idx
+
+
 def _tukey_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
+    w_delays: WDelays | None = None,
 ) -> NDArray[np.complex128]:
+    """Compute a tukey taper for a dataset and then apply it
+    to the dataset. Here the data corresponds to a (chan, time, pol)
+    array. Data is not necessarily a single baseline.
+
+    If a `w_delays` is provided it represents the delay (in seconds)
+    between the phase direction of the measurement set and the Sun.
+    This quantity may be derived in a number of ways, but in `jolly_roger`
+    it is based on the difference of the w-coordinated towards these
+    two directions. It should have a shape of [baselines, time]
+
+    Args:
+        data_chunk (DataChunk): The representation of the data with attached units
+        tukey_tractor_options (TukeyTractorOptions): Options for the tukey taper
+        w_delays (WDelays | None, optional): The w-derived delays to apply. If None taper is applied to large delays. Defaults to None.
+
+    Returns:
+        NDArray[np.complex128]: Scaled complex visibilities
+    """
+
     delay_time = data_to_delay_time(data=data_chunk)
+
+    # Look up the delay offset if requested
+    tukey_x_offset: u.Quantity = np.zeros_like(delay_time.delay)
+
+    if w_delays is not None:
+        baseline_idx, time_idx = _get_baseline_time_indicies(
+            w_delays=w_delays, data_chunk=data_chunk
+        )
+        tukey_x_offset = w_delays.w_delays[baseline_idx, time_idx]
+        # logger.info(f"{tukey_x_offset=}")
+
+        # need to scale the x offsert to the -pi to pi
+        # The delay should be symmetric
+        tukey_x_offset = (
+            tukey_x_offset / (np.max(delay_time.delay) / np.pi).decompose()
+        ).value
+        # logger.info(f"{tukey_x_offset=}")
 
     taper = tukey_taper(
         x=delay_time.delay,
         outer_width=tukey_tractor_options.outer_width,
         tukey_width=tukey_tractor_options.tukey_width,
+        tukey_x_offset=tukey_x_offset,
     )
+    if w_delays is not None:
+        # The use of the `tukey_x_offset` changes the
+        # shape of the output array. The internals of that
+        # function returns a different shape via the broadcasting
+        taper = np.swapaxes(taper[:, :, None], 0, 1)
+
+        # Since we want to dampen the target object we invert the taper
+        taper = 1.0 - taper
+
+        # Delay with the elevation of the target object
+        elevation_mask = w_delays.elevation < (-3 * u.deg)
+        taper[elevation_mask[time_idx], :, :] = 1.0
+
+        # TODO: Handle case of aliased delays
+
+        # TODO: Create heuristic to determine where baseline is long enough to
+        # ignore the tapering. Aliasing may give us this though...
+
+        # TODO: Create flags where delay is 'close' to 0
+
+    else:
+        taper = taper[None, :, None]
 
     # Delay-time is a 3D array: (time, delay, pol)
     # Taper is 1D: (delay,)
-    tapered_delay_time_data_real = (
-        delay_time.delay_time.real * taper[np.newaxis, :, np.newaxis]
-    )
-    tapered_delay_time_data_imag = (
-        delay_time.delay_time.imag * taper[np.newaxis, :, np.newaxis]
-    )
+    tapered_delay_time_data_real = delay_time.delay_time.real * taper
+    tapered_delay_time_data_imag = delay_time.delay_time.imag * taper
     tapered_delay_time_data = (
         tapered_delay_time_data_real + 1j * tapered_delay_time_data_imag
     )
@@ -587,23 +593,51 @@ def _tukey_tractor(
 
 @dataclass
 class TukeyTractorOptions:
+    """Options to describe the tukey taper to apply"""
+
     ms_path: Path
+    """Measurement set to be modified"""
     outer_width: float = np.pi / 4
+    """The start of the tapering in frequency space"""
     tukey_width: float = np.pi / 8
+    """The width of the tapered region in frequency space"""
     data_column: str = "DATA"
+    """The visibility column to modify"""
     output_column: str = "CORRECTED_DATA"
+    """The output column to be created with the modified data"""
+    copy_column_data: bool = False
+    """Copy the data from the data column to the output column before applying the taper"""
     dry_run: bool = False
+    """Indicates whether the data will be written back to the measurement set"""
     make_plots: bool = False
+    """Create a small set of diagnostic plots"""
     overwrite: bool = False
+    """If the output column exists it will be overwritten"""
     chunk_size: int = 1000
+    """Size of the row-wise chunking iterator"""
+    apply_towards_object: bool = False
+    """apply the taper using the delay towards the target object."""
+    target_object: str = "Sun"
+    """The target object to apply the delay towards."""
 
 
-def dumb_tukey_tractor(
+def tukey_tractor(
     tukey_tractor_options: TukeyTractorOptions,
 ) -> None:
+    """Iterate row-wise over a specified measurement set and
+    apply a tukey taper operation to the delay data. Iteration
+    is performed based on a chunk soize, indicating the number
+    of rows to read in at a time.
+
+    Full description of options are outlined in `TukeyTaperOptions`.
+
+    Args:
+        tukey_tractor_options (TukeyTractorOptions): The settings to use during the taper, and measurement set to apply them to.
+    """
     logger.info("jolly-roger")
     logger.info(f"Options: {tukey_tractor_options}")
 
+    # acquire all the tables necessary to get unit information and data from
     open_ms_tables = get_open_ms_tables(
         ms_path=tukey_tractor_options.ms_path, read_only=False
     )
@@ -614,146 +648,53 @@ def dumb_tukey_tractor(
             output_column=tukey_tractor_options.output_column,
             data_column=tukey_tractor_options.data_column,
             overwrite=tukey_tractor_options.overwrite,
+            copy_column_data=tukey_tractor_options.copy_column_data,
         )
 
-    with tqdm(total=len(open_ms_tables.main_table)) as pbar:
-        for data_chunk in get_data_chunks(
-            open_ms_tables=open_ms_tables,
-            chunk_size=tukey_tractor_options.chunk_size,
-            data_column=tukey_tractor_options.data_column,
-        ):
-            taper_data_chunk: DataChunk = _tukey_tractor(
-                data_chunk=data_chunk,
-                tukey_tractor_options=tukey_tractor_options,
-            )
+    # Generate the delay for all baselines and time steps
+    w_delays: WDelays | None = None
+    if tukey_tractor_options.apply_towards_object:
+        logger.info(
+            f"Pre-calculating delays towards the target: {tukey_tractor_options.target_object}"
+        )
+        w_delays = get_object_delay_for_ms(
+            ms_path=tukey_tractor_options.ms_path,
+            object_name=tukey_tractor_options.target_object,
+        )
+        assert len(w_delays.w_delays.shape) == 2
 
-            pbar.update(len(taper_data_chunk.masked_data))
+    if not tukey_tractor_options.dry_run:
+        with tqdm(total=len(open_ms_tables.main_table)) as pbar:
+            for data_chunk in get_data_chunks(
+                open_ms_tables=open_ms_tables,
+                chunk_size=tukey_tractor_options.chunk_size,
+                data_column=tukey_tractor_options.data_column,
+            ):
+                taper_data_chunk = _tukey_tractor(
+                    data_chunk=data_chunk,
+                    tukey_tractor_options=tukey_tractor_options,
+                    w_delays=w_delays,
+                )
 
-            if tukey_tractor_options.dry_run:
-                # Do not apply the data
-                continue
+                pbar.update(len(taper_data_chunk.masked_data))
 
-            open_ms_tables.main_table.putcol(
-                columnname=tukey_tractor_options.output_column,
-                value=taper_data_chunk.masked_data,
-                startrow=taper_data_chunk.row_start,
-                nrow=taper_data_chunk.chunk_size,
-            )
+                # only put if not a dry run
+                open_ms_tables.main_table.putcol(
+                    columnname=tukey_tractor_options.output_column,
+                    value=taper_data_chunk.masked_data,
+                    startrow=taper_data_chunk.row_start,
+                    nrow=taper_data_chunk.chunk_size,
+                )
 
-    if tukey_tractor_options.make_plots and not tukey_tractor_options.dry_run:
-        plot_paths: list[Path] = make_plot_results(
+    if tukey_tractor_options.make_plots:
+        plot_paths = make_plot_results(
             open_ms_tables=open_ms_tables,
             data_column=tukey_tractor_options.data_column,
             output_column=tukey_tractor_options.output_column,
+            w_delays=w_delays,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
-
-
-@dataclass
-class TractorOptions:
-    """Options for the Jolly Roger Tractor."""
-
-    ms_path: Path
-    """Path to the measurement set to process."""
-    object: str = "sun"
-    """Target position to use for the tractor. Defaults to 'sun'."""
-    dry_run: bool = False
-    """If set, the tractor will not write any output, but will log what it would do."""
-    data_column: str = "DATA"
-    """The data column to use for the tractor. Defaults to 'DATA'."""
-    output_column: str = "CORRECTED_DATA"
-    """The output column to write the tractor results to. Defaults to 'CORRECTED_DATA'."""
-    make_plots: bool = False
-    """If set, the tractor will make plots of the results."""
-
-
-def plot_tractor_baseline(
-    baseline_data: BaselineData,
-    delay_time: DelayTime,
-    delay_object: u.Quantity,
-    delay_phase_center: u.Quantity,
-    output_dir: Path,
-) -> Path:
-    import matplotlib.pyplot as plt
-    from astropy.visualization import quantity_support, time_support
-
-    with quantity_support(), time_support():
-        ant_1 = baseline_data.ant_1
-        ant_2 = baseline_data.ant_2
-        time = baseline_data.time
-        delay = delay_time.delay
-        delay_time_xx = delay_time.delay_time[..., 0]
-        delay_time_yy = delay_time.delay_time[..., -1]
-        delay_time_stokesi = (delay_time_xx + delay_time_yy) / 2
-
-        fig, ax = plt.subplots()
-        im = ax.pcolormesh(
-            time, delay, np.abs(delay_time_stokesi).T, norm=plt.cm.colors.LogNorm()
-        )
-        ax.set(
-            ylabel=f"Delay / {delay.unit:latex_inline}",
-            title=f"Baseline {ant_1} - {ant_2}",
-        )
-        fig.colorbar(im, ax=ax, label="Amplitude")
-        ax.plot(time, delay_object, "k--", label="Sun", alpha=1, lw=1)
-        ax.plot(
-            time,
-            delay_phase_center,
-            "w-",
-            label="phase center",
-            alpha=0.5,
-        )
-        output_path = output_dir / f"tractor_baseline_{ant_1}_{ant_2}.png"
-        fig.savefig(output_path)
-
-        return output_path
-
-
-# def tractor_baseline(
-#     ant_1: int,
-#     ant_2: int,
-#     baselines: Baselines,
-#     uvws_object_baseline: u.Quantity,
-#     options: TractorOptions,
-# ) -> None:
-#     open_ms_tables = get_open_ms_tables()
-#     baseline_data = get_baseline_data(
-#         baselines=baselines,
-#         ant_1=ant_1,
-#         ant_2=ant_2,
-#         data_column=options.data_column,
-#     )
-
-#     delay_time = data_to_delay_time(data=baseline_data)
-
-#     _, _, w_coords_object = uvws_object_baseline
-#     _, _, w_coords_phase_center = baseline_data.uvws_phase_center
-
-#     # Subtract
-#     delay_object = (
-#         (w_coords_object - w_coords_phase_center) / speed_of_light
-#     ).decompose()
-#     delay_phase_center = (
-#         (w_coords_phase_center - w_coords_phase_center) / speed_of_light
-#     ).decompose()
-
-#     if options.make_plots:
-#         output_dir = options.ms_path.parent / "plots"
-#         output_dir.mkdir(exist_ok=True, parents=True)
-#         plot_baseline_data(
-#             baseline_data=baseline_data,
-#             output_dir=output_dir,
-#             suffix="_original",
-#         )
-#         plot_tractor_baseline(
-#             baseline_data=baseline_data,
-#             delay_time=delay_time,
-#             delay_object=delay_object,
-#             delay_phase_center=delay_phase_center,
-#             output_dir=output_dir,
-#         )
-#         logger.info(f"Plots saved to {output_dir}")
 
 
 def get_parser() -> ArgumentParser:
@@ -798,6 +739,11 @@ def get_parser() -> ArgumentParser:
         help="The output column to write the Tukey tractor results to",
     )
     tukey_parser.add_argument(
+        "--copy-column-data",
+        action="store_true",
+        help="If set, the Tukey tractor will copy the data from the data column to the output column before applying the taper",
+    )
+    tukey_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="If set, the Tukey tractor will not write any output, but will log what it would do",
@@ -815,8 +761,19 @@ def get_parser() -> ArgumentParser:
     tukey_parser.add_argument(
         "--chunk-size",
         type=int,
-        default=10009,
+        default=10000,
         help="The number of rows to process in one chunk. Larger numbers require more memory but fewer interactions with I/O.",
+    )
+    tukey_parser.add_argument(
+        "--target-object",
+        type=str,
+        default="Sun",
+        help="The target object to apply the delay towards. Defaults to 'Sun'.",
+    )
+    tukey_parser.add_argument(
+        "--apply-towards-object",
+        action="store_true",
+        help="Whether the tukey taper is applied towards the target object (e.g. the Sun). If not set, the taper is applied towards large delays.",
     )
 
     return parser
@@ -834,12 +791,15 @@ def cli() -> None:
             tukey_width=args.tukey_width,
             data_column=args.data_column,
             output_column=args.output_column,
+            copy_column_data=args.copy_column_data,
             dry_run=args.dry_run,
             make_plots=args.make_plots,
             overwrite=args.overwrite,
             chunk_size=args.chunk_size,
+            target_object=args.target_object,
+            apply_towards_object=args.apply_towards_object,
         )
-        dumb_tukey_tractor(tukey_tractor_options=tukey_tractor_options)
+        tukey_tractor(tukey_tractor_options=tukey_tractor_options)
     else:
         parser.print_help()
 
