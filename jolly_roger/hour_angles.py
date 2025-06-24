@@ -75,7 +75,7 @@ def _process_position(
             position = get_sun(times)
         else:
             logger.info(f"Getting sky-position of {position=}")
-            position = SkyCoord.from_name(position)
+            position = SkyCoord.from_name(position, equinox="J2000")
 
     if position is None:
         if ms_path is None:
@@ -85,7 +85,16 @@ def _process_position(
         with table(str(ms_path / "FIELD")) as tab:
             logger.info(f"Getting the sky-position from PHASE_DIR of {ms_path=}")
             field_positions = tab.getcol("PHASE_DIR")[:]
-            position = SkyCoord(*(field_positions * u.rad).squeeze())
+            sky_position = SkyCoord(
+                *(field_positions * u.rad).squeeze(), equinox="J2000", frame="fk5"
+            )
+
+            # Get the apparent position of the source on the sky for the observation time
+            from astropy.coordinates import FK5
+
+            _fk5 = FK5(equinox=times)
+
+            position = sky_position.transform_to(_fk5)
 
     if isinstance(position, SkyCoord):
         return position
