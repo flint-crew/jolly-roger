@@ -596,34 +596,34 @@ def _tukey_tractor(
         elevation_mask = w_delays.elevation < tukey_tractor_options.elevation_cut
         taper[elevation_mask[time_idx], :, :] = 1.0
 
-        # # Comput flags to ignore the objects delay crossing 0, Do
-        # # This by computing the taper towards the field and
-        # # see if there are any components of the two sets of tapers
-        # # that are not 1 (where 1 is 'no change').
-        # field_taper = tukey_taper(
-        #     x=delay_time.delay,
-        #     outer_width=tukey_tractor_options.outer_width / 4,
-        #     tukey_width=tukey_tractor_options.tukey_width,
-        #     tukey_x_offset=None,
-        # )
-        # # We need to account for no broadcasting when offset is None
-        # # as the returned shape is different
-        # field_taper = field_taper[None, :, None]
-        # field_taper = 1.0 - field_taper
-        # intersecting_taper = np.any(
-        #     np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
-        # )
+        # Comput flags to ignore the objects delay crossing 0, Do
+        # This by computing the taper towards the field and
+        # see if there are any components of the two sets of tapers
+        # that are not 1 (where 1 is 'no change').
+        field_taper = tukey_taper(
+            x=delay_time.delay,
+            outer_width=tukey_tractor_options.outer_width / 4,
+            tukey_width=tukey_tractor_options.tukey_width,
+            tukey_x_offset=None,
+        )
+        # We need to account for no broadcasting when offset is None
+        # as the returned shape is different
+        field_taper = field_taper[None, :, None]
+        field_taper = 1.0 - field_taper
+        intersecting_taper = np.any(
+            np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
+        )
         # taper[
         #     intersecting_taper &
         #     ~elevation_mask[time_idx] &
         #     ~ignore_wrapping_for
         # ] = 0.0
-        # # Update flags
-        # flags_to_return = np.zeros_like(data_chunk.masked_data.mask)
-        # flags_to_return[intersecting_taper] = True
-        # flags_to_return = ~np.isfinite(
-        #     data_chunk.masked_data.filled(np.nan)
-        #     ) | flags_to_return
+        # Update flags
+        flags_to_return = np.zeros_like(data_chunk.masked_data.mask)
+        flags_to_return[intersecting_taper] = True
+        flags_to_return = (
+            ~np.isfinite(data_chunk.masked_data.filled(np.nan)) | flags_to_return
+        )
 
     # Delay-time is a 3D array: (time, delay, pol)
     # Taper is 1D: (delay,)
