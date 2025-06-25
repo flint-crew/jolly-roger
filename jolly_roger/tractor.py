@@ -73,6 +73,9 @@ def tukey_taper(
 
     if tukey_x_offset is not None:
         x_freq = x_freq[:, None] - tukey_x_offset[None, :]
+        from jolly_roger.wrap import symmetric_domain_wrap
+
+        x_freq = symmetric_domain_wrap(values=x_freq, upper_limit=np.max(x))
 
     taper = np.ones_like(x_freq)
     logger.debug(f"{x_freq.shape=} {type(x_freq)=}")
@@ -534,18 +537,25 @@ def _tukey_tractor(
         tukey_x_offset = w_delays.w_delays[baseline_idx, time_idx]
         # logger.info(f"{tukey_x_offset=}")
 
+        # Calculate the offset account of nyquist sampling
+        from jolly_roger.wrap import symmetric_domain_wrap
+
+        wrap_tukey_x_offset = symmetric_domain_wrap(
+            values=tukey_x_offset, upper_limit=np.max(delay_time.delay)
+        )
+
         # need to scale the x offsert to the -pi to pi
         # The delay should be symmetric
-        tukey_x_offset = (
-            tukey_x_offset / (np.max(delay_time.delay) / np.pi).decompose()
-        ).value
-        # logger.info(f"{tukey_x_offset=}")
+        # tukey_x_offset = (
+        #     tukey_x_offset / (np.max(delay_time.delay) / np.pi).decompose()
+        # ).value
+        # # logger.info(f"{tukey_x_offset=}")
 
     taper = tukey_taper(
         x=delay_time.delay,
         outer_width=tukey_tractor_options.outer_width,
         tukey_width=tukey_tractor_options.tukey_width,
-        tukey_x_offset=tukey_x_offset,
+        tukey_x_offset=wrap_tukey_x_offset,
     )
     if w_delays is not None:
         # The use of the `tukey_x_offset` changes the

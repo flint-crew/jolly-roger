@@ -8,6 +8,28 @@ import numpy as np
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
 
 
+def test_symmetric_domain_wrap_with_2d_arrays() -> None:
+    """Ensure mapping values to a periodic domain works for arrays"""
+
+    values = np.array([np.linspace(10, 40, 10), np.linspace(10, 40, 10)])
+    assert values.shape == (2, 10)
+
+    wrapped_values = symmetric_domain_wrap(values=values, upper_limit=60)
+    assert wrapped_values.shape == values.shape
+    assert np.all(np.isclose(wrapped_values, values))
+
+    # The addition of 120 is the size of the domain here
+    # and they should be wrapped back to the main map
+    larger_values = np.array(
+        [np.linspace(10, 40, 10), np.linspace(10 + 120, 40 + 120, 10)]
+    )
+    assert values.shape == (2, 10)
+
+    wrapped_values = symmetric_domain_wrap(values=larger_values, upper_limit=60)
+    assert wrapped_values.shape == values.shape
+    assert np.all(np.isclose(wrapped_values, values))
+
+
 def test_symmetric_domain_wrap() -> None:
     """Ensure mapping values to a periodic domain works"""
 
