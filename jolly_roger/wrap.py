@@ -36,7 +36,7 @@ def symmetric_domain_wrap(
 
 def calculate_nyquist_zone(
     values: NDArray[np.floating], upper_limit: float
-) -> NDArray[int]:
+) -> NDArray[np.int_]:
     """Return the nyquist zone a value is in for a symmetric
     set of bounds around zero
 
@@ -45,7 +45,7 @@ def calculate_nyquist_zone(
         upper_limit (float): The upper bound to the symmetric domain around zero
 
     Returns:
-        NDArray[int]: The zones values correspond to
+        NDArray[np.int_]: The zones values correspond to
     """
     return np.array(
         np.floor((upper_limit + np.abs(values)) / (2.0 * upper_limit)) + 1, dtype=int
