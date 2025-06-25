@@ -613,6 +613,7 @@ def _tukey_tractor(
         intersecting_taper = np.any(
             np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
         )
+        # # Should the data need to be modified in conjunction with the flags
         # taper[
         #     intersecting_taper &
         #     ~elevation_mask[time_idx] &
