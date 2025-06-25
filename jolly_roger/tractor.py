@@ -459,6 +459,7 @@ def make_plot_results(
         before_delays = data_to_delay_time(data=before_baseline_data)
         after_delays = data_to_delay_time(data=after_baseline_data)
 
+        logger.info("Creating figure")
         # TODO: the baseline data and delay times could be put into a single
         # structure to pass around easier.
         plot_path = plot_baseline_comparison_data(
@@ -527,6 +528,7 @@ def _tukey_tractor(
     """
 
     delay_time = data_to_delay_time(data=data_chunk)
+    flags_to_return: None | NDArray[bool] = None
 
     # Look up the delay offset if requested
     tukey_x_offset: u.Quantity = np.zeros_like(delay_time.delay)
@@ -540,13 +542,6 @@ def _tukey_tractor(
         # Make a copy for later use post wrapping
         tukey_x_offset = original_tukey_x_offset.copy()
 
-        # Calculate the offset account of nyquist sampling
-        no_wraps_for_offset = calculate_nyquist_zone(
-            values=tukey_x_offset.value, upper_limit=np.max(delay_time.delay).value
-        )
-        ignore_wrapping_for = (
-            no_wraps_for_offset >= tukey_tractor_options.ignore_at_nwraps
-        )
         tukey_x_offset = symmetric_domain_wrap(
             values=tukey_x_offset.value, upper_limit=np.max(delay_time.delay).value
         )
@@ -564,33 +559,59 @@ def _tukey_tractor(
         tukey_width=tukey_tractor_options.tukey_width,
         tukey_x_offset=tukey_x_offset,
     )
-    if w_delays is not None:
+
+    if w_delays is None:
+        # This is the easy case
+        taper = taper[None, :, None]
+
+    else:
         # The use of the `tukey_x_offset` changes the
         # shape of the output array. The internals of that
         # function returns a different shape via the broadcasting
         taper = np.swapaxes(taper[:, :, None], 0, 1)
 
-        # Since we want to dampen the target object we invert the taper
+        # Since we want to dampen the target object we invert the taper.
+        # By default the taper dampers outside the inner region.
         taper = 1.0 - taper
 
         # apply the flags to ignore the tapering if the object is larger
         # than one wrap away
+        # Calculate the offset account of nyquist sampling
+        no_wraps_for_offset = calculate_nyquist_zone(
+            values=original_tukey_x_offset.value,
+            upper_limit=np.max(delay_time.delay).value,
+        )
+        ignore_wrapping_for = (
+            no_wraps_for_offset >= tukey_tractor_options.ignore_nyquist_zone
+        )
         taper[ignore_wrapping_for, :, :] = 1.0
 
         # Delay with the elevation of the target object
-        # TODO: Allow elevation to be a user parameter
         elevation_mask = w_delays.elevation < tukey_tractor_options.elevation_cut
         taper[elevation_mask[time_idx], :, :] = 1.0
 
-        # TODO: Handle case of aliased delays
-
-        # TODO: Create heuristic to determine where baseline is long enough to
-        # ignore the tapering. Aliasing may give us this though...
-
         # TODO: Create flags where delay is 'close' to 0
-
-    else:
-        taper = taper[None, :, None]
+        # Comput flags to ignore the objects delay crossing 0, Do
+        # This by computing the taper towards the field and
+        # see if there are any components of the two sets of tapers
+        # that are not 1 (where 1 is 'no change').
+        field_taper = tukey_taper(
+            x=delay_time.delay,
+            outer_width=tukey_tractor_options.outer_width / 4,
+            tukey_width=tukey_tractor_options.tukey_width,
+            tukey_x_offset=None,
+        )
+        # We need to account for no broadcasting when offset is None
+        # as the returned shape is different
+        field_taper = field_taper[None, :, None]
+        field_taper = 1.0 - field_taper
+        intersecting_taper = np.any(
+            np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
+        )
+        taper[intersecting_taper & ~elevation_mask[time_idx]] = 0.0
+        # Update flags
+        flags_to_return = np.zeros_like(data_chunk.masked_data.mask)
+        # flags_to_return[intersecting_taper] = True
 
     # Delay-time is a 3D array: (time, delay, pol)
     # Taper is 1D: (delay,)
@@ -608,7 +629,7 @@ def _tukey_tractor(
     )
     logger.debug(f"{tapered_data.masked_data.shape=} {tapered_data.masked_data.dtype}")
 
-    return tapered_data
+    return tapered_data, flags_to_return
 
 
 @dataclass
@@ -641,7 +662,7 @@ class TukeyTractorOptions:
     """The target object to apply the delay towards."""
     elevation_cut: u.Quantity = -1 * u.deg
     """The elevation cut-off for the target object. Defaults to 0 degrees."""
-    ignore_at_nwraps: int = 2
+    ignore_nyquist_zone: int = 2
     """Do not apply the tukey taper if object is beyond this Nyquist zone"""
 
 
@@ -694,7 +715,7 @@ def tukey_tractor(
                 chunk_size=tukey_tractor_options.chunk_size,
                 data_column=tukey_tractor_options.data_column,
             ):
-                taper_data_chunk = _tukey_tractor(
+                taper_data_chunk, flags_to_apply = _tukey_tractor(
                     data_chunk=data_chunk,
                     tukey_tractor_options=tukey_tractor_options,
                     w_delays=w_delays,
@@ -709,6 +730,13 @@ def tukey_tractor(
                     startrow=taper_data_chunk.row_start,
                     nrow=taper_data_chunk.chunk_size,
                 )
+                if flags_to_apply is not None:
+                    open_ms_tables.main_table.putcol(
+                        columnname="FLAG",
+                        value=flags_to_apply,
+                        startrow=taper_data_chunk.row_start,
+                        nrow=taper_data_chunk.chunk_size,
+                    )
 
     if tukey_tractor_options.make_plots:
         plot_paths = make_plot_results(
@@ -800,7 +828,7 @@ def get_parser() -> ArgumentParser:
         help="Whether the tukey taper is applied towards the target object (e.g. the Sun). If not set, the taper is applied towards large delays.",
     )
     tukey_parser.add_argument(
-        "--ignore-at-nwraps",
+        "--ignore-nyquist_zone",
         type=int,
         default=2,
         help="Do not apply the taper if the objects delays beyond this Nyquist zone",
@@ -828,7 +856,7 @@ def cli() -> None:
             chunk_size=args.chunk_size,
             target_object=args.target_object,
             apply_towards_object=args.apply_towards_object,
-            ignore_at_nwraps=args.ignore_at_nwraps,
+            ignore_nyquist_zone=args.ignore_nyquist_zone,
         )
         tukey_tractor(tukey_tractor_options=tukey_tractor_options)
     else:
