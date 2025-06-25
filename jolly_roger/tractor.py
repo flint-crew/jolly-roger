@@ -528,9 +528,11 @@ def _tukey_tractor(
     """
 
     delay_time = data_to_delay_time(data=data_chunk)
-    flags_to_return: None | NDArray[bool] = None
+    flags_to_return: None | NDArray[np.bool] = None
 
-    # Look up the delay offset if requested
+    # Set up the offsets. By default we will be tapering around the field,
+    # but should w_delays be specified these will be modified to direct
+    # towards the nominated object in the if below
     tukey_x_offset: u.Quantity = np.zeros_like(delay_time.delay)
 
     if w_delays is not None:
@@ -565,6 +567,10 @@ def _tukey_tractor(
         taper = taper[None, :, None]
 
     else:
+        # TODO: This pirate reckons that merging the masks together
+        # into a single mask throughout may make things easier to
+        # manage and visualise.
+
         # The use of the `tukey_x_offset` changes the
         # shape of the output array. The internals of that
         # function returns a different shape via the broadcasting
@@ -582,7 +588,7 @@ def _tukey_tractor(
             upper_limit=np.max(delay_time.delay).value,
         )
         ignore_wrapping_for = (
-            no_wraps_for_offset >= tukey_tractor_options.ignore_nyquist_zone
+            no_wraps_for_offset > tukey_tractor_options.ignore_nyquist_zone
         )
         taper[ignore_wrapping_for, :, :] = 1.0
 
@@ -590,28 +596,34 @@ def _tukey_tractor(
         elevation_mask = w_delays.elevation < tukey_tractor_options.elevation_cut
         taper[elevation_mask[time_idx], :, :] = 1.0
 
-        # TODO: Create flags where delay is 'close' to 0
-        # Comput flags to ignore the objects delay crossing 0, Do
-        # This by computing the taper towards the field and
-        # see if there are any components of the two sets of tapers
-        # that are not 1 (where 1 is 'no change').
-        field_taper = tukey_taper(
-            x=delay_time.delay,
-            outer_width=tukey_tractor_options.outer_width / 4,
-            tukey_width=tukey_tractor_options.tukey_width,
-            tukey_x_offset=None,
-        )
-        # We need to account for no broadcasting when offset is None
-        # as the returned shape is different
-        field_taper = field_taper[None, :, None]
-        field_taper = 1.0 - field_taper
-        intersecting_taper = np.any(
-            np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
-        )
-        taper[intersecting_taper & ~elevation_mask[time_idx]] = 0.0
-        # Update flags
-        flags_to_return = np.zeros_like(data_chunk.masked_data.mask)
+        # # Comput flags to ignore the objects delay crossing 0, Do
+        # # This by computing the taper towards the field and
+        # # see if there are any components of the two sets of tapers
+        # # that are not 1 (where 1 is 'no change').
+        # field_taper = tukey_taper(
+        #     x=delay_time.delay,
+        #     outer_width=tukey_tractor_options.outer_width / 4,
+        #     tukey_width=tukey_tractor_options.tukey_width,
+        #     tukey_x_offset=None,
+        # )
+        # # We need to account for no broadcasting when offset is None
+        # # as the returned shape is different
+        # field_taper = field_taper[None, :, None]
+        # field_taper = 1.0 - field_taper
+        # intersecting_taper = np.any(
+        #     np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
+        # )
+        # taper[
+        #     intersecting_taper &
+        #     ~elevation_mask[time_idx] &
+        #     ~ignore_wrapping_for
+        # ] = 0.0
+        # # Update flags
+        # flags_to_return = np.zeros_like(data_chunk.masked_data.mask)
         # flags_to_return[intersecting_taper] = True
+        # flags_to_return = ~np.isfinite(
+        #     data_chunk.masked_data.filled(np.nan)
+        #     ) | flags_to_return
 
     # Delay-time is a 3D array: (time, delay, pol)
     # Taper is 1D: (delay,)
@@ -828,7 +840,7 @@ def get_parser() -> ArgumentParser:
         help="Whether the tukey taper is applied towards the target object (e.g. the Sun). If not set, the taper is applied towards large delays.",
     )
     tukey_parser.add_argument(
-        "--ignore-nyquist_zone",
+        "--ignore-nyquist-zone",
         type=int,
         default=2,
         help="Do not apply the taper if the objects delays beyond this Nyquist zone",
