@@ -20,6 +20,7 @@ from jolly_roger.delays import data_to_delay_time, delay_time_to_data
 from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
+from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
 
 
 @dataclass(frozen=True)
@@ -534,12 +535,18 @@ def _tukey_tractor(
         baseline_idx, time_idx = _get_baseline_time_indicies(
             w_delays=w_delays, data_chunk=data_chunk
         )
-        tukey_x_offset = w_delays.w_delays[baseline_idx, time_idx]
-        # logger.info(f"{tukey_x_offset=}")
+        original_tukey_x_offset = w_delays.w_delays[baseline_idx, time_idx]
+
+        # Make a copy for later use post wrapping
+        tukey_x_offset = original_tukey_x_offset.copy()
 
         # Calculate the offset account of nyquist sampling
-        from jolly_roger.wrap import symmetric_domain_wrap
-
+        no_wraps_for_offset = calculate_nyquist_zone(
+            values=tukey_x_offset.value, upper_limit=np.max(delay_time.delay).value
+        )
+        ignore_wrapping_for = (
+            no_wraps_for_offset >= tukey_tractor_options.ignore_at_nwraps
+        )
         tukey_x_offset = symmetric_domain_wrap(
             values=tukey_x_offset.value, upper_limit=np.max(delay_time.delay).value
         )
@@ -565,6 +572,10 @@ def _tukey_tractor(
 
         # Since we want to dampen the target object we invert the taper
         taper = 1.0 - taper
+
+        # apply the flags to ignore the tapering if the object is larger
+        # than one wrap away
+        taper[ignore_wrapping_for, :, :] = 1.0
 
         # Delay with the elevation of the target object
         # TODO: Allow elevation to be a user parameter
@@ -630,6 +641,8 @@ class TukeyTractorOptions:
     """The target object to apply the delay towards."""
     elevation_cut: u.Quantity = -1 * u.deg
     """The elevation cut-off for the target object. Defaults to 0 degrees."""
+    ignore_at_nwraps: int = 2
+    """Do not apply the tukey taper if object is beyond this Nyquist zone"""
 
 
 def tukey_tractor(
@@ -786,6 +799,12 @@ def get_parser() -> ArgumentParser:
         action="store_true",
         help="Whether the tukey taper is applied towards the target object (e.g. the Sun). If not set, the taper is applied towards large delays.",
     )
+    tukey_parser.add_argument(
+        "--ignore-at-nwraps",
+        type=int,
+        default=2,
+        help="Do not apply the taper if the objects delays beyond this Nyquist zone",
+    )
 
     return parser
 
@@ -809,6 +828,7 @@ def cli() -> None:
             chunk_size=args.chunk_size,
             target_object=args.target_object,
             apply_towards_object=args.apply_towards_object,
+            ignore_at_nwraps=args.ignore_at_nwraps,
         )
         tukey_tractor(tukey_tractor_options=tukey_tractor_options)
     else:
