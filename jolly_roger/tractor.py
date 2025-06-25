@@ -19,6 +19,7 @@ from tqdm.auto import tqdm
 from jolly_roger.delays import data_to_delay_time, delay_time_to_data
 from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
+from jolly_roger.utils import log_dataclass_attributes
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
 
@@ -653,7 +654,7 @@ class TukeyTractorOptions:
     """Measurement set to be modified"""
     outer_width: float = np.pi / 4
     """The start of the tapering in frequency space"""
-    tukey_width: float = np.pi / 8
+    tukey_width: float = 0.25
     """The width of the tapered region in frequency space"""
     data_column: str = "DATA"
     """The visibility column to modify"""
@@ -693,7 +694,9 @@ def tukey_tractor(
         tukey_tractor_options (TukeyTractorOptions): The settings to use during the taper, and measurement set to apply them to.
     """
     logger.info("jolly-roger")
-    logger.info(f"Options: {tukey_tractor_options}")
+    log_dataclass_attributes(
+        to_log=tukey_tractor_options, class_name="TukeyTaperOptions"
+    )
 
     # acquire all the tables necessary to get unit information and data from
     open_ms_tables = get_open_ms_tables(
@@ -788,7 +791,7 @@ def get_parser() -> ArgumentParser:
     tukey_parser.add_argument(
         "--tukey-width",
         type=float,
-        default=np.pi / 8,
+        default=0.25,
         help="The Tukey width of the Tukey taper in radians",
     )
     tukey_parser.add_argument(
@@ -871,6 +874,7 @@ def cli() -> None:
             apply_towards_object=args.apply_towards_object,
             ignore_nyquist_zone=args.ignore_nyquist_zone,
         )
+
         tukey_tractor(tukey_tractor_options=tukey_tractor_options)
     else:
         parser.print_help()
