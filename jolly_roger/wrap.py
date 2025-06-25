@@ -20,7 +20,6 @@ def symmetric_domain_wrap(
     Returns:
         NDArray[np.floating]: Values that have been mapped to the -upper_limit to upper_limit domain
     """
-
     # Calculate an appropriate domain mapping
     # The natural domain is going to be mapped
     # to -pi to pi.
