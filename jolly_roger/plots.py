@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from jolly_roger.uvws import WDelays
+from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
 
 if TYPE_CHECKING:
     from jolly_roger.delays import DelayTime
@@ -149,20 +150,38 @@ def plot_baseline_comparison_data(
             fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
         if w_delays is not None:
+            ant_1, ant_2 = before_baseline_data.ant_1, before_baseline_data.ant_2
+            b_idx = w_delays.b_map[ant_1, ant_2]
+            wrapped_w_delays = symmetric_domain_wrap(
+                values=w_delays.w_delays[b_idx].value,
+                upper_limit=np.max(after_delays.delay).value,
+            )
+            zones = calculate_nyquist_zone(
+                values=w_delays.w_delays[b_idx].value,
+                upper_limit=np.max(after_delays.delay).value,
+            )
+            # Final append is to capture the last zone in the
+            # time range
+            transitions = [*np.argwhere(np.diff(zones))[:, 0], len(zones)]
+
             for ax, baseline_data in zip(  # type:ignore[call-overload]
                 (ax3, ax4),
                 (before_baseline_data, after_baseline_data),
                 strict=True,
             ):
-                ant_1, ant_2 = baseline_data.ant_1, baseline_data.ant_2
-                b_idx = w_delays.b_map[ant_1, ant_2]
-                ax.plot(
-                    baseline_data.time,
-                    w_delays.w_delays[b_idx],
-                    color="tab:red",
-                    linestyle="-",
-                    label=f"Delay for {w_delays.object_name}",
-                )
+                start_idx = 0
+                for _zone_idx, end_idx in enumerate(transitions):
+                    object_slice = slice(start_idx, end_idx)
+                    start_idx = end_idx
+                    ax.plot(
+                        baseline_data.time[object_slice],
+                        wrapped_w_delays[object_slice],
+                        color="tab:red",
+                        linestyle="-",
+                        label=f"Delay for {w_delays.object_name}"
+                        if _zone_idx == 0
+                        else None,
+                    )
                 ax.legend()
 
         output_path = (
