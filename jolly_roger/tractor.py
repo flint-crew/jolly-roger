@@ -665,7 +665,7 @@ class TukeyTractorOptions:
     dry_run: bool = False
     """Indicates whether the data will be written back to the measurement set"""
     make_plots: bool = False
-    """Create a small set of diagnostic plots"""
+    """Create a small set of diagnostic plots. This can be slow."""
     overwrite: bool = False
     """If the output column exists it will be overwritten"""
     chunk_size: int = 1000
@@ -819,7 +819,7 @@ def get_parser() -> ArgumentParser:
     tukey_parser.add_argument(
         "--make-plots",
         action="store_true",
-        help="If set, the Tukey tractor will make plots of the results",
+        help="If set, the Tukey tractor will make plots of the results. This can be slow.",
     )
     tukey_parser.add_argument(
         "--overwrite",
