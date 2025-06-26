@@ -162,7 +162,7 @@ def plot_baseline_comparison_data(
             )
             # Final append is to capture the last zone in the
             # time range
-            transitions = [*np.argwhere(np.diff(zones))[:, 0], len(zones)]
+            transitions = [*np.argwhere(np.diff(zones) != 0)[:, 0], len(zones)]
 
             for ax, baseline_data in zip(  # type:ignore[call-overload]
                 (ax3, ax4),
@@ -171,8 +171,11 @@ def plot_baseline_comparison_data(
             ):
                 start_idx = 0
                 for _zone_idx, end_idx in enumerate(transitions):
-                    object_slice = slice(start_idx, end_idx)
-                    start_idx = end_idx
+                    # The np.diff results in offset indices, so shift
+                    # back the transition by 1
+                    object_slice = slice(start_idx, end_idx + 1)
+                    # and ensure non-overlapping line segments
+                    start_idx = end_idx + 1
                     ax.plot(
                         baseline_data.time[object_slice],
                         wrapped_w_delays[object_slice],
@@ -181,6 +184,7 @@ def plot_baseline_comparison_data(
                         label=f"Delay for {w_delays.object_name}"
                         if _zone_idx == 0
                         else None,
+                        lw=1 * (_zone_idx + 1),  # zone 0 means no line
                     )
                 ax.legend()
 
