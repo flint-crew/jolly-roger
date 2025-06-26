@@ -19,7 +19,7 @@ from tqdm.auto import tqdm
 from jolly_roger.delays import data_to_delay_time, delay_time_to_data
 from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
-from jolly_roger.utils import log_dataclass_attributes
+from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
 
@@ -693,7 +693,7 @@ def tukey_tractor(
     Args:
         tukey_tractor_options (TukeyTractorOptions): The settings to use during the taper, and measurement set to apply them to.
     """
-    logger.info("jolly-roger")
+    log_jolly_roger_version()
     log_dataclass_attributes(
         to_log=tukey_tractor_options, class_name="TukeyTaperOptions"
     )

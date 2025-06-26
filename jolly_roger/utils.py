@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import is_dataclass
 from typing import Any
 
+from jolly_roger import __version__
 from jolly_roger.logging import logger
+
+
+def log_jolly_roger_version() -> None:
+    """Write out a jolly roger header to output"""
+    logger.info("Jolly-Roger: Flagging and Tapering")
+    logger.info(f"Version: {__version__}")
 
 
 def log_dataclass_attributes(to_log: Any, class_name: str | None = None) -> None:
