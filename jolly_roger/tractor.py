@@ -654,7 +654,7 @@ class TukeyTractorOptions:
     """Measurement set to be modified"""
     outer_width: float = np.pi / 4
     """The start of the tapering in frequency space"""
-    tukey_width: float = 0.25
+    tukey_width: float = np.pi / 8
     """The width of the tapered region in frequency space"""
     data_column: str = "DATA"
     """The visibility column to modify"""
@@ -791,7 +791,7 @@ def get_parser() -> ArgumentParser:
     tukey_parser.add_argument(
         "--tukey-width",
         type=float,
-        default=0.25,
+        default=np.pi / 8,
         help="The Tukey width of the Tukey taper in radians",
     )
     tukey_parser.add_argument(
