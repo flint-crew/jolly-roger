@@ -597,7 +597,7 @@ def _tukey_tractor(
         elevation_mask = w_delays.elevation < tukey_tractor_options.elevation_cut
         taper[elevation_mask[time_idx], :, :] = 1.0
 
-        # Comput flags to ignore the objects delay crossing 0, Do
+        # Compute flags to ignore the objects delay crossing 0, Do
         # This by computing the taper towards the field and
         # see if there are any components of the two sets of tapers
         # that are not 1 (where 1 is 'no change').
