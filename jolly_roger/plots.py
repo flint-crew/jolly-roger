@@ -176,17 +176,26 @@ def plot_baseline_comparison_data(
                     object_slice = slice(start_idx, end_idx + 1)
                     # and ensure non-overlapping line segments
                     start_idx = end_idx + 1
+                    import matplotlib.patheffects as pe
+
                     ax.plot(
                         baseline_data.time[object_slice],
                         wrapped_w_delays[object_slice],
                         color="tab:red",
-                        linestyle="-",
+                        # linestyle="-",
                         label=f"Delay for {w_delays.object_name}"
                         if _zone_idx == 0
                         else None,
-                        lw=1 * (_zone_idx + 1),  # zone 0 means no line
+                        dashes=(2 * _zone_idx + 1, 2 * _zone_idx + 1),
+                        lw=4,
+                        path_effects=[
+                            pe.Stroke(
+                                linewidth=6, foreground="white"
+                            ),  # Inner line (the actual dashed line)
+                            pe.Normal(),
+                        ],
                     )
-                ax.legend()
+                ax.legend(loc="upper right")
 
         output_path = (
             output_dir
