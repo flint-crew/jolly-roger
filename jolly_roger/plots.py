@@ -191,7 +191,7 @@ def plot_baseline_comparison_data(
                         path_effects=[
                             pe.Stroke(
                                 linewidth=6, foreground="white"
-                            ),  # Inner line (the actual dashed line)
+                            ),  # Add some contrast to help read line stand out
                             pe.Normal(),
                         ],
                     )
