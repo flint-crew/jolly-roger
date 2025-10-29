@@ -81,7 +81,7 @@ Should the source cross over a delay of 0 then that timestep will be flagged, as
 ![Example 1](docs/images/baseline_data_0_2_comparison.png)
 
 ### Baseline ak00 to ak06
-![Example 1](docs/images/baseline_data_0_6_comparison.png)
+![Example 2](docs/images/baseline_data_0_6_comparison.png)
 
 The full set of command line options can be obtained with:
 
