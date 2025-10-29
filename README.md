@@ -41,7 +41,7 @@ This package attempts to flag or modify visibilities that are contaminated by th
 
 The flags based on the projected baseline length should the array be tracking the Sun. The projected baseline length between some phased direction being tracked and the Sun can be significantly different. `jolly_roger` attempts to leverage this by only flagging data where the projected baseline length is between some nominal range that corresponds to angular scales associated with the Sun.
 
-The second mode is the application of a notch filter in delay space, where the nulling is applied to the expected delay of the Sun for each timestep and baseline. This mode reads the data row-wise as it appears in the measurement set, so can be fast enough to apply to long-tracks ASKAP observations while also using a limited set of computing resources.
+The second mode is the application of a notch filter in delay space, where the nulling is applied to the expected delay of the Sun for each timestep and baseline. This mode reads the data row-wise as it appears in the measurement set, so can be fast enough to apply to long-tracks ASKAP observations while also using a limited set of computing resources. A ten hour ASKAP continuum observation can be processed in ~2 minutes, with the process being mostly I/O bound.
 
 `jolly_roger` makes no guarentess about removing all contaminated visibilities, nor does it attempt to peel/subtract the Sun from the visibility data.
 
