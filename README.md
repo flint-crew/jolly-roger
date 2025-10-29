@@ -69,9 +69,16 @@ In this mode the frequency data of each timestep/baseline is Fourier transformed
 
 ## Example
 
-The nulling approach can be accessed through `jolly_tractor`. Examples of its application are below. 
+The nulling approach can be accessed through `jolly_tractor`. Examples of its application are below. The left and right columns indicate the before and after of the nulling procedure (here nulling towards the Sun's sky position). The top row shows the dynamic sopectrum (time vs frequency) while the bottom highlight the time vs delay of the data. 
 
+Sunrise was approximately in the middle of this observation, as indicated by the sudden excess power seen in the top left figure. 
+
+The red dashed lines in the lower panel represents the delay of the Sun as derived from the geometry of the array, with the length of each dash represents the Nyquist zone (i.e. how aliased the source appears in delay space).
+
+### Baseline ak00 to ak02
 ![Example 1](docs/images/baseline_data_0_2_comparison.png)
+
+### Baseline ak00 to ak06
 ![Example 1](docs/images/baseline_data_0_6_comparison.png)
 
 The full set of command line options can be obtained with:
