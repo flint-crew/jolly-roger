@@ -73,7 +73,9 @@ The nulling approach can be accessed through `jolly_tractor`. Examples of its ap
 
 Sunrise was approximately in the middle of this observation, as indicated by the sudden excess power seen in the top left figure. 
 
-The red dashed lines in the lower panel represents the delay of the Sun as derived from the geometry of the array, with the length of each dash represents the Nyquist zone (i.e. how aliased the source appears in delay space).
+The red dashed lines in the lower panel represents the delay of the Sun as derived from the geometry of the array, with the length of each dash represents the Nyquist zone (i.e. how aliased the source appears in delay space). Nulling can be deactivated if the Nyquist zone of the object is high enough to effectively mean no contribution (typically the case for longer baselines). 
+
+Should the source cross over a delay of 0 then that timestep will be flagged, as the intermixed components can not be separated, and nulling would have an adverse effect of the direction being observed.
 
 ### Baseline ak00 to ak02
 ![Example 1](docs/images/baseline_data_0_2_comparison.png)
