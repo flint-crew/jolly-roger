@@ -73,3 +73,9 @@ The nulling approach can be accessed through `jolly_tractor`. Examples of its ap
 
 ![Example 1](docs/images/baseline_data_0_2_comparison.png)
 ![Example 1](docs/images/baseline_data_0_6_comparison.png)
+
+The full set of command line options can be obtained with:
+
+```
+jolly_tractor --help
+```
