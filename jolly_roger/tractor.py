@@ -460,6 +460,12 @@ def make_plot_results(
         before_delays = data_to_delay_time(data=before_baseline_data)
         after_delays = data_to_delay_time(data=after_baseline_data)
 
+        ms_name = open_ms_tables.ms_path.name
+        output_path = (
+            output_dir
+            / f"{ms_name}_baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}_comparison.png"
+        )
+
         logger.info("Creating figure")
         # TODO: the baseline data and delay times could be put into a single
         # structure to pass around easier.
@@ -468,10 +474,10 @@ def make_plot_results(
             after_baseline_data=after_baseline_data,
             before_delays=before_delays,
             after_delays=after_delays,
-            output_dir=output_dir,
-            suffix="_comparison",
+            output_path=output_path,
             w_delays=w_delays,
         )
+        logger.info(f"Have written {output_path=}")
         output_paths.append(plot_path)
 
     return output_paths
