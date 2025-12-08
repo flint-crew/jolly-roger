@@ -74,7 +74,7 @@ def tukey_taper(
     """Describes a tukey window function spanning a -pi to pi range. IN the base case
     the tukey window is centred on 0.0. The ``outer_width`` defines where the window is
     0.0. They `tukey_width` defines the width of the region where the function transitions
-    from 1.0 to 0.0. 
+    from 1.0 to 0.0.
 
 
     This is to say that:
@@ -96,10 +96,12 @@ def tukey_taper(
     x_freq = np.linspace(-np.pi, np.pi, len(x))
 
     if (outer_width - tukey_width) < 0.0:
-        # If this is true than the two 'transition' regions between 1 and 0 overlap. 
+        # If this is true than the two 'transition' regions between 1 and 0 overlap.
         # This should not happen, so we simply will make it so no '1' region. In this extreme
         # the window is just a 1 - cos function
-        logger.warning(f"{outer_width=} and {tukey_width=}, which create overlapping bounds. Setting tukey_width={outer_width}")
+        logger.warning(
+            f"{outer_width=} and {tukey_width=}, which create overlapping bounds. Setting tukey_width={outer_width}"
+        )
         tukey_width = outer_width
 
     if tukey_x_offset is not None:
