@@ -30,7 +30,6 @@ def plot_baseline_data(
     output_dir: Path,
     suffix: str = "",
 ) -> None:
-
     with quantity_support(), time_support():
         data_masked = baseline_data.masked_data
         data_xx = data_masked[..., 0]
@@ -64,7 +63,6 @@ def plot_baseline_comparison_data(
     output_path: Path,
     w_delays: WDelays | None = None,
 ) -> Path:
-
     with quantity_support(), time_support():
         before_amp_stokesi = np.abs(
             (
