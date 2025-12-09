@@ -7,6 +7,15 @@ from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
+from astropy.visualization import (
+    ImageNormalize,
+    LogStretch,
+    MinMaxInterval,
+    SqrtStretch,
+    ZScaleInterval,
+    quantity_support,
+    time_support,
+)
 
 from jolly_roger.uvws import WDelays
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
@@ -21,7 +30,6 @@ def plot_baseline_data(
     output_dir: Path,
     suffix: str = "",
 ) -> None:
-    from astropy.visualization import quantity_support, time_support
 
     with quantity_support(), time_support():
         data_masked = baseline_data.masked_data
@@ -56,15 +64,6 @@ def plot_baseline_comparison_data(
     output_path: Path,
     w_delays: WDelays | None = None,
 ) -> Path:
-    from astropy.visualization import (
-        ImageNormalize,
-        LogStretch,
-        MinMaxInterval,
-        SqrtStretch,
-        ZScaleInterval,
-        quantity_support,
-        time_support,
-    )
 
     with quantity_support(), time_support():
         before_amp_stokesi = np.abs(
@@ -175,7 +174,7 @@ def plot_baseline_comparison_data(
                     object_slice = slice(start_idx, end_idx + 1)
                     # and ensure non-overlapping line segments
                     start_idx = end_idx + 1
-                    import matplotlib.patheffects as pe
+                    import matplotlib.patheffects as pe  # noqa: PLC0415
 
                     ax.plot(
                         baseline_data.time[object_slice],
