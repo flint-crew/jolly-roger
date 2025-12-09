@@ -460,6 +460,12 @@ def make_plot_results(
         before_delays = data_to_delay_time(data=before_baseline_data)
         after_delays = data_to_delay_time(data=after_baseline_data)
 
+        ms_name = open_ms_tables.ms_path.name
+        output_path = (
+            output_dir
+            / f"{ms_name}_baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}_comparison.png"
+        )
+
         logger.info("Creating figure")
         # TODO: the baseline data and delay times could be put into a single
         # structure to pass around easier.
@@ -468,10 +474,10 @@ def make_plot_results(
             after_baseline_data=after_baseline_data,
             before_delays=before_delays,
             after_delays=after_delays,
-            output_dir=output_dir,
-            suffix="_comparison",
+            output_path=output_path,
             w_delays=w_delays,
         )
+        logger.info(f"Have written {output_path=}")
         output_paths.append(plot_path)
 
     return output_paths
@@ -680,9 +686,21 @@ class TukeyTractorOptions:
     """Do not apply the tukey taper if object is beyond this Nyquist zone"""
 
 
+@dataclass(frozen=True)
+class TukeyTractorResults:
+    """Simple return set of results from the tractoring process"""
+
+    ms_path: Path
+    """Path to the measurement set that was modified"""
+    output_column: str
+    """The name of the column that has the modified/tapered visibilities"""
+    output_plots: list[Path] | None = None
+    """The output plots that were created, if any"""
+
+
 def tukey_tractor(
     tukey_tractor_options: TukeyTractorOptions,
-) -> None:
+) -> TukeyTractorResults:
     """Iterate row-wise over a specified measurement set and
     apply a tukey taper operation to the delay data. Iteration
     is performed based on a chunk soize, indicating the number
@@ -692,6 +710,9 @@ def tukey_tractor(
 
     Args:
         tukey_tractor_options (TukeyTractorOptions): The settings to use during the taper, and measurement set to apply them to.
+
+    Returns:
+        TukeyTractorResults: Representative information of the tapering process
     """
     log_jolly_roger_version()
     log_dataclass_attributes(
@@ -754,6 +775,7 @@ def tukey_tractor(
                         nrow=taper_data_chunk.chunk_size,
                     )
 
+    plot_paths: list[Path] | None = None
     if tukey_tractor_options.make_plots:
         plot_paths = make_plot_results(
             open_ms_tables=open_ms_tables,
@@ -763,6 +785,12 @@ def tukey_tractor(
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
+
+    return TukeyTractorResults(
+        ms_path=open_ms_tables.ms_path,
+        output_column=tukey_tractor_options.output_column,
+        output_plots=plot_paths,
+    )
 
 
 def get_parser() -> ArgumentParser:
