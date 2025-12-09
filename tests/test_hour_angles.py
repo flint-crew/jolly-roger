@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from astropy.coordinates import EarthLocation
 
+from jolly_roger.hour_angles import ASKAP
+
 
 def test_askap_position() -> None:
     """Ensure that the EarthLocation for ASKAP is correctly formed"""
-    from jolly_roger.hour_angles import ASKAP
 
     askap_astropy = EarthLocation.of_site("ASKAP")
 

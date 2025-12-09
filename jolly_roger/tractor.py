@@ -106,7 +106,6 @@ def tukey_taper(
 
     if tukey_x_offset is not None:
         x_freq = x_freq[:, None] - tukey_x_offset[None, :]
-        from jolly_roger.wrap import symmetric_domain_wrap
 
         x_freq = symmetric_domain_wrap(values=x_freq, upper_limit=np.pi)
 
