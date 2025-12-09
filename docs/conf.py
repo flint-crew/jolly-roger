@@ -62,3 +62,5 @@ nitpick_ignore = [
 ]
 
 always_document_param_types = True
+
+html_static_path = ["images"]
