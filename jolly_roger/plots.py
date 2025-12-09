@@ -53,8 +53,7 @@ def plot_baseline_comparison_data(
     after_baseline_data: BaselineData,
     before_delays: DelayTime,
     after_delays: DelayTime,
-    output_dir: Path,
-    suffix: str = "",
+    output_path: Path,
     w_delays: WDelays | None = None,
 ) -> Path:
     from astropy.visualization import (
@@ -197,10 +196,6 @@ def plot_baseline_comparison_data(
                     )
                 ax.legend(loc="upper right")
 
-        output_path = (
-            output_dir
-            / f"baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}{suffix}.png"
-        )
         fig.suptitle(
             f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}"
         )
