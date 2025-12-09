@@ -60,6 +60,7 @@ docs = [
   "sphinx_copybutton",
   "sphinx_autodoc_typehints",
   "furo>=2023.08.17",
+  "sphinx-argparse",
 ]
 
 

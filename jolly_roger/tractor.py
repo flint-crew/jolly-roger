@@ -833,7 +833,7 @@ def get_parser() -> ArgumentParser:
     subparsers = parser.add_subparsers(dest="mode")
 
     tukey_parser = subparsers.add_parser(
-        name="tukey", help="Perform a dumb Tukey taper across delay-time data"
+        name="tukey", help="Perform a simple Tukey taper across delay-time data"
     )
     tukey_parser.add_argument(
         "ms_path",
