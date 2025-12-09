@@ -71,7 +71,38 @@ def tukey_taper(
     tukey_width: float = np.pi / 8,
     tukey_x_offset: NDArray[np.floating] | None = None,
 ) -> np.ndarray:
+    """Describes a tukey window function spanning a -pi to pi range. IN the base case
+    the tukey window is centred on 0.0. The ``outer_width`` defines where the window is
+    0.0. They `tukey_width` defines the width of the region where the function transitions
+    from 1.0 to 0.0.
+
+
+    This is to say that:
+
+    >> x > |outer_width| = 0
+    >> x < (outer_width - tukey_width) = 1
+
+    Between these two bounds the window follows a `1 - cos` type shape.
+
+    Args:
+        x (np.typing.NDArray[np.floating]): The intervals to evaluate over. Internally these are concerted to the +/- pi domain
+        outer_width (float, optional): The +/- boundary beyond which is 0.0. Defaults to np.pi/4.
+        tukey_width (float, optional): Describes the width that the transition from 1.0 to 0.0 occurs. Defaults to np.pi/8.
+        tukey_x_offset (NDArray[np.floating] | None, optional): Sets a new zero point (center of window). Defaults to None.
+
+    Returns:
+        np.ndarray: The tukey window function
+    """
     x_freq = np.linspace(-np.pi, np.pi, len(x))
+
+    if (outer_width - tukey_width) < 0.0:
+        # If this is true than the two 'transition' regions between 1 and 0 overlap.
+        # This should not happen, so we simply will make it so no '1' region. In this extreme
+        # the window is just a 1 - cos function
+        logger.warning(
+            f"{outer_width=} and {tukey_width=}, which create overlapping bounds. Setting tukey_width={outer_width}"
+        )
+        tukey_width = outer_width
 
     if tukey_x_offset is not None:
         x_freq = x_freq[:, None] - tukey_x_offset[None, :]
@@ -85,8 +116,8 @@ def tukey_taper(
     taper[np.abs(x_freq) > outer_width] = 0
 
     # Transition regions
-    left_idx = (-outer_width < x_freq) & (x_freq < -outer_width + tukey_width)
-    right_idx = (outer_width - tukey_width < x_freq) & (x_freq < outer_width)
+    left_idx = (-outer_width <= x_freq) & (x_freq <= -outer_width + tukey_width)
+    right_idx = (outer_width - tukey_width <= x_freq) & (x_freq <= outer_width)
 
     taper[left_idx] = (
         1 - np.cos(np.pi * (x_freq[left_idx] + outer_width) / tukey_width)
