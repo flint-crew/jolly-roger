@@ -3,6 +3,7 @@ from __future__ import annotations
 from argparse import ArgumentParser
 from collections.abc import Generator
 from dataclasses import dataclass
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -468,23 +469,39 @@ def make_plot_results(
     open_ms_tables: OpenMSTables,
     data_column: str,
     output_column: str,
+    target: str,
     w_delays: WDelays | None = None,
+    reverse_baselines: bool = False,
 ) -> list[Path]:
     output_paths = []
     output_dir = open_ms_tables.ms_path.parent / "plots"
     output_dir.mkdir(exist_ok=True, parents=True)
-    for i in range(10):
-        logger.info(f"Plotting baseline={i + 1}")
+
+    n_ant = len(np.unique(open_ms_tables.main_table.getcol("ANTENNA1")))
+    b_idx = np.array(list(combinations(range(n_ant), 2)))
+
+    logger.info(f"MS contains {n_ant} antennas ({len(b_idx)} baselines)")
+
+    max_baselines = 10
+    b_idx = b_idx[:max_baselines]
+    logger.info(f"Plotting {len(b_idx)} baselines")
+
+    if reverse_baselines:
+        b_idx = b_idx[:, ::-1]
+
+    for baseline, (ant_1, ant_2) in enumerate(b_idx):
+        logger.info(f"Plotting baseline={baseline + 1}")
+
         before_baseline_data = get_baseline_data(
             open_ms_tables=open_ms_tables,
-            ant_1=0,
-            ant_2=i + 1,
+            ant_1=ant_1,
+            ant_2=ant_2,
             data_column=data_column,
         )
         after_baseline_data = get_baseline_data(
             open_ms_tables=open_ms_tables,
-            ant_1=0,
-            ant_2=i + 1,
+            ant_1=ant_1,
+            ant_2=ant_2,
             data_column=output_column,
         )
         before_delays = data_to_delay_time(data=before_baseline_data)
@@ -493,7 +510,7 @@ def make_plot_results(
         ms_name = open_ms_tables.ms_path.name
         output_path = (
             output_dir
-            / f"{ms_name}_baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}_comparison.png"
+            / f"{ms_name}_baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}_{target}_comparison.png"
         )
 
         logger.info("Creating figure")
@@ -714,6 +731,8 @@ class TukeyTractorOptions:
     """The elevation cut-off for the target object. Defaults to 0 degrees."""
     ignore_nyquist_zone: int = 2
     """Do not apply the tukey taper if object is beyond this Nyquist zone"""
+    reverse_baselines: bool = False
+    """Reverse baseline ordering"""
 
 
 @dataclass(frozen=True)
@@ -772,6 +791,7 @@ def tukey_tractor(
         w_delays = get_object_delay_for_ms(
             ms_path=tukey_tractor_options.ms_path,
             object_name=tukey_tractor_options.target_object,
+            reverse_baselines=tukey_tractor_options.reverse_baselines,
         )
         assert len(w_delays.w_delays.shape) == 2
 
@@ -811,7 +831,9 @@ def tukey_tractor(
             open_ms_tables=open_ms_tables,
             data_column=tukey_tractor_options.data_column,
             output_column=tukey_tractor_options.output_column,
+            target=tukey_tractor_options.target_object,
             w_delays=w_delays,
+            reverse_baselines=tukey_tractor_options.reverse_baselines,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
@@ -907,6 +929,11 @@ def get_parser() -> ArgumentParser:
         default=2,
         help="Do not apply the taper if the objects delays beyond this Nyquist zone",
     )
+    tukey_parser.add_argument(
+        "--reverse-baselines",
+        action="store_true",
+        help="Reverse baseline ordering",
+    )
 
     return parser
 
@@ -931,6 +958,7 @@ def cli() -> None:
             target_object=args.target_object,
             apply_towards_object=args.apply_towards_object,
             ignore_nyquist_zone=args.ignore_nyquist_zone,
+            reverse_baselines=args.reverse_baselines,
         )
 
         tukey_tractor(tukey_tractor_options=tukey_tractor_options)
