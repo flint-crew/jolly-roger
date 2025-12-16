@@ -79,9 +79,18 @@ def plot_baseline_comparison_data(
             / 2
         )
 
-        norm = ImageNormalize(
-            after_amp_stokesi, interval=ZScaleInterval(), stretch=SqrtStretch()
-        )
+        # We may end up flagging all the data
+        if not after_amp_stokesi.mask.all():
+            norm = ImageNormalize(
+                after_amp_stokesi
+                if not after_amp_stokesi.mask.all()
+                else before_amp_stokesi,
+                interval=ZScaleInterval(),
+                stretch=SqrtStretch(),
+            )
+        else:
+            norm = None
+
         cmap = plt.cm.viridis
 
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(
@@ -172,27 +181,20 @@ def plot_baseline_comparison_data(
                     object_slice = slice(start_idx, end_idx + 1)
                     # and ensure non-overlapping line segments
                     start_idx = end_idx + 1
-                    import matplotlib.patheffects as pe  # noqa: PLC0415
 
                     ax.plot(
                         baseline_data.time[object_slice],
                         wrapped_w_delays[object_slice],
+                        ls="-",
                         color="tab:red",
-                        # linestyle="-",
                         label=f"Delay for {w_delays.object_name}"
                         if _zone_idx == 0
                         else None,
-                        dashes=(2 * _zone_idx + 1, 2 * _zone_idx + 1),
-                        lw=4,
-                        path_effects=[
-                            pe.Stroke(
-                                linewidth=6, foreground="white"
-                            ),  # Add some contrast to help read line stand out
-                            pe.Normal(),
-                        ],
+                        alpha=0.4,
+                        lw=6,
                     )
-                ax.legend(loc="upper right")
 
+                    ax.legend(loc="upper right")
         fig.suptitle(
             f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}"
         )
