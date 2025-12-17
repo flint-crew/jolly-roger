@@ -137,20 +137,20 @@ def plot_baseline_comparison_data(
 
         im = ax3.pcolormesh(
             before_baseline_data.time,
-            before_delays.delay,
+            before_delays.delay.to("ns"),
             before_delays_i.T,
             norm=delay_norm,
             cmap=cmap,
         )
-        ax3.set(ylabel="Delay / s", title="Before")
+        ax3.set(ylabel="Delay / ns", title="Before")
         ax4.pcolormesh(
             after_baseline_data.time,
-            after_delays.delay,
+            after_delays.delay.to("ns"),
             after_delays_i.T,
             norm=delay_norm,
             cmap=cmap,
         )
-        ax4.set(ylabel="Delay / s", title="After")
+        ax4.set(ylabel="Delay / ns", title="After")
         for ax in (ax3, ax4):
             fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
@@ -158,12 +158,12 @@ def plot_baseline_comparison_data(
             ant_1, ant_2 = before_baseline_data.ant_1, before_baseline_data.ant_2
             b_idx = w_delays.b_map[ant_1, ant_2]
             wrapped_w_delays = symmetric_domain_wrap(
-                values=w_delays.w_delays[b_idx].value,
-                upper_limit=np.max(after_delays.delay).value,
+                values=w_delays.w_delays[b_idx].to("ns").value,
+                upper_limit=np.max(after_delays.delay.to("ns")).value,
             )
             zones = calculate_nyquist_zone(
                 values=w_delays.w_delays[b_idx].value,
-                upper_limit=np.max(after_delays.delay).value,
+                upper_limit=np.max(after_delays.delay.to("ns")).value,
             )
             # Final append is to capture the last zone in the
             # time range
