@@ -62,6 +62,7 @@ def plot_baseline_comparison_data(
     after_delays: DelayTime,
     output_path: Path,
     w_delays: WDelays | None = None,
+    outer_width_ns: float | None = None,
 ) -> Path:
     with quantity_support(), time_support():
         before_amp_stokesi = np.abs(
@@ -93,8 +94,8 @@ def plot_baseline_comparison_data(
 
         cmap = plt.cm.viridis
 
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(
-            2, 2, figsize=(12, 10), sharex=True, sharey="row"
+        fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(
+            2, 3, figsize=(18, 10), sharex=True, sharey="row"
         )
         im = ax1.pcolormesh(
             before_baseline_data.time,
@@ -103,22 +104,23 @@ def plot_baseline_comparison_data(
             norm=norm,
             cmap=cmap,
         )
+        ax2.set_axis_off()
         ax1.set(
             ylabel=f"Frequency / {before_baseline_data.freq_chan.unit:latex_inline}",
             title="Before",
         )
-        ax2.pcolormesh(
+        ax3.pcolormesh(
             after_baseline_data.time,
             after_baseline_data.freq_chan,
             after_amp_stokesi.T,
             norm=norm,
             cmap=cmap,
         )
-        ax2.set(
+        ax3.set(
             ylabel=f"Frequency / {after_baseline_data.freq_chan.unit:latex_inline}",
             title="After",
         )
-        for ax in (ax1, ax2):
+        for ax in (ax1, ax3):
             fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
         # TODO: Move these delay calculations outside of the plotting function
@@ -135,23 +137,23 @@ def plot_baseline_comparison_data(
             before_delays_i, interval=MinMaxInterval(), stretch=LogStretch()
         )
 
-        im = ax3.pcolormesh(
+        im = ax4.pcolormesh(
             before_baseline_data.time,
             before_delays.delay.to("ns"),
             before_delays_i.T,
             norm=delay_norm,
             cmap=cmap,
         )
-        ax3.set(ylabel="Delay / ns", title="Before")
-        ax4.pcolormesh(
+        ax4.set(ylabel="Delay / ns", title="Before")
+        ax6.pcolormesh(
             after_baseline_data.time,
             after_delays.delay.to("ns"),
             after_delays_i.T,
             norm=delay_norm,
             cmap=cmap,
         )
-        ax4.set(ylabel="Delay / ns", title="After")
-        for ax in (ax3, ax4):
+        ax6.set(ylabel="Delay / ns", title="After")
+        for ax in (ax4, ax5, ax6):
             fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
         if w_delays is not None:
@@ -168,33 +170,45 @@ def plot_baseline_comparison_data(
             # Final append is to capture the last zone in the
             # time range
             transitions = [*np.argwhere(np.diff(zones) != 0)[:, 0], len(zones)]
+            start_idx = 0
+            for _zone_idx, end_idx in enumerate(transitions):
+                # The np.diff results in offset indices, so shift
+                # back the transition by 1
+                object_slice = slice(start_idx, end_idx + 1)
+                # and ensure non-overlapping line segments
+                start_idx = end_idx + 1
+                import matplotlib.patheffects as pe  # noqa: PLC0415
 
-            for ax, baseline_data in zip(  # type:ignore[call-overload]
-                (ax3, ax4),
-                (before_baseline_data, after_baseline_data),
-                strict=True,
-            ):
-                start_idx = 0
-                for _zone_idx, end_idx in enumerate(transitions):
-                    # The np.diff results in offset indices, so shift
-                    # back the transition by 1
-                    object_slice = slice(start_idx, end_idx + 1)
-                    # and ensure non-overlapping line segments
-                    start_idx = end_idx + 1
+                ax5.plot(
+                    before_baseline_data.time[object_slice],
+                    wrapped_w_delays[object_slice],
+                    color="tab:red",
+                    label=f"Delay for {w_delays.object_name}"
+                    if _zone_idx == 0
+                    else None,
+                    lw=5,
+                    path_effects=[
+                        pe.Stroke(
+                            linewidth=6, foreground="k"
+                        ),  # Add some contrast to help read line stand out
+                        pe.Normal(),
+                    ],
+                    dashes=(2 * _zone_idx + 1, 2 * _zone_idx + 1),
+                )
 
-                    ax.plot(
-                        baseline_data.time[object_slice],
-                        wrapped_w_delays[object_slice],
-                        ls="-",
-                        color="tab:red",
-                        label=f"Delay for {w_delays.object_name}"
-                        if _zone_idx == 0
-                        else None,
-                        alpha=0.4,
-                        lw=6,
-                    )
+                if outer_width_ns is not None:
+                    for s, sign in enumerate((1, -1)):
+                        ax5.plot(
+                            before_baseline_data.time[object_slice],
+                            wrapped_w_delays[object_slice] + outer_width_ns * sign,
+                            ls="--",
+                            color="k",
+                            lw=1,
+                            label="outer_width" if _zone_idx == 0 and s == 0 else None,
+                        )
 
-                    ax.legend(loc="upper right")
+        ax5.legend(loc="upper right")
+
         fig.suptitle(
             f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}"
         )
