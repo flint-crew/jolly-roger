@@ -35,13 +35,17 @@ class Baselines:
     """The measurement set used to construct some instance of `Baseline`"""
 
 
-def get_baselines_from_ms(ms_path: Path) -> Baselines:
+def get_baselines_from_ms(
+    ms_path: Path,
+    reverse_baselines: bool = False,
+) -> Baselines:
     """Extract the antenna positions from the nominated measurement
     set and constructed the set of baselines. These are drawn from
     the ANTENNA table in the measurement set.
 
     Args:
         ms_path (Path): The measurement set to extract baseliens from
+        reverse_baselines (bool): Reverse the baseline ordering
 
     Returns:
         Baselines: The corresponding set of baselines formed.
@@ -51,6 +55,8 @@ def get_baselines_from_ms(ms_path: Path) -> Baselines:
     with table(str(ms_path / "ANTENNA"), ack=False) as tab:
         ants_idx = np.arange(len(tab), dtype=int)
         b_idx = np.array(list(combinations(list(ants_idx), 2)))
+        if reverse_baselines:
+            b_idx = b_idx[:, ::-1]
         xyz = tab.getcol("POSITION")
         b_xyz = xyz[b_idx[:, 0]] - xyz[b_idx[:, 1]]
 
