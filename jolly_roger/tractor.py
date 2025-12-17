@@ -473,6 +473,7 @@ def make_plot_results(
     target: str,
     w_delays: WDelays | None = None,
     reverse_baselines: bool = False,
+    outer_width_ns: float | None = None,
 ) -> list[Path]:
     output_paths = []
     output_dir = open_ms_tables.ms_path.parent / "plots"
@@ -524,6 +525,7 @@ def make_plot_results(
             after_delays=after_delays,
             output_path=output_path,
             w_delays=w_delays,
+            outer_width_ns=outer_width_ns,
         )
         logger.info(f"Have written {output_path=}")
         output_paths.append(plot_path)
@@ -833,6 +835,7 @@ def tukey_tractor(
             target=tukey_tractor_options.target_object,
             w_delays=w_delays,
             reverse_baselines=tukey_tractor_options.reverse_baselines,
+            outer_width_ns=tukey_tractor_options.outer_width_ns,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
