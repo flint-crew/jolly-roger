@@ -865,7 +865,7 @@ def tukey_tractor(
         stop = time()
         runtime_s = stop - start
         logger.info(
-            f"Tapered {len(tukey_tractor_options.target_objects)} targets in {runtime_s:0.2f}s"
+            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows in {runtime_s:0.2f}s"
         )
 
     plot_paths: list[Path] | None
