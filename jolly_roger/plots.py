@@ -196,18 +196,35 @@ def plot_baseline_comparison_data(
                     dashes=(2 * _zone_idx + 1, 2 * _zone_idx + 1),
                 )
 
-                # if outer_width_ns is not None:
-                #     for s, sign in enumerate((1, -1)):
-                #         ax5.plot(
-                #             before_baseline_data.time[object_slice],
-                #             wrapped_w_delays[object_slice] + outer_width_ns * sign,
-                #             ls="--",
-                #             color="k",
-                #             lw=1,
-                #             label="outer_width" if _zone_idx == 0 and s == 0 else None,
-                #         )
+            if outer_width_ns is not None:
+                for s, sign in enumerate((1, -1)):
+                    wrapped_outer_width = symmetric_domain_wrap(
+                        values=wrapped_w_delays + outer_width_ns * sign,
+                        upper_limit=np.max(after_delays.delay.to("ns")).value,
+                    )
+                    outer_zones = calculate_nyquist_zone(
+                        values=wrapped_w_delays + outer_width_ns * sign,
+                        upper_limit=np.max(after_delays.delay.to("ns")).value,
+                    )
+                    transitions = [
+                        *np.argwhere(np.diff(outer_zones) != 0)[:, 0],
+                        len(zones),
+                    ]
+                    start_idx = 0
+                    for _zone_idx, end_idx in enumerate(transitions):
+                        object_slice = slice(start_idx, end_idx + 1)
+                        start_idx = end_idx + 1
+                        ax5.plot(
+                            before_baseline_data.time[object_slice],
+                            wrapped_outer_width[object_slice],
+                            ls="--",
+                            color="k",
+                            lw=1,
+                            label="outer_width" if _zone_idx == 0 and s == 0 else None,
+                        )
 
         ax5.legend(loc="upper right")
+        ax5.grid()
 
         fig.suptitle(
             f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}"

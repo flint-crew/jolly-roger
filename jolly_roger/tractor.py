@@ -108,10 +108,14 @@ def tukey_taper(
         tukey_width = outer_width
 
     if tukey_x_offset is not None:
+        # Save the original maximum of the input domain before any shifting ...
         original_x_local_maximum = np.max(x_local)
         x_local = x_local[:, None] - tukey_x_offset[None, :]
 
-        x_local = symmetric_domain_wrap(values=x_local, upper_limit=original_x_local_maximum)
+        # ... so that the original maximum is used in the unwrapping
+        x_local = symmetric_domain_wrap(
+            values=x_local, upper_limit=original_x_local_maximum
+        )
 
     taper = np.ones_like(x_local)
     # Fully zero region
@@ -565,7 +569,7 @@ def _tukey_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays: WDelays | None = None,
-) -> tuple[NDArray[np.complex128],NDArray[np.bool]|None]:
+) -> tuple[NDArray[np.complex128], NDArray[np.bool] | None]:
     """Compute a tukey taper for a dataset and then apply it
     to the dataset. Here the data corresponds to a (chan, time, pol)
     array. Data is not necessarily a single baseline.
@@ -582,7 +586,7 @@ def _tukey_tractor(
         w_delays (WDelays | None, optional): The w-derived delays to apply. If None taper is applied to large delays. Defaults to None.
 
     Returns:
-        tuple[NDArray[np.complex128],NDArray[np.bool] | None]: Scaled complex visibilities and corresponding flags. If flags do not need ot be updated ``None`` is returned.
+        tuple[NDArray[np.complex128],NDArray[np.bool] | None]: Scaled complex visibilities and corresponding flags. If flags do not need to be updated ``None`` is returned.
     """
 
     delay_time = data_to_delay_time(data=data_chunk)
@@ -949,7 +953,9 @@ def cli() -> None:
     if args.mode == "tukey":
         tukey_tractor_options = TukeyTractorOptions(
             ms_path=args.ms_path,
-            outer_width_ns=args.outer_width if args.outer_width is not None else args.tukey_widthh,
+            outer_width_ns=args.outer_width
+            if args.outer_width is not None
+            else args.tukey_widthh,
             tukey_width_ns=args.tukey_width,
             data_column=args.data_column,
             output_column=args.output_column,
