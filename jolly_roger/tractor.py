@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from argparse import ArgumentParser
+from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from collections.abc import Generator
 from dataclasses import dataclass
 from itertools import combinations
@@ -569,7 +569,7 @@ def _tukey_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays: WDelays | None = None,
-) -> tuple[NDArray[np.complex128], NDArray[np.bool] | None]:
+) -> tuple[DataChunk, NDArray[np.bool] | None]:
     """Compute a tukey taper for a dataset and then apply it
     to the dataset. Here the data corresponds to a (chan, time, pol)
     array. Data is not necessarily a single baseline.
@@ -586,7 +586,7 @@ def _tukey_tractor(
         w_delays (WDelays | None, optional): The w-derived delays to apply. If None taper is applied to large delays. Defaults to None.
 
     Returns:
-        tuple[NDArray[np.complex128],NDArray[np.bool] | None]: Scaled complex visibilities and corresponding flags. If flags do not need to be updated ``None`` is returned.
+        tuple[DataChunk,NDArray[np.bool] | None]: Scaled complex visibilities and corresponding flags. If flags do not need to be updated ``None`` is returned.
     """
 
     delay_time = data_to_delay_time(data=data_chunk)
@@ -729,8 +729,6 @@ class TukeyTractorOptions:
     """If the output column exists it will be overwritten"""
     chunk_size: int = 1000
     """Size of the row-wise chunking iterator"""
-    apply_towards_object: bool = False
-    """apply the taper using the delay towards the target object."""
     target_object: str = "Sun"
     """The target object to apply the delay towards."""
     elevation_cut: u.Quantity = -1 * u.deg
@@ -789,17 +787,15 @@ def tukey_tractor(
         )
 
     # Generate the delay for all baselines and time steps
-    w_delays: WDelays | None = None
-    if tukey_tractor_options.apply_towards_object:
-        logger.info(
-            f"Pre-calculating delays towards the target: {tukey_tractor_options.target_object}"
-        )
-        w_delays = get_object_delay_for_ms(
-            ms_path=tukey_tractor_options.ms_path,
-            object_name=tukey_tractor_options.target_object,
-            reverse_baselines=tukey_tractor_options.reverse_baselines,
-        )
-        assert len(w_delays.w_delays.shape) == 2
+    logger.info(
+        f"Pre-calculating delays towards the target: {tukey_tractor_options.target_object}"
+    )
+    w_delays = get_object_delay_for_ms(
+        ms_path=tukey_tractor_options.ms_path,
+        object_name=tukey_tractor_options.target_object,
+        reverse_baselines=tukey_tractor_options.reverse_baselines,
+    )
+    assert len(w_delays.w_delays.shape) == 2
 
     if not tukey_tractor_options.dry_run:
         with tqdm(total=len(open_ms_tables.main_table)) as pbar:
@@ -858,7 +854,10 @@ def get_parser() -> ArgumentParser:
     Returns:
         ArgumentParser: Constructed argument parser
     """
-    parser = ArgumentParser(description="Run the Jolly Roger Tractor")
+    parser = ArgumentParser(
+        description="Run the Jolly Roger Tractor",
+        formatter_class=ArgumentDefaultsHelpFormatter,
+    )
     subparsers = parser.add_subparsers(dest="mode")
 
     tukey_parser = subparsers.add_parser(
@@ -872,13 +871,13 @@ def get_parser() -> ArgumentParser:
     tukey_parser.add_argument(
         "--outer-width",
         type=float,
-        default=None,
+        default=10,
         help="The outer width of the Tukey taper in nanoseconds. If unset defaults to --tukey-width",
     )
     tukey_parser.add_argument(
         "--tukey-width",
         type=float,
-        default=5,
+        default=None,
         help="The Tukey width of the Tukey taper in nanoseconds",
     )
     tukey_parser.add_argument(
@@ -953,10 +952,10 @@ def cli() -> None:
     if args.mode == "tukey":
         tukey_tractor_options = TukeyTractorOptions(
             ms_path=args.ms_path,
-            outer_width_ns=args.outer_width
-            if args.outer_width is not None
-            else args.tukey_widthh,
-            tukey_width_ns=args.tukey_width,
+            outer_width_ns=args.outer_width,
+            tukey_width_ns=args.tukey_width
+            if args.tukey_width is not None
+            else args.outer_width,
             data_column=args.data_column,
             output_column=args.output_column,
             copy_column_data=args.copy_column_data,
@@ -965,7 +964,6 @@ def cli() -> None:
             overwrite=args.overwrite,
             chunk_size=args.chunk_size,
             target_object=args.target_object,
-            apply_towards_object=args.apply_towards_object,
             ignore_nyquist_zone=args.ignore_nyquist_zone,
             reverse_baselines=args.reverse_baselines,
         )
