@@ -18,7 +18,7 @@ from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
 from jolly_roger.delays import data_to_delay_time, delay_time_to_data
-from jolly_roger.logging import logger
+from jolly_roger.log_utils import logger
 from jolly_roger.plots import plot_baseline_comparison_data
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
@@ -921,8 +921,9 @@ def get_parser() -> ArgumentParser:
     tukey_parser.add_argument(
         "--target-object",
         type=str,
+        nargs="+",
         default="Sun",
-        help="The target object to apply the delay towards. Defaults to 'Sun'.",
+        help="The target object to apply the delay towards. Defaults to 'Sun'. Can supply multiple targets.",
     )
     tukey_parser.add_argument(
         "--ignore-nyquist-zone",
