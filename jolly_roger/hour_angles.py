@@ -11,7 +11,7 @@ from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_sun
 from astropy.time import Time
 from casacore.tables import table
 
-from jolly_roger.logging import logger
+from jolly_roger.log_utils import logger
 
 # Default location with XYZ based on mean of antenna positions
 ASKAP = EarthLocation.of_site("ASKAP")

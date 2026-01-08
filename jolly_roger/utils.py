@@ -6,7 +6,7 @@ from dataclasses import is_dataclass
 from typing import Any
 
 from jolly_roger import __version__
-from jolly_roger.logging import logger
+from jolly_roger.log_utils import logger
 
 
 def log_jolly_roger_version() -> None:
