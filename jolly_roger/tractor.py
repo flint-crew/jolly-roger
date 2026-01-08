@@ -108,9 +108,10 @@ def tukey_taper(
         tukey_width = outer_width
 
     if tukey_x_offset is not None:
+        original_x_local_maximum = np.max(x_local)
         x_local = x_local[:, None] - tukey_x_offset[None, :]
 
-        x_local = symmetric_domain_wrap(values=x_local, upper_limit=np.max(x_local))
+        x_local = symmetric_domain_wrap(values=x_local, upper_limit=original_x_local_maximum)
 
     taper = np.ones_like(x_local)
     # Fully zero region
@@ -867,8 +868,8 @@ def get_parser() -> ArgumentParser:
     tukey_parser.add_argument(
         "--outer-width",
         type=float,
-        default=10,
-        help="The outer width of the Tukey taper in nanoseconds",
+        default=None,
+        help="The outer width of the Tukey taper in nanoseconds. If unset defaults to --tukey-width",
     )
     tukey_parser.add_argument(
         "--tukey-width",
@@ -948,7 +949,7 @@ def cli() -> None:
     if args.mode == "tukey":
         tukey_tractor_options = TukeyTractorOptions(
             ms_path=args.ms_path,
-            outer_width_ns=args.outer_width,
+            outer_width_ns=args.outer_width if args.outer_width is not None else args.tukey_widthh,
             tukey_width_ns=args.tukey_width,
             data_column=args.data_column,
             output_column=args.output_column,

@@ -164,7 +164,7 @@ def plot_baseline_comparison_data(
                 upper_limit=np.max(after_delays.delay.to("ns")).value,
             )
             zones = calculate_nyquist_zone(
-                values=w_delays.w_delays[b_idx].value,
+                values=w_delays.w_delays[b_idx].to("ns").value,
                 upper_limit=np.max(after_delays.delay.to("ns")).value,
             )
             # Final append is to capture the last zone in the
@@ -196,16 +196,16 @@ def plot_baseline_comparison_data(
                     dashes=(2 * _zone_idx + 1, 2 * _zone_idx + 1),
                 )
 
-                if outer_width_ns is not None:
-                    for s, sign in enumerate((1, -1)):
-                        ax5.plot(
-                            before_baseline_data.time[object_slice],
-                            wrapped_w_delays[object_slice] + outer_width_ns * sign,
-                            ls="--",
-                            color="k",
-                            lw=1,
-                            label="outer_width" if _zone_idx == 0 and s == 0 else None,
-                        )
+                # if outer_width_ns is not None:
+                #     for s, sign in enumerate((1, -1)):
+                #         ax5.plot(
+                #             before_baseline_data.time[object_slice],
+                #             wrapped_w_delays[object_slice] + outer_width_ns * sign,
+                #             ls="--",
+                #             color="k",
+                #             lw=1,
+                #             label="outer_width" if _zone_idx == 0 and s == 0 else None,
+                #         )
 
         ax5.legend(loc="upper right")
 
