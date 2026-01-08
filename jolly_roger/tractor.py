@@ -865,7 +865,7 @@ def tukey_tractor(
         stop = time()
         runtime_s = stop - start
         logger.info(
-            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows in {runtime_s:0.2f}s"
+            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(taper_data_chunk.freq_chan)} chans in {runtime_s:0.2f}s"
         )
 
     plot_paths: list[Path] | None
@@ -908,7 +908,9 @@ def get_parser() -> ArgumentParser:
     subparsers = parser.add_subparsers(dest="mode")
 
     tukey_parser = subparsers.add_parser(
-        name="tukey", help="Perform a simple Tukey taper across delay-time data"
+        name="tukey",
+        help="Perform a simple Tukey taper across delay-time data",
+        formatter_class=ArgumentDefaultsHelpFormatter,
     )
     tukey_parser.add_argument(
         "ms_path",
