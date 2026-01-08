@@ -925,11 +925,6 @@ def get_parser() -> ArgumentParser:
         help="The target object to apply the delay towards. Defaults to 'Sun'.",
     )
     tukey_parser.add_argument(
-        "--apply-towards-object",
-        action="store_true",
-        help="Whether the tukey taper is applied towards the target object (e.g. the Sun). If not set, the taper is applied towards large delays.",
-    )
-    tukey_parser.add_argument(
         "--ignore-nyquist-zone",
         type=int,
         default=2,
