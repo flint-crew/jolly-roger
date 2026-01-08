@@ -564,7 +564,7 @@ def _tukey_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays: WDelays | None = None,
-) -> NDArray[np.complex128]:
+) -> tuple[NDArray[np.complex128],NDArray[np.bool]|None]:
     """Compute a tukey taper for a dataset and then apply it
     to the dataset. Here the data corresponds to a (chan, time, pol)
     array. Data is not necessarily a single baseline.
@@ -581,7 +581,7 @@ def _tukey_tractor(
         w_delays (WDelays | None, optional): The w-derived delays to apply. If None taper is applied to large delays. Defaults to None.
 
     Returns:
-        NDArray[np.complex128]: Scaled complex visibilities
+        tuple[NDArray[np.complex128],NDArray[np.bool] | None]: Scaled complex visibilities and corresponding flags. If flags do not need ot be updated ``None`` is returned.
     """
 
     delay_time = data_to_delay_time(data=data_chunk)
@@ -811,7 +811,7 @@ def tukey_tractor(
 
                 pbar.update(len(taper_data_chunk.masked_data))
 
-                # only put if not a dry run
+                # Only update here is we pass the dry run check above
                 open_ms_tables.main_table.putcol(
                     columnname=tukey_tractor_options.output_column,
                     value=taper_data_chunk.masked_data,
