@@ -35,9 +35,13 @@ class WDelays:
 def get_object_delay_for_ms(
     ms_path: Path,
     object_name: str = "sun",
+    reverse_baselines: bool = False,
 ) -> WDelays:
     # Generate the two sets of uvw coordinate objects
-    baselines: Baselines = get_baselines_from_ms(ms_path=ms_path)
+    baselines: Baselines = get_baselines_from_ms(
+        ms_path=ms_path,
+        reverse_baselines=reverse_baselines,
+    )
     hour_angles_phase = make_hour_angles_for_ms(
         ms_path=ms_path,
         position=None,  # gets the position from phase direction
