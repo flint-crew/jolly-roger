@@ -3,6 +3,8 @@ on data"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -48,4 +50,34 @@ def calculate_nyquist_zone(
     """
     return np.array(
         np.floor((upper_limit + np.abs(values)) / (2.0 * upper_limit)) + 1, dtype=int
+    )
+
+
+@dataclass
+class SymmetricWrap:
+    values: NDArray[np.floating]
+    """The wrapped values"""
+    zones: NDArray[np.int_]
+    """The nyquist zones for the wrapped data"""
+    upper_limit: float
+    """The upper limit of the symmetric domain used to wrap data"""
+
+
+def calculate_wrapped_data(
+    values: NDArray[np.floating], upper_limit: float
+) -> SymmetricWrap:
+    """Helper function to wrap data in a symmetric and cyclic domain.
+
+    Args:
+        values (NDArray[np.floating]): The values to wrap
+        upper_limit (float): The nyquist zone of the wrapped data
+
+    Returns:
+        SymmetricWrap: The wrapped data
+    """
+
+    return SymmetricWrap(
+        values=symmetric_domain_wrap(values=values, upper_limit=upper_limit),
+        zones=calculate_nyquist_zone(values=values, upper_limit=upper_limit),
+        upper_limit=upper_limit,
     )

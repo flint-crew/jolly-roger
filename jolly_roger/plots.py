@@ -18,7 +18,9 @@ from astropy.visualization import (
 )
 
 from jolly_roger.uvws import WDelays
-from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
+from jolly_roger.wrap import (
+    calculate_wrapped_data,
+)
 
 if TYPE_CHECKING:
     from jolly_roger.delays import DelayTime
@@ -176,17 +178,16 @@ def plot_baseline_comparison_data(
         if w_delays is not None:
             ant_1, ant_2 = before_baseline_data.ant_1, before_baseline_data.ant_2
             b_idx = w_delays.b_map[ant_1, ant_2]
-            wrapped_w_delays = symmetric_domain_wrap(
-                values=w_delays.w_delays[b_idx].to("ns").value,
-                upper_limit=np.max(after_delays.delay.to("ns")).value,
-            )
-            zones = calculate_nyquist_zone(
+            wrapped_data = calculate_wrapped_data(
                 values=w_delays.w_delays[b_idx].to("ns").value,
                 upper_limit=np.max(after_delays.delay.to("ns")).value,
             )
             # Final append is to capture the last zone in the
             # time range
-            transitions = [*np.argwhere(np.diff(zones) != 0)[:, 0], len(zones)]
+            transitions = [
+                *np.argwhere(np.diff(wrapped_data.zones) != 0)[:, 0],
+                len(wrapped_data.zones),
+            ]
             start_idx = 0
             for _zone_idx, end_idx in enumerate(transitions):
                 # The np.diff results in offset indices, so shift
@@ -198,7 +199,7 @@ def plot_baseline_comparison_data(
 
                 ax5.plot(
                     before_baseline_data.time[object_slice],
-                    wrapped_w_delays[object_slice],
+                    wrapped_data.values[object_slice],
                     color="tab:red",
                     label=f"Delay for {w_delays.object_name}"
                     if _zone_idx == 0
@@ -215,17 +216,13 @@ def plot_baseline_comparison_data(
 
             if outer_width_ns is not None:
                 for s, sign in enumerate((1, -1)):
-                    wrapped_outer_width = symmetric_domain_wrap(
-                        values=wrapped_w_delays + outer_width_ns * sign,
-                        upper_limit=np.max(after_delays.delay.to("ns")).value,
-                    )
-                    outer_zones = calculate_nyquist_zone(
-                        values=wrapped_w_delays + outer_width_ns * sign,
+                    wrapped_outer_data = calculate_wrapped_data(
+                        values=wrapped_data.values + outer_width_ns * sign,
                         upper_limit=np.max(after_delays.delay.to("ns")).value,
                     )
                     transitions = [
-                        *np.argwhere(np.diff(outer_zones) != 0)[:, 0],
-                        len(zones),
+                        *np.argwhere(np.diff(wrapped_outer_data.zones) != 0)[:, 0],
+                        len(wrapped_outer_data.zones),
                     ]
                     start_idx = 0
                     for _zone_idx, end_idx in enumerate(transitions):
@@ -233,7 +230,7 @@ def plot_baseline_comparison_data(
                         start_idx = end_idx + 1
                         ax5.plot(
                             before_baseline_data.time[object_slice],
-                            wrapped_outer_width[object_slice],
+                            wrapped_outer_data.values[object_slice],
                             ls="--",
                             color="k",
                             lw=1,
