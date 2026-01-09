@@ -16,6 +16,7 @@ from astropy.coordinates import (
 from astropy.time import Time
 from casacore.tables import makecoldesc, table, taql
 from numpy.typing import NDArray
+from scipy.stats import norm, sigmaclip
 from tqdm.auto import tqdm
 
 from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
@@ -685,10 +686,51 @@ def _tukey_tractor(
     return taper, flags_to_return, delay_time
 
 
+def _generate_real_noise(
+    data: NDArray[np.float64],
+    noise_taper: NDArray[np.float64],
+    sigma_clip_value: float,
+    rng: np.random.Generator,
+) -> NDArray[np.float64]:
+    clipped = sigmaclip(
+        data,
+        low=sigma_clip_value,
+        high=sigma_clip_value,
+    )
+    mean, std = norm.fit(clipped.clipped)
+    noise = rng.normal(loc=mean, scale=std, size=data.shape)
+    return noise * noise_taper
+
+
+def generate_noise_infill(
+    delay_time: DelayTime,
+    taper: NDArray[np.float64],
+    sigma_clip_value: float = 5,
+) -> NDArray[np.complex128]:
+    rng = np.random.default_rng()
+    noise_taper = 1 - taper
+
+    real_noise_tapered = _generate_real_noise(
+        delay_time.delay_time.real,
+        noise_taper,
+        sigma_clip_value,
+        rng,
+    )
+    imag_noise_tapered = _generate_real_noise(
+        delay_time.delay_time.imag,
+        noise_taper,
+        sigma_clip_value,
+        rng,
+    )
+
+    return real_noise_tapered + 1j * imag_noise_tapered
+
+
 def _apply_taper(
     data_chunk: DataChunk,
     delay_time: DelayTime,
     taper: NDArray[np.float64],
+    inpaint_noise: bool = False,
 ) -> DataChunk:
     # Delay-time is a 3D array: (time, delay, pol)
     # Taper is 1D: (delay,)
@@ -697,6 +739,14 @@ def _apply_taper(
     tapered_delay_time_data = (
         tapered_delay_time_data_real + 1j * tapered_delay_time_data_imag
     )
+
+    if inpaint_noise:
+        # Generated noise array is pre-tapered and matches data shape
+        tapered_delay_time_data += generate_noise_infill(
+            delay_time=delay_time,
+            taper=taper,
+        )
+
     tapered_delay_time = delay_time
     tapered_delay_time.delay_time = tapered_delay_time_data
 
@@ -735,6 +785,7 @@ def _tukey_multi_tractor(
         data_chunk=data_chunk,
         delay_time=cast(DelayTime, delay_time),
         taper=combined_taper,
+        inpaint_noise=tukey_tractor_options.inpaint_noise,
     )
 
     return tapered_data, combined_flags
@@ -772,6 +823,8 @@ class TukeyTractorOptions:
     """Do not apply the tukey taper if object is beyond this Nyquist zone"""
     reverse_baselines: bool = False
     """Reverse baseline ordering"""
+    inpaint_noise: bool = False
+    """ Inpaint noise as fitted to the real/imaginary components of the delay data """
 
 
 @dataclass(frozen=True)
@@ -985,6 +1038,11 @@ def get_parser() -> ArgumentParser:
         action="store_true",
         help="Reverse baseline ordering",
     )
+    tukey_parser.add_argument(
+        "--inpaint-noise",
+        action="store_true",
+        help="Inpaint random noise in the filter",
+    )
 
     return parser
 
@@ -1011,6 +1069,7 @@ def cli() -> None:
             target_objects=args.target_objects,
             ignore_nyquist_zone=args.ignore_nyquist_zone,
             reverse_baselines=args.reverse_baselines,
+            inpaint_noise=args.inpaint_noise,
         )
 
         tukey_tractor(tukey_tractor_options=tukey_tractor_options)
