@@ -5,7 +5,8 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
-from typing import Any
+from time import time
+from typing import Any, cast
 
 import astropy.units as u
 import numpy as np
@@ -15,10 +16,11 @@ from astropy.coordinates import (
 from astropy.time import Time
 from casacore.tables import makecoldesc, table, taql
 from numpy.typing import NDArray
+from scipy.stats import norm, sigmaclip
 from tqdm.auto import tqdm
 
-from jolly_roger.delays import data_to_delay_time, delay_time_to_data
-from jolly_roger.logging import logger
+from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
+from jolly_roger.log_utils import logger
 from jolly_roger.plots import plot_baseline_comparison_data
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
@@ -394,7 +396,7 @@ def get_baseline_data(
         masked_data=masked_data,
         freq_chan=freq_chan,
         phase_center=target,
-        uvws_phase_center=uvws_phase_center,
+        uvws_phase_center=cast(u.Quantity, uvws_phase_center),
         time=time,
         ant_1=ant_1,
         ant_2=ant_2,
@@ -569,7 +571,8 @@ def _tukey_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays: WDelays,
-) -> tuple[DataChunk, NDArray[np.bool] | None]:
+    delay_time: DelayTime | None = None,
+) -> tuple[NDArray[np.float64], NDArray[np.bool], DelayTime]:
     """Compute a tukey taper for a dataset and then apply it
     to the dataset. Here the data corresponds to a (chan, time, pol)
     array. Data is not necessarily a single baseline.
@@ -583,13 +586,13 @@ def _tukey_tractor(
         data_chunk (DataChunk): The representation of the data with attached units
         tukey_tractor_options (TukeyTractorOptions): Options for the tukey taper
         w_delays (WDelays): The w-derived delays to apply.
+        delay_time (DelayTime | None, optional): Optional pre-computed DelayTime object.
 
     Returns:
-        tuple[DataChunk,NDArray[np.bool] | None]: Scaled complex visibilities and corresponding flags. If flags do not need to be updated ``None`` is returned.
+        tuple[DataChunk,NDArray[np.bool],DelayTime]: Scaled complex visibilities, corresponding flags, and delays.
     """
-
-    delay_time = data_to_delay_time(data=data_chunk)
-    flags_to_return: None | NDArray[np.bool] = None
+    if delay_time is None:
+        delay_time = data_to_delay_time(data=data_chunk)
 
     # Set up the offsets. By default we will be tapering around the field,
     # but should w_delays be specified these will be modified to direct
@@ -679,6 +682,55 @@ def _tukey_tractor(
         ~np.isfinite(data_chunk.masked_data.filled(np.nan)) | flags_to_return
     )
 
+    return taper, flags_to_return, delay_time
+
+
+def _generate_real_noise(
+    data: NDArray[np.float64],
+    noise_taper: NDArray[np.float64],
+    sigma_clip_value: float,
+    rng: np.random.Generator,
+) -> NDArray[np.float64]:
+    clipped = sigmaclip(
+        data,
+        low=sigma_clip_value,
+        high=sigma_clip_value,
+    )
+    mean, std = norm.fit(clipped.clipped)
+    noise = rng.normal(loc=mean, scale=std, size=data.shape)
+    return noise * noise_taper
+
+
+def generate_noise_infill(
+    delay_time: DelayTime,
+    taper: NDArray[np.float64],
+    sigma_clip_value: float = 5,
+) -> NDArray[np.complex128]:
+    rng = np.random.default_rng()
+    noise_taper = 1 - taper
+
+    real_noise_tapered = _generate_real_noise(
+        delay_time.delay_time.real,
+        noise_taper,
+        sigma_clip_value,
+        rng,
+    )
+    imag_noise_tapered = _generate_real_noise(
+        delay_time.delay_time.imag,
+        noise_taper,
+        sigma_clip_value,
+        rng,
+    )
+
+    return real_noise_tapered + 1j * imag_noise_tapered
+
+
+def _apply_taper(
+    data_chunk: DataChunk,
+    delay_time: DelayTime,
+    taper: NDArray[np.float64],
+    inpaint_noise: bool = False,
+) -> DataChunk:
     # Delay-time is a 3D array: (time, delay, pol)
     # Taper is 1D: (delay,)
     tapered_delay_time_data_real = delay_time.delay_time.real * taper
@@ -686,6 +738,14 @@ def _tukey_tractor(
     tapered_delay_time_data = (
         tapered_delay_time_data_real + 1j * tapered_delay_time_data_imag
     )
+
+    if inpaint_noise:
+        # Generated noise array is pre-tapered and matches data shape
+        tapered_delay_time_data += generate_noise_infill(
+            delay_time=delay_time,
+            taper=taper,
+        )
+
     tapered_delay_time = delay_time
     tapered_delay_time.delay_time = tapered_delay_time_data
 
@@ -695,7 +755,39 @@ def _tukey_tractor(
     )
     logger.debug(f"{tapered_data.masked_data.shape=} {tapered_data.masked_data.dtype}")
 
-    return tapered_data, flags_to_return
+    return tapered_data
+
+
+def _tukey_multi_tractor(
+    data_chunk: DataChunk,
+    tukey_tractor_options: TukeyTractorOptions,
+    w_delays_dict: dict[str, WDelays],
+) -> tuple[DataChunk, NDArray[np.bool]]:
+    # Initialise to None, then reuse to save on computation
+    delay_time: DelayTime | None = None
+    taper_list: list[NDArray[np.float64]] = []
+    flag_list: list[NDArray[np.bool]] = []
+    for w_delays in w_delays_dict.values():
+        taper, flags_to_return, delay_time = _tukey_tractor(
+            data_chunk=data_chunk,
+            tukey_tractor_options=tukey_tractor_options,
+            w_delays=w_delays,
+            delay_time=delay_time,
+        )
+        taper_list.append(taper)
+        flag_list.append(flags_to_return)
+
+    combined_taper = np.min(taper_list, axis=0)
+    combined_flags = np.sum(flag_list, axis=0).astype(bool)
+
+    tapered_data = _apply_taper(
+        data_chunk=data_chunk,
+        delay_time=cast(DelayTime, delay_time),
+        taper=combined_taper,
+        inpaint_noise=tukey_tractor_options.inpaint_noise,
+    )
+
+    return tapered_data, combined_flags
 
 
 @dataclass
@@ -704,6 +796,8 @@ class TukeyTractorOptions:
 
     ms_path: Path
     """Measurement set to be modified"""
+    target_objects: list[str]
+    """The target object to apply the delay towards."""
     outer_width_ns: float = 10
     """The start of the tapering in nanoseconds"""
     tukey_width_ns: float = 10
@@ -722,14 +816,14 @@ class TukeyTractorOptions:
     """If the output column exists it will be overwritten"""
     chunk_size: int = 1000
     """Size of the row-wise chunking iterator"""
-    target_object: str = "Sun"
-    """The target object to apply the delay towards."""
     elevation_cut: u.Quantity = -1 * u.deg
     """The elevation cut-off for the target object. Defaults to 0 degrees."""
     ignore_nyquist_zone: int = 2
     """Do not apply the tukey taper if object is beyond this Nyquist zone"""
     reverse_baselines: bool = False
     """Reverse baseline ordering"""
+    inpaint_noise: bool = False
+    """ Inpaint noise as fitted to the real/imaginary components of the delay data """
 
 
 @dataclass(frozen=True)
@@ -780,27 +874,28 @@ def tukey_tractor(
         )
 
     # Generate the delay for all baselines and time steps
-    logger.info(
-        f"Pre-calculating delays towards the target: {tukey_tractor_options.target_object}"
-    )
-    w_delays = get_object_delay_for_ms(
-        ms_path=tukey_tractor_options.ms_path,
-        object_name=tukey_tractor_options.target_object,
-        reverse_baselines=tukey_tractor_options.reverse_baselines,
-    )
-    assert len(w_delays.w_delays.shape) == 2
+    w_delays_dict = dict[str, WDelays]()
+    for target_object in tukey_tractor_options.target_objects:
+        logger.info(f"Pre-calculating delays towards the target: {target_object}")
+        w_delays_dict[target_object] = get_object_delay_for_ms(
+            ms_path=tukey_tractor_options.ms_path,
+            object_name=target_object,
+            reverse_baselines=tukey_tractor_options.reverse_baselines,
+        )
+        assert len(w_delays_dict[target_object].w_delays.shape) == 2
 
     if not tukey_tractor_options.dry_run:
-        with tqdm(total=len(open_ms_tables.main_table)) as pbar:
+        start = time()
+        with tqdm(total=len(open_ms_tables.main_table), desc="Rows") as pbar:
             for data_chunk in get_data_chunks(
                 open_ms_tables=open_ms_tables,
                 chunk_size=tukey_tractor_options.chunk_size,
                 data_column=tukey_tractor_options.data_column,
             ):
-                taper_data_chunk, flags_to_apply = _tukey_tractor(
+                taper_data_chunk, flags_to_apply = _tukey_multi_tractor(
                     data_chunk=data_chunk,
                     tukey_tractor_options=tukey_tractor_options,
-                    w_delays=w_delays,
+                    w_delays_dict=w_delays_dict,
                 )
 
                 pbar.update(len(taper_data_chunk.masked_data))
@@ -819,20 +914,31 @@ def tukey_tractor(
                         startrow=taper_data_chunk.row_start,
                         nrow=taper_data_chunk.chunk_size,
                     )
-
-    plot_paths: list[Path] | None = None
-    if tukey_tractor_options.make_plots:
-        plot_paths = make_plot_results(
-            open_ms_tables=open_ms_tables,
-            data_column=tukey_tractor_options.data_column,
-            output_column=tukey_tractor_options.output_column,
-            target=tukey_tractor_options.target_object,
-            w_delays=w_delays,
-            reverse_baselines=tukey_tractor_options.reverse_baselines,
-            outer_width_ns=tukey_tractor_options.outer_width_ns,
+        stop = time()
+        runtime_s = stop - start
+        logger.info(
+            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(taper_data_chunk.freq_chan)} chans in {runtime_s:0.2f}s"
         )
 
+    plot_paths: list[Path] | None
+    if tukey_tractor_options.make_plots:
+        plot_paths = []
+        for target_object, w_delays in w_delays_dict.items():
+            plot_paths.extend(
+                make_plot_results(
+                    open_ms_tables=open_ms_tables,
+                    data_column=tukey_tractor_options.data_column,
+                    output_column=tukey_tractor_options.output_column,
+                    target=target_object,
+                    w_delays=w_delays,
+                    reverse_baselines=tukey_tractor_options.reverse_baselines,
+                    outer_width_ns=tukey_tractor_options.outer_width_ns,
+                )
+            )
+
         logger.info(f"Made {len(plot_paths)} output plots")
+    else:
+        plot_paths = None
 
     return TukeyTractorResults(
         ms_path=open_ms_tables.ms_path,
@@ -854,7 +960,9 @@ def get_parser() -> ArgumentParser:
     subparsers = parser.add_subparsers(dest="mode")
 
     tukey_parser = subparsers.add_parser(
-        name="tukey", help="Perform a simple Tukey taper across delay-time data"
+        name="tukey",
+        help="Perform a simple Tukey taper across delay-time data",
+        formatter_class=ArgumentDefaultsHelpFormatter,
     )
     tukey_parser.add_argument(
         "ms_path",
@@ -912,10 +1020,11 @@ def get_parser() -> ArgumentParser:
         help="The number of rows to process in one chunk. Larger numbers require more memory but fewer interactions with I/O.",
     )
     tukey_parser.add_argument(
-        "--target-object",
+        "--target-objects",
         type=str,
-        default="Sun",
-        help="The target object to apply the delay towards. Defaults to 'Sun'.",
+        nargs="+",
+        default=["Sun"],
+        help="The target object(s) to apply the delay towards. Defaults to 'Sun'. Can supply multiple targets.",
     )
     tukey_parser.add_argument(
         "--ignore-nyquist-zone",
@@ -927,6 +1036,11 @@ def get_parser() -> ArgumentParser:
         "--reverse-baselines",
         action="store_true",
         help="Reverse baseline ordering",
+    )
+    tukey_parser.add_argument(
+        "--inpaint-noise",
+        action="store_true",
+        help="Inpaint random noise in the filter",
     )
 
     return parser
@@ -951,9 +1065,10 @@ def cli() -> None:
             make_plots=args.make_plots,
             overwrite=args.overwrite,
             chunk_size=args.chunk_size,
-            target_object=args.target_object,
+            target_objects=args.target_objects,
             ignore_nyquist_zone=args.ignore_nyquist_zone,
             reverse_baselines=args.reverse_baselines,
+            inpaint_noise=args.inpaint_noise,
         )
 
         tukey_tractor(tukey_tractor_options=tukey_tractor_options)
