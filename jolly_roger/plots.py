@@ -117,12 +117,13 @@ def plot_baseline_comparison_data(
         ax2.set_axis_off()
         if w_delays:
             ax2.set_axis_on()
-            for _w_delays in w_delays:
+            for _object_idx, _w_delays in enumerate(w_delays):
                 plot_elevation = _w_delays.elevation.to("deg")
                 ax2.plot(
                     before_baseline_data.time,
                     plot_elevation,
                     label=_w_delays.object_name,
+                    color=f"C{_object_idx}",
                 )
             ax2.axhline(0, lw=4, color="black", ls="-")
             ax2.legend()
@@ -187,6 +188,7 @@ def plot_baseline_comparison_data(
                     values=_w_delays.w_delays[b_idx].to("ns").value,
                     upper_limit=np.max(after_delays.delay.to("ns")).value,
                 )
+                color_str = f"C{_object_idx}"
                 for _zone_idx, object_slice in enumerate(
                     iterate_over_zones(zones=wrapped_data)
                 ):
@@ -195,7 +197,7 @@ def plot_baseline_comparison_data(
                     ax5.plot(
                         before_baseline_data.time[object_slice],
                         wrapped_data.values[object_slice],
-                        # color=f"C{_object_idx}",
+                        color=color_str,
                         label=f"Delay for {_w_delays.object_name}"
                         if _zone_idx == 0
                         else None,
@@ -223,7 +225,7 @@ def plot_baseline_comparison_data(
                                 before_baseline_data.time[object_slice],
                                 wrapped_outer_data.values[object_slice],
                                 ls=":",
-                                color="k",
+                                color=color_str,
                                 lw=1,
                                 label="outer_width"
                                 if _zone_idx == 0 and s == 0 and _object_idx == 0
