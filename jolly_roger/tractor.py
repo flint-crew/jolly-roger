@@ -577,11 +577,10 @@ def _tukey_tractor(
     to the dataset. Here the data corresponds to a (chan, time, pol)
     array. Data is not necessarily a single baseline.
 
-    If a `w_delays` is provided it represents the delay (in seconds)
-    between the phase direction of the measurement set and the Sun.
-    This quantity may be derived in a number of ways, but in `jolly_roger`
-    it is based on the difference of the w-coordinated towards these
-    two directions. It should have a shape of [baselines, time]
+    The provided ``w_delays`` describes the object that nulling will be
+    centred towards. This quantity may be derived in a number of ways, but
+    in ``jolly_roger`` it is based on the difference of the w-coordinated
+    towards these two directions. It should have a shape of [baselines, time]
 
     Args:
         data_chunk (DataChunk): The representation of the data with attached units
@@ -590,7 +589,7 @@ def _tukey_tractor(
         delay_time (DelayTime | None, optional): Optional pre-computed DelayTime object.
 
     Returns:
-        tuple[DataChunk,NDArray[np.bool]]: Scaled complex visibilities and corresponding flags. If flags do not need to be updated ``None`` is returned.
+        tuple[DataChunk,NDArray[np.bool],DelayTime]: Scaled complex visibilities, corresponding flags, and delays.
     """
     if delay_time is None:
         delay_time = data_to_delay_time(data=data_chunk)
