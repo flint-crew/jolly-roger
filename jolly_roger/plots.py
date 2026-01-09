@@ -61,9 +61,12 @@ def plot_baseline_comparison_data(
     before_delays: DelayTime,
     after_delays: DelayTime,
     output_path: Path,
-    w_delays: WDelays | None = None,
+    w_delays: WDelays | list[WDelays] | None = None,
     outer_width_ns: float | None = None,
 ) -> Path:
+    if w_delays is not None:
+        w_delays = [w_delays] if isinstance(w_delays, WDelays) else w_delays
+
     with quantity_support(), time_support():
         before_amp_stokesi = np.abs(
             (
@@ -113,11 +116,14 @@ def plot_baseline_comparison_data(
 
         ax2.set_axis_off()
         if w_delays:
-            plot_elevation = w_delays.elevation.to("deg")
             ax2.set_axis_on()
-            ax2.plot(
-                before_baseline_data.time, plot_elevation, label=w_delays.object_name
-            )
+            for _w_delays in w_delays:
+                plot_elevation = _w_delays.elevation.to("deg")
+                ax2.plot(
+                    before_baseline_data.time,
+                    plot_elevation,
+                    label=_w_delays.object_name,
+                )
             ax2.axhline(0, lw=4, color="black", ls="-")
             ax2.legend()
             ax2.grid()
@@ -174,61 +180,65 @@ def plot_baseline_comparison_data(
             fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
         if w_delays is not None:
-            ant_1, ant_2 = before_baseline_data.ant_1, before_baseline_data.ant_2
-            b_idx = w_delays.b_map[ant_1, ant_2]
-            wrapped_data = calculate_wrapped_data(
-                values=w_delays.w_delays[b_idx].to("ns").value,
-                upper_limit=np.max(after_delays.delay.to("ns")).value,
-            )
-            for _zone_idx, object_slice in enumerate(
-                iterate_over_zones(zones=wrapped_data)
-            ):
-                import matplotlib.patheffects as pe  # noqa: PLC0415
-
-                ax5.plot(
-                    before_baseline_data.time[object_slice],
-                    wrapped_data.values[object_slice],
-                    color="tab:red",
-                    label=f"Delay for {w_delays.object_name}"
-                    if _zone_idx == 0
-                    else None,
-                    lw=5,
-                    path_effects=[
-                        pe.Stroke(
-                            linewidth=6, foreground="k"
-                        ),  # Add some contrast to help read line stand out
-                        pe.Normal(),
-                    ],
-                    dashes=(2 * _zone_idx + 1, 2 * _zone_idx + 1),
+            for _object_idx, _w_delays in enumerate(w_delays):
+                ant_1, ant_2 = before_baseline_data.ant_1, before_baseline_data.ant_2
+                b_idx = _w_delays.b_map[ant_1, ant_2]
+                wrapped_data = calculate_wrapped_data(
+                    values=_w_delays.w_delays[b_idx].to("ns").value,
+                    upper_limit=np.max(after_delays.delay.to("ns")).value,
                 )
+                for _zone_idx, object_slice in enumerate(
+                    iterate_over_zones(zones=wrapped_data)
+                ):
+                    import matplotlib.patheffects as pe  # noqa: PLC0415
 
-            if outer_width_ns is not None:
-                for s, sign in enumerate((1, -1)):
-                    wrapped_outer_data = calculate_wrapped_data(
-                        values=wrapped_data.values + outer_width_ns * sign,
-                        upper_limit=np.max(after_delays.delay.to("ns")).value,
+                    ax5.plot(
+                        before_baseline_data.time[object_slice],
+                        wrapped_data.values[object_slice],
+                        # color=f"C{_object_idx}",
+                        label=f"Delay for {_w_delays.object_name}"
+                        if _zone_idx == 0
+                        else None,
+                        lw=3,
+                        path_effects=[
+                            pe.Stroke(
+                                linewidth=4, foreground="k"
+                            ),  # Add some contrast to help read line stand out
+                            pe.Normal(),
+                        ],
+                        dashes=(2 * _zone_idx + 1, 2 * _zone_idx + 1),
                     )
-                    # for _zone_idx, end_idx in enumerate(transitions):
-                    for _zone_idx, object_slice in enumerate(
-                        iterate_over_zones(zones=wrapped_outer_data)
-                    ):
-                        ax5.plot(
-                            before_baseline_data.time[object_slice],
-                            wrapped_outer_data.values[object_slice],
-                            ls="--",
-                            color="k",
-                            lw=1,
-                            label="outer_width" if _zone_idx == 0 and s == 0 else None,
-                        )
 
-                ax5.axhline(0, ls="-", c="black", label="Field", lw=4)
-                ax5.axhspan(
-                    -outer_width_ns,
-                    outer_width_ns,
-                    alpha=0.3,
-                    color="grey",
-                    label="Contamination",
-                )
+                if outer_width_ns is not None:
+                    for s, sign in enumerate((1, -1)):
+                        wrapped_outer_data = calculate_wrapped_data(
+                            values=wrapped_data.values + outer_width_ns * sign,
+                            upper_limit=np.max(after_delays.delay.to("ns")).value,
+                        )
+                        # for _zone_idx, end_idx in enumerate(transitions):
+                        for _zone_idx, object_slice in enumerate(
+                            iterate_over_zones(zones=wrapped_outer_data)
+                        ):
+                            ax5.plot(
+                                before_baseline_data.time[object_slice],
+                                wrapped_outer_data.values[object_slice],
+                                ls=":",
+                                color="k",
+                                lw=1,
+                                label="outer_width"
+                                if _zone_idx == 0 and s == 0 and _object_idx == 0
+                                else None,
+                            )
+
+        ax5.axhline(0, ls="-", c="black", label="Field", lw=4)
+        if outer_width_ns:
+            ax5.axhspan(
+                -outer_width_ns,
+                outer_width_ns,
+                alpha=0.3,
+                color="grey",
+                label="Contamination",
+            )
 
         ax5.legend(loc="upper right")
         ax5.grid()

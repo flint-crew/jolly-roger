@@ -476,8 +476,8 @@ def make_plot_results(
     open_ms_tables: OpenMSTables,
     data_column: str,
     output_column: str,
-    target: str,
-    w_delays: WDelays | None = None,
+    target: str | None = None,
+    w_delays: WDelays | list[WDelays] | None = None,
     reverse_baselines: bool = False,
     outer_width_ns: float | None = None,
 ) -> list[Path]:
@@ -530,10 +530,23 @@ def make_plot_results(
         after_delays = data_to_delay_time(data=after_baseline_data)
 
         ms_name = open_ms_tables.ms_path.name
-        output_path = (
-            output_dir
-            / f"{ms_name}_baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}_{target}_comparison.png"
-        )
+        name_components = [
+            ms_name,
+            "baseline_data",
+            f"{before_baseline_data.ant_1}",
+            f"{before_baseline_data.ant_2}",
+        ]
+        if target:
+            name_components.append(target)
+        elif target is None and w_delays is not None:
+            name_components.append(
+                w_delays.object_name if isinstance(w_delays, WDelays) else "multi"
+            )
+        else:
+            name_components.append("none")
+
+        name_components.append("comparison.png")
+        output_path = output_dir / f"{'_'.join(name_components)}"
 
         logger.info("Creating figure")
         # TODO: the baseline data and delay times could be put into a single
@@ -882,19 +895,14 @@ def tukey_tractor(
 
     plot_paths: list[Path] | None
     if tukey_tractor_options.make_plots:
-        plot_paths = []
-        for w_delays in w_delays_list:
-            plot_paths.extend(
-                make_plot_results(
-                    open_ms_tables=open_ms_tables,
-                    data_column=tukey_tractor_options.data_column,
-                    output_column=tukey_tractor_options.output_column,
-                    target=w_delays.object_name,
-                    w_delays=w_delays,
-                    reverse_baselines=tukey_tractor_options.reverse_baselines,
-                    outer_width_ns=tukey_tractor_options.outer_width_ns,
-                )
-            )
+        plot_paths = make_plot_results(
+            open_ms_tables=open_ms_tables,
+            data_column=tukey_tractor_options.data_column,
+            output_column=tukey_tractor_options.output_column,
+            w_delays=w_delays_list,
+            reverse_baselines=tukey_tractor_options.reverse_baselines,
+            outer_width_ns=tukey_tractor_options.outer_width_ns,
+        )
 
         logger.info(f"Made {len(plot_paths)} output plots")
     else:
