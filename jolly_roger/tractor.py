@@ -481,6 +481,20 @@ def make_plot_results(
     reverse_baselines: bool = False,
     outer_width_ns: float | None = None,
 ) -> list[Path]:
+    """Create plots useful for diagnostics
+
+    Args:
+        open_ms_tables (OpenMSTables): Collection of open MS tables describing data to be modified
+        data_column (str): The 'before' data
+        output_column (str): The output 'after' data
+        target (str): Object nulling was directed towards
+        w_delays (WDelays | None, optional): Description of a track through delay space. If ``None`` some plotting will be skipped. Defaults to None.
+        reverse_baselines (bool, optional): Needed in some circumstances should antenna ordering in MS be different. Defaults to False.
+        outer_width_ns (float | None, optional): Size, in nanoseconds, of the tukey taper. Defaults to None.
+
+    Returns:
+        list[Path]: Collection of paths to use
+    """
     output_paths = []
     output_dir = open_ms_tables.ms_path.parent / "plots"
     output_dir.mkdir(exist_ok=True, parents=True)
@@ -711,13 +725,13 @@ def _apply_taper(
 def _tukey_multi_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
-    w_delays_dict: dict[str, WDelays],
+    w_delays_list: list[WDelays],
 ) -> tuple[DataChunk, NDArray[np.bool]]:
     # Initialise to None, then reuse to save on computation
     delay_time: DelayTime | None = None
     taper_list: list[NDArray[np.float64]] = []
     flag_list: list[NDArray[np.bool]] = []
-    for w_delays in w_delays_dict.values():
+    for w_delays in w_delays_list:
         taper, flags_to_return, delay_time = _tukey_tractor(
             data_chunk=data_chunk,
             tukey_tractor_options=tukey_tractor_options,
@@ -821,15 +835,14 @@ def tukey_tractor(
         )
 
     # Generate the delay for all baselines and time steps
-    w_delays_dict = dict[str, WDelays]()
-    for target_object in tukey_tractor_options.target_objects:
-        logger.info(f"Pre-calculating delays towards the target: {target_object}")
-        w_delays_dict[target_object] = get_object_delay_for_ms(
-            ms_path=tukey_tractor_options.ms_path,
-            object_name=target_object,
-            reverse_baselines=tukey_tractor_options.reverse_baselines,
-        )
-        assert len(w_delays_dict[target_object].w_delays.shape) == 2
+    w_delays_list = get_object_delay_for_ms(
+        ms_path=tukey_tractor_options.ms_path,
+        object_name=tukey_tractor_options.target_objects,
+        reverse_baselines=tukey_tractor_options.reverse_baselines,
+    )
+    assert all(len(w_delays.w_delays.shape) == 2 for w_delays in w_delays_list), (
+        "Sanity check failed, incorrect dimensionality returned"
+    )
 
     if not tukey_tractor_options.dry_run:
         start = time()
@@ -842,7 +855,7 @@ def tukey_tractor(
                 taper_data_chunk, flags_to_apply = _tukey_multi_tractor(
                     data_chunk=data_chunk,
                     tukey_tractor_options=tukey_tractor_options,
-                    w_delays_dict=w_delays_dict,
+                    w_delays_list=w_delays_list,
                 )
 
                 pbar.update(len(taper_data_chunk.masked_data))
@@ -870,13 +883,13 @@ def tukey_tractor(
     plot_paths: list[Path] | None
     if tukey_tractor_options.make_plots:
         plot_paths = []
-        for target_object, w_delays in w_delays_dict.items():
+        for w_delays in w_delays_list:
             plot_paths.extend(
                 make_plot_results(
                     open_ms_tables=open_ms_tables,
                     data_column=tukey_tractor_options.data_column,
                     output_column=tukey_tractor_options.output_column,
-                    target=target_object,
+                    target=w_delays.object_name,
                     w_delays=w_delays,
                     reverse_baselines=tukey_tractor_options.reverse_baselines,
                     outer_width_ns=tukey_tractor_options.outer_width_ns,
