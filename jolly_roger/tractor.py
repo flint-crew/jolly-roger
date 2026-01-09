@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from argparse import ArgumentParser
+from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from collections.abc import Generator
 from dataclasses import dataclass
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -67,11 +68,11 @@ def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
 
 def tukey_taper(
     x: np.typing.NDArray[np.floating],
-    outer_width: float = np.pi / 4,
-    tukey_width: float = np.pi / 8,
+    outer_width: float,
+    tukey_width: float,
     tukey_x_offset: NDArray[np.floating] | None = None,
 ) -> np.ndarray:
-    """Describes a tukey window function spanning a -pi to pi range. IN the base case
+    """Describes a tukey window function spanning a -x.min() to x.max() range. In the base case
     the tukey window is centred on 0.0. The ``outer_width`` defines where the window is
     0.0. They `tukey_width` defines the width of the region where the function transitions
     from 1.0 to 0.0.
@@ -86,14 +87,16 @@ def tukey_taper(
 
     Args:
         x (np.typing.NDArray[np.floating]): The intervals to evaluate over. Internally these are concerted to the +/- pi domain
-        outer_width (float, optional): The +/- boundary beyond which is 0.0. Defaults to np.pi/4.
-        tukey_width (float, optional): Describes the width that the transition from 1.0 to 0.0 occurs. Defaults to np.pi/8.
+        outer_width (float, optional): The +/- boundary beyond which is 0.0.
+        tukey_width (float, optional): Describes the width that the transition from 1.0 to 0.0 occurs.
         tukey_x_offset (NDArray[np.floating] | None, optional): Sets a new zero point (center of window). Defaults to None.
+        notch (bool, optional): Will the taper be used for a notch filter? Defaults to True.
 
     Returns:
         np.ndarray: The tukey window function
     """
-    x_freq = np.linspace(-np.pi, np.pi, len(x))
+    # Copy to avoid side-effects
+    x_local = x.copy()
 
     if (outer_width - tukey_width) < 0.0:
         # If this is true than the two 'transition' regions between 1 and 0 overlap.
@@ -105,25 +108,29 @@ def tukey_taper(
         tukey_width = outer_width
 
     if tukey_x_offset is not None:
-        x_freq = x_freq[:, None] - tukey_x_offset[None, :]
+        # Save the original maximum of the input domain before any shifting ...
+        original_x_local_maximum = np.max(x_local)
+        x_local = x_local[:, None] - tukey_x_offset[None, :]
 
-        x_freq = symmetric_domain_wrap(values=x_freq, upper_limit=np.pi)
+        # ... so that the original maximum is used in the unwrapping
+        x_local = symmetric_domain_wrap(
+            values=x_local, upper_limit=original_x_local_maximum
+        )
 
-    taper = np.ones_like(x_freq)
-    # logger.debug(f"{x_freq.shape=} {type(x_freq)=}")
+    taper = np.ones_like(x_local)
     # Fully zero region
-    taper[np.abs(x_freq) > outer_width] = 0
+    taper[np.abs(x_local) > outer_width] = 0
 
     # Transition regions
-    left_idx = (-outer_width <= x_freq) & (x_freq <= -outer_width + tukey_width)
-    right_idx = (outer_width - tukey_width <= x_freq) & (x_freq <= outer_width)
+    left_idx = (-outer_width <= x_local) & (x_local <= -outer_width + tukey_width)
+    right_idx = (outer_width - tukey_width <= x_local) & (x_local <= outer_width)
 
     taper[left_idx] = (
-        1 - np.cos(np.pi * (x_freq[left_idx] + outer_width) / tukey_width)
+        1 - np.cos(np.pi * (x_local[left_idx] + outer_width) / tukey_width)
     ) / 2
 
     taper[right_idx] = (
-        1 - np.cos(np.pi * (outer_width - x_freq[right_idx]) / tukey_width)
+        1 - np.cos(np.pi * (outer_width - x_local[right_idx]) / tukey_width)
     ) / 2
 
     return taper
@@ -468,23 +475,40 @@ def make_plot_results(
     open_ms_tables: OpenMSTables,
     data_column: str,
     output_column: str,
+    target: str,
     w_delays: WDelays | None = None,
+    reverse_baselines: bool = False,
+    outer_width_ns: float | None = None,
 ) -> list[Path]:
     output_paths = []
     output_dir = open_ms_tables.ms_path.parent / "plots"
     output_dir.mkdir(exist_ok=True, parents=True)
-    for i in range(10):
-        logger.info(f"Plotting baseline={i + 1}")
+
+    n_ant = len(np.unique(open_ms_tables.main_table.getcol("ANTENNA1")))
+    b_idx = np.array(list(combinations(range(n_ant), 2)))
+
+    logger.info(f"MS contains {n_ant} antennas ({len(b_idx)} baselines)")
+
+    max_baselines = 10
+    b_idx = b_idx[:max_baselines]
+    logger.info(f"Plotting {len(b_idx)} baselines")
+
+    if reverse_baselines:
+        b_idx = b_idx[:, ::-1]
+
+    for baseline, (ant_1, ant_2) in enumerate(b_idx):
+        logger.info(f"Plotting baseline={baseline + 1}")
+
         before_baseline_data = get_baseline_data(
             open_ms_tables=open_ms_tables,
-            ant_1=0,
-            ant_2=i + 1,
+            ant_1=ant_1,
+            ant_2=ant_2,
             data_column=data_column,
         )
         after_baseline_data = get_baseline_data(
             open_ms_tables=open_ms_tables,
-            ant_1=0,
-            ant_2=i + 1,
+            ant_1=ant_1,
+            ant_2=ant_2,
             data_column=output_column,
         )
         before_delays = data_to_delay_time(data=before_baseline_data)
@@ -493,7 +517,7 @@ def make_plot_results(
         ms_name = open_ms_tables.ms_path.name
         output_path = (
             output_dir
-            / f"{ms_name}_baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}_comparison.png"
+            / f"{ms_name}_baseline_data_{before_baseline_data.ant_1}_{before_baseline_data.ant_2}_{target}_comparison.png"
         )
 
         logger.info("Creating figure")
@@ -506,6 +530,7 @@ def make_plot_results(
             after_delays=after_delays,
             output_path=output_path,
             w_delays=w_delays,
+            outer_width_ns=outer_width_ns,
         )
         logger.info(f"Have written {output_path=}")
         output_paths.append(plot_path)
@@ -543,25 +568,24 @@ def _get_baseline_time_indicies(
 def _tukey_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
-    w_delays: WDelays | None = None,
-) -> NDArray[np.complex128]:
+    w_delays: WDelays,
+) -> tuple[DataChunk, NDArray[np.bool] | None]:
     """Compute a tukey taper for a dataset and then apply it
     to the dataset. Here the data corresponds to a (chan, time, pol)
     array. Data is not necessarily a single baseline.
 
-    If a `w_delays` is provided it represents the delay (in seconds)
-    between the phase direction of the measurement set and the Sun.
-    This quantity may be derived in a number of ways, but in `jolly_roger`
-    it is based on the difference of the w-coordinated towards these
-    two directions. It should have a shape of [baselines, time]
+    The provided ``w_delays`` describes the object that nulling will be
+    centred towards. This quantity may be derived in a number of ways, but
+    in ``jolly_roger`` it is based on the difference of the w-coordinated
+    towards these two directions. It should have a shape of [baselines, time]
 
     Args:
         data_chunk (DataChunk): The representation of the data with attached units
         tukey_tractor_options (TukeyTractorOptions): Options for the tukey taper
-        w_delays (WDelays | None, optional): The w-derived delays to apply. If None taper is applied to large delays. Defaults to None.
+        w_delays (WDelays): The w-derived delays to apply.
 
     Returns:
-        NDArray[np.complex128]: Scaled complex visibilities
+        tuple[DataChunk,NDArray[np.bool] | None]: Scaled complex visibilities and corresponding flags. If flags do not need to be updated ``None`` is returned.
     """
 
     delay_time = data_to_delay_time(data=data_chunk)
@@ -572,96 +596,88 @@ def _tukey_tractor(
     # towards the nominated object in the if below
     tukey_x_offset: u.Quantity = np.zeros_like(delay_time.delay)
 
-    if w_delays is not None:
-        baseline_idx, time_idx = _get_baseline_time_indicies(
-            w_delays=w_delays, data_chunk=data_chunk
-        )
-        original_tukey_x_offset = w_delays.w_delays[baseline_idx, time_idx]
+    baseline_idx, time_idx = _get_baseline_time_indicies(
+        w_delays=w_delays, data_chunk=data_chunk
+    )
+    original_tukey_x_offset = w_delays.w_delays[baseline_idx, time_idx]
 
-        # Make a copy for later use post wrapping
-        tukey_x_offset = original_tukey_x_offset.copy()
+    # Make a copy for later use post wrapping
+    tukey_x_offset = original_tukey_x_offset.copy()
 
-        tukey_x_offset = symmetric_domain_wrap(
-            values=tukey_x_offset.value, upper_limit=np.max(delay_time.delay).value
-        )
-
-        # need to scale the x offsert to the -pi to pi
-        # The delay should be symmetric
-        tukey_x_offset = (
-            tukey_x_offset / (np.max(delay_time.delay) / np.pi).decompose()
-        ).value
-        # # logger.info(f"{tukey_x_offset=}")
-
-    taper = tukey_taper(
-        x=delay_time.delay,
-        outer_width=tukey_tractor_options.outer_width,
-        tukey_width=tukey_tractor_options.tukey_width,
-        tukey_x_offset=tukey_x_offset,
+    # need to scale the x offset to the -pi to pi (radians) wrap
+    # keeping units in seconds though
+    # The delay should be symmetric
+    tukey_x_offset_sec = symmetric_domain_wrap(
+        values=tukey_x_offset.to("s").value,
+        upper_limit=np.max(delay_time.delay).to("s").value,
     )
 
-    if w_delays is None:
-        # This is the easy case
-        taper = taper[None, :, None]
+    # Make taper with all units in seconds
+    taper = tukey_taper(
+        x=delay_time.delay.to("s").value,
+        outer_width=tukey_tractor_options.outer_width_ns * 1e-9,
+        tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9,
+        tukey_x_offset=tukey_x_offset_sec,
+    )
 
-    else:
-        # TODO: This pirate reckons that merging the masks together
-        # into a single mask throughout may make things easier to
-        # manage and visualise.
+    # TODO: This pirate reckons that merging the masks together
+    # into a single mask throughout may make things easier to
+    # manage and visualise.
 
-        # The use of the `tukey_x_offset` changes the
-        # shape of the output array. The internals of that
-        # function returns a different shape via the broadcasting
-        taper = np.swapaxes(taper[:, :, None], 0, 1)
+    # The use of the `tukey_x_offset` changes the
+    # shape of the output array. The internals of that
+    # function returns a different shape via the broadcasting
+    taper = np.swapaxes(taper[:, :, None], 0, 1)
 
-        # Since we want to dampen the target object we invert the taper.
-        # By default the taper dampers outside the inner region.
-        taper = 1.0 - taper
+    # Since we want to dampen the target object we invert the taper.
+    # By default the taper dampers outside the inner region.
+    taper = 1.0 - taper
 
-        # apply the flags to ignore the tapering if the object is larger
-        # than one wrap away
-        # Calculate the offset account of nyquist sampling
-        no_wraps_for_offset = calculate_nyquist_zone(
-            values=original_tukey_x_offset.value,
-            upper_limit=np.max(delay_time.delay).value,
-        )
-        ignore_wrapping_for = (
-            no_wraps_for_offset > tukey_tractor_options.ignore_nyquist_zone
-        )
-        taper[ignore_wrapping_for, :, :] = 1.0
+    # apply the flags to ignore the tapering if the object is larger
+    # than one wrap away
+    # Calculate the offset account of nyquist sampling
+    no_wraps_for_offset = calculate_nyquist_zone(
+        values=original_tukey_x_offset.value,
+        upper_limit=np.max(delay_time.delay).value,
+    )
+    ignore_wrapping_for = (
+        no_wraps_for_offset > tukey_tractor_options.ignore_nyquist_zone
+    )
+    taper[ignore_wrapping_for, :, :] = 1.0
 
-        # Delay with the elevation of the target object
-        elevation_mask = w_delays.elevation < tukey_tractor_options.elevation_cut
-        taper[elevation_mask[time_idx], :, :] = 1.0
+    # Delay with the elevation of the target object
+    elevation_mask = w_delays.elevation < tukey_tractor_options.elevation_cut
+    taper[elevation_mask[time_idx], :, :] = 1.0
 
-        # Compute flags to ignore the objects delay crossing 0, Do
-        # This by computing the taper towards the field and
-        # see if there are any components of the two sets of tapers
-        # that are not 1 (where 1 is 'no change').
-        field_taper = tukey_taper(
-            x=delay_time.delay,
-            outer_width=tukey_tractor_options.outer_width / 4,
-            tukey_width=tukey_tractor_options.tukey_width,
-            tukey_x_offset=None,
-        )
-        # We need to account for no broadcasting when offset is None
-        # as the returned shape is different
-        field_taper = field_taper[None, :, None]
-        field_taper = 1.0 - field_taper
-        intersecting_taper = np.any(
-            np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
-        )
-        # # Should the data need to be modified in conjunction with the flags
-        # taper[
-        #     intersecting_taper &
-        #     ~elevation_mask[time_idx] &
-        #     ~ignore_wrapping_for
-        # ] = 0.0
-        # Update flags
-        flags_to_return = np.zeros_like(data_chunk.masked_data.mask)
-        flags_to_return[intersecting_taper] = True
-        flags_to_return = (
-            ~np.isfinite(data_chunk.masked_data.filled(np.nan)) | flags_to_return
-        )
+    # Compute flags to ignore the objects delay crossing 0, Do
+    # This by computing the taper towards the field and
+    # see if there are any components of the two sets of tapers
+    # that are not 1 (where 1 is 'no change').
+    field_taper = tukey_taper(
+        x=delay_time.delay.to("s").value,
+        outer_width=tukey_tractor_options.outer_width_ns * 1e-9 / 4,
+        tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9 / 4,
+        tukey_x_offset=None,
+    )
+    # We need to account for no broadcasting when offset is None
+    # as the returned shape is different
+    field_taper = field_taper[None, :, None]
+    field_taper = 1.0 - field_taper
+    intersecting_taper = np.any(
+        np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
+    )
+    # # Should the data need to be modified in conjunction with the flags
+    # taper[
+    #     intersecting_taper &
+    #     ~elevation_mask[time_idx] &
+    #     ~ignore_wrapping_for
+    # ] = 0.0
+    # Update flags
+    flags_to_return = np.zeros_like(data_chunk.masked_data.mask)
+    flags_to_return[intersecting_taper] = True
+    flags_to_return = (
+        ~np.isfinite(data_chunk.masked_data.filled(np.nan)) | flags_to_return
+    )
 
     # Delay-time is a 3D array: (time, delay, pol)
     # Taper is 1D: (delay,)
@@ -688,10 +704,10 @@ class TukeyTractorOptions:
 
     ms_path: Path
     """Measurement set to be modified"""
-    outer_width: float = np.pi / 4
-    """The start of the tapering in frequency space"""
-    tukey_width: float = np.pi / 8
-    """The width of the tapered region in frequency space"""
+    outer_width_ns: float = 10
+    """The start of the tapering in nanoseconds"""
+    tukey_width_ns: float = 10
+    """The width of the tapered region in nanoseconds"""
     data_column: str = "DATA"
     """The visibility column to modify"""
     output_column: str = "CORRECTED_DATA"
@@ -706,14 +722,14 @@ class TukeyTractorOptions:
     """If the output column exists it will be overwritten"""
     chunk_size: int = 1000
     """Size of the row-wise chunking iterator"""
-    apply_towards_object: bool = False
-    """apply the taper using the delay towards the target object."""
     target_object: str = "Sun"
     """The target object to apply the delay towards."""
     elevation_cut: u.Quantity = -1 * u.deg
     """The elevation cut-off for the target object. Defaults to 0 degrees."""
     ignore_nyquist_zone: int = 2
     """Do not apply the tukey taper if object is beyond this Nyquist zone"""
+    reverse_baselines: bool = False
+    """Reverse baseline ordering"""
 
 
 @dataclass(frozen=True)
@@ -764,16 +780,15 @@ def tukey_tractor(
         )
 
     # Generate the delay for all baselines and time steps
-    w_delays: WDelays | None = None
-    if tukey_tractor_options.apply_towards_object:
-        logger.info(
-            f"Pre-calculating delays towards the target: {tukey_tractor_options.target_object}"
-        )
-        w_delays = get_object_delay_for_ms(
-            ms_path=tukey_tractor_options.ms_path,
-            object_name=tukey_tractor_options.target_object,
-        )
-        assert len(w_delays.w_delays.shape) == 2
+    logger.info(
+        f"Pre-calculating delays towards the target: {tukey_tractor_options.target_object}"
+    )
+    w_delays = get_object_delay_for_ms(
+        ms_path=tukey_tractor_options.ms_path,
+        object_name=tukey_tractor_options.target_object,
+        reverse_baselines=tukey_tractor_options.reverse_baselines,
+    )
+    assert len(w_delays.w_delays.shape) == 2
 
     if not tukey_tractor_options.dry_run:
         with tqdm(total=len(open_ms_tables.main_table)) as pbar:
@@ -790,7 +805,7 @@ def tukey_tractor(
 
                 pbar.update(len(taper_data_chunk.masked_data))
 
-                # only put if not a dry run
+                # Only update here is we pass the dry run check above
                 open_ms_tables.main_table.putcol(
                     columnname=tukey_tractor_options.output_column,
                     value=taper_data_chunk.masked_data,
@@ -811,7 +826,10 @@ def tukey_tractor(
             open_ms_tables=open_ms_tables,
             data_column=tukey_tractor_options.data_column,
             output_column=tukey_tractor_options.output_column,
+            target=tukey_tractor_options.target_object,
             w_delays=w_delays,
+            reverse_baselines=tukey_tractor_options.reverse_baselines,
+            outer_width_ns=tukey_tractor_options.outer_width_ns,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
@@ -829,7 +847,10 @@ def get_parser() -> ArgumentParser:
     Returns:
         ArgumentParser: Constructed argument parser
     """
-    parser = ArgumentParser(description="Run the Jolly Roger Tractor")
+    parser = ArgumentParser(
+        description="Run the Jolly Roger Tractor",
+        formatter_class=ArgumentDefaultsHelpFormatter,
+    )
     subparsers = parser.add_subparsers(dest="mode")
 
     tukey_parser = subparsers.add_parser(
@@ -843,14 +864,14 @@ def get_parser() -> ArgumentParser:
     tukey_parser.add_argument(
         "--outer-width",
         type=float,
-        default=np.pi / 4,
-        help="The outer width of the Tukey taper in radians",
+        default=10,
+        help="The outer width of the Tukey taper in nanoseconds. If unset defaults to --tukey-width",
     )
     tukey_parser.add_argument(
         "--tukey-width",
         type=float,
-        default=np.pi / 8,
-        help="The Tukey width of the Tukey taper in radians",
+        default=None,
+        help="The Tukey width of the Tukey taper in nanoseconds",
     )
     tukey_parser.add_argument(
         "--data-column",
@@ -897,15 +918,15 @@ def get_parser() -> ArgumentParser:
         help="The target object to apply the delay towards. Defaults to 'Sun'.",
     )
     tukey_parser.add_argument(
-        "--apply-towards-object",
-        action="store_true",
-        help="Whether the tukey taper is applied towards the target object (e.g. the Sun). If not set, the taper is applied towards large delays.",
-    )
-    tukey_parser.add_argument(
         "--ignore-nyquist-zone",
         type=int,
         default=2,
         help="Do not apply the taper if the objects delays beyond this Nyquist zone",
+    )
+    tukey_parser.add_argument(
+        "--reverse-baselines",
+        action="store_true",
+        help="Reverse baseline ordering",
     )
 
     return parser
@@ -919,8 +940,10 @@ def cli() -> None:
     if args.mode == "tukey":
         tukey_tractor_options = TukeyTractorOptions(
             ms_path=args.ms_path,
-            outer_width=args.outer_width,
-            tukey_width=args.tukey_width,
+            outer_width_ns=args.outer_width,
+            tukey_width_ns=args.tukey_width
+            if args.tukey_width is not None
+            else args.outer_width,
             data_column=args.data_column,
             output_column=args.output_column,
             copy_column_data=args.copy_column_data,
@@ -929,8 +952,8 @@ def cli() -> None:
             overwrite=args.overwrite,
             chunk_size=args.chunk_size,
             target_object=args.target_object,
-            apply_towards_object=args.apply_towards_object,
             ignore_nyquist_zone=args.ignore_nyquist_zone,
+            reverse_baselines=args.reverse_baselines,
         )
 
         tukey_tractor(tukey_tractor_options=tukey_tractor_options)
