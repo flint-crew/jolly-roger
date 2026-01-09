@@ -34,9 +34,14 @@ class WDelays:
 
 def get_object_delay_for_ms(
     ms_path: Path,
-    object_name: str = "sun",
+    object_name: str | list[str] = "sun",
     reverse_baselines: bool = False,
-) -> WDelays:
+) -> list[WDelays]:
+    object_name = [object_name] if isinstance(object_name, str) else object_name
+    assert isinstance(object_name, list), (
+        f"Expected type list, got {type(object_name)=}"
+    )
+
     # Generate the two sets of uvw coordinate objects
     baselines: Baselines = get_baselines_from_ms(
         ms_path=ms_path,
@@ -48,26 +53,35 @@ def get_object_delay_for_ms(
     )
     uvws_phase: UVWs = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_phase)
 
-    hour_angles_object = make_hour_angles_for_ms(
-        ms_path=ms_path,
-        position=object_name,  # gets the position from phase direction
-    )
-    uvws_object: UVWs = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_object)
+    object_w_delays = []
 
-    # Subtract the w-coordinates out. Since these uvws have
-    # been computed towards different directions the difference
-    # in w-coordinate is the delay distance
-    w_diffs = uvws_object.uvws[2] - uvws_phase.uvws[2]
+    for _object_name in object_name:
+        hour_angles_object = make_hour_angles_for_ms(
+            ms_path=ms_path,
+            position=_object_name,  # gets the position from phase direction
+        )
+        uvws_object: UVWs = xyz_to_uvw(
+            baselines=baselines, hour_angles=hour_angles_object
+        )
 
-    delay_object = (w_diffs / speed_of_light).decompose()
+        # Subtract the w-coordinates out. Since these uvws have
+        # been computed towards different directions the difference
+        # in w-coordinate is the delay distance
+        w_diffs = uvws_object.uvws[2] - uvws_phase.uvws[2]
 
-    return WDelays(
-        object_name=object_name,
-        w_delays=delay_object,
-        b_map=baselines.b_map,
-        time_map=hour_angles_phase.time_map,
-        elevation=hour_angles_object.elevation,
-    )
+        delay_object = (w_diffs / speed_of_light).decompose()
+
+        w_delay = WDelays(
+            object_name=_object_name,
+            w_delays=delay_object,
+            b_map=baselines.b_map,
+            time_map=hour_angles_phase.time_map,
+            elevation=hour_angles_object.elevation,
+        )
+        logger.info(f"Have created for {w_delay.object_name}")
+        object_w_delays.append(w_delay)
+
+    return object_w_delays
 
 
 @dataclass
