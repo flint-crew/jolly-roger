@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from jolly_roger.baselines import Baselines, get_baselines_from_ms
 from jolly_roger.hour_angles import PositionHourAngles, make_hour_angles_for_ms
-from jolly_roger.log_utils import logger
+from jolly_roger.logging import logger
 
 
 @dataclass(frozen=True)

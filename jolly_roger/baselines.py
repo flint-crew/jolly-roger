@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from casacore.tables import table
 
-from jolly_roger.log_utils import logger
+from jolly_roger.logging import logger
 
 
 @dataclass

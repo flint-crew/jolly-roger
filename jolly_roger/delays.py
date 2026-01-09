@@ -9,7 +9,7 @@ import astropy.units as u
 import numpy as np
 from numpy.typing import NDArray
 
-from jolly_roger.log_utils import logger
+from jolly_roger.logging import logger
 
 if TYPE_CHECKING:
     # avoid circular imports
