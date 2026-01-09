@@ -3,6 +3,7 @@ on data"""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -81,3 +82,22 @@ def calculate_wrapped_data(
         zones=calculate_nyquist_zone(values=values, upper_limit=upper_limit),
         upper_limit=upper_limit,
     )
+
+
+def iterate_over_zones(zones: NDArray[np.int_] | SymmetricWrap) -> Iterator[slice]:
+    """Generate a series of ``slice`` objects that denote changes in the nyquist zone
+
+    Args:
+        zones (NDArray[np.int_] | SymmetricWrap): The zones to iterate over.
+
+    Yields:
+        Iterator[slice]: slice objects that indicate consequctive nyquist zones
+    """
+    target = zones.zones if isinstance(zones, SymmetricWrap) else zones
+
+    transitions = [*np.argwhere(np.diff(target) != 0)[:, 0], len(target)]
+
+    start_idx = 0
+    for end_idx in transitions:
+        yield slice(start_idx, end_idx + 1)
+        start_idx = end_idx + 1

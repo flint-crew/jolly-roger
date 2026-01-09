@@ -18,9 +18,7 @@ from astropy.visualization import (
 )
 
 from jolly_roger.uvws import WDelays
-from jolly_roger.wrap import (
-    calculate_wrapped_data,
-)
+from jolly_roger.wrap import calculate_wrapped_data, iterate_over_zones
 
 if TYPE_CHECKING:
     from jolly_roger.delays import DelayTime
@@ -182,19 +180,9 @@ def plot_baseline_comparison_data(
                 values=w_delays.w_delays[b_idx].to("ns").value,
                 upper_limit=np.max(after_delays.delay.to("ns")).value,
             )
-            # Final append is to capture the last zone in the
-            # time range
-            transitions = [
-                *np.argwhere(np.diff(wrapped_data.zones) != 0)[:, 0],
-                len(wrapped_data.zones),
-            ]
-            start_idx = 0
-            for _zone_idx, end_idx in enumerate(transitions):
-                # The np.diff results in offset indices, so shift
-                # back the transition by 1
-                object_slice = slice(start_idx, end_idx + 1)
-                # and ensure non-overlapping line segments
-                start_idx = end_idx + 1
+            for _zone_idx, object_slice in enumerate(
+                iterate_over_zones(zones=wrapped_data)
+            ):
                 import matplotlib.patheffects as pe  # noqa: PLC0415
 
                 ax5.plot(
@@ -220,14 +208,10 @@ def plot_baseline_comparison_data(
                         values=wrapped_data.values + outer_width_ns * sign,
                         upper_limit=np.max(after_delays.delay.to("ns")).value,
                     )
-                    transitions = [
-                        *np.argwhere(np.diff(wrapped_outer_data.zones) != 0)[:, 0],
-                        len(wrapped_outer_data.zones),
-                    ]
-                    start_idx = 0
-                    for _zone_idx, end_idx in enumerate(transitions):
-                        object_slice = slice(start_idx, end_idx + 1)
-                        start_idx = end_idx + 1
+                    # for _zone_idx, end_idx in enumerate(transitions):
+                    for _zone_idx, object_slice in enumerate(
+                        iterate_over_zones(zones=wrapped_outer_data)
+                    ):
                         ax5.plot(
                             before_baseline_data.time[object_slice],
                             wrapped_outer_data.values[object_slice],
