@@ -396,7 +396,7 @@ def get_baseline_data(
         masked_data=masked_data,
         freq_chan=freq_chan,
         phase_center=target,
-        uvws_phase_center=uvws_phase_center,
+        uvws_phase_center=cast(u.Quantity, uvws_phase_center),
         time=time,
         ant_1=ant_1,
         ant_2=ant_2,
