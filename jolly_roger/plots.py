@@ -226,7 +226,7 @@ def plot_baseline_comparison_data(
                                 wrapped_outer_data.values[object_slice],
                                 ls=":",
                                 color=color_str,
-                                lw=1,
+                                lw=2,
                                 label="outer_width"
                                 if _zone_idx == 0 and s == 0 and _object_idx == 0
                                 else None,
