@@ -94,8 +94,10 @@ def plot_baseline_comparison_data(
 
         cmap = plt.cm.viridis
 
+        # The elevation curve (ax2) has different units to ax1/3
+        # so we can't share the y-axis
         fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(
-            2, 3, figsize=(18, 10), sharex=True, sharey="row"
+            2, 3, figsize=(18, 10), sharex=True, sharey=False
         )
         im = ax1.pcolormesh(
             before_baseline_data.time,
@@ -104,11 +106,26 @@ def plot_baseline_comparison_data(
             norm=norm,
             cmap=cmap,
         )
-        ax2.set_axis_off()
         ax1.set(
             ylabel=f"Frequency / {before_baseline_data.freq_chan.unit:latex_inline}",
             title="Before",
         )
+
+        ax2.set_axis_off()
+        if w_delays:
+            plot_elevation = w_delays.elevation.to("deg")
+            ax2.set_axis_on()
+            ax2.plot(
+                before_baseline_data.time, plot_elevation, label=w_delays.object_name
+            )
+            ax2.axhline(0, lw=4, color="black", ls="-")
+            ax2.legend()
+            ax2.grid()
+            ax2.set(
+                ylabel=f"Elevation / {plot_elevation.unit:latex_inline}",
+                ylim=[-90.0, 90.0],
+            )
+
         ax3.pcolormesh(
             after_baseline_data.time,
             after_baseline_data.freq_chan,
@@ -234,6 +251,13 @@ def plot_baseline_comparison_data(
 
         ax5.legend(loc="upper right")
         ax5.grid()
+        ax5.set(
+            ylim=[
+                np.min(after_delays.delay.to("ns")),
+                np.max(after_delays.delay.to("ns")),
+            ],
+            ylabel="Delay / ns",
+        )
 
         fig.suptitle(
             f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}"
