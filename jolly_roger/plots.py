@@ -153,7 +153,7 @@ def plot_baseline_comparison_data(
             cmap=cmap,
         )
         ax6.set(ylabel="Delay / ns", title="After")
-        for ax in (ax4, ax5, ax6):
+        for ax in (ax4, ax6):
             fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
         if w_delays is not None:
@@ -222,6 +222,15 @@ def plot_baseline_comparison_data(
                             lw=1,
                             label="outer_width" if _zone_idx == 0 and s == 0 else None,
                         )
+
+                ax5.axhline(0, ls="-", c="black", label="Field", lw=4)
+                ax5.axhspan(
+                    -outer_width_ns,
+                    outer_width_ns,
+                    alpha=0.3,
+                    color="grey",
+                    label="Contamination",
+                )
 
         ax5.legend(loc="upper right")
         ax5.grid()
