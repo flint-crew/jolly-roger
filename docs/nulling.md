@@ -13,11 +13,11 @@ The red dashed lines in the lower panel represents the delay of the Sun as deriv
 
 Should the source cross over a delay of 0 then that timestep will be flagged, as the intermixed components can not be separated, and nulling would have an adverse effect of the direction being observed.
 
-### Baseline ak00 to ak02
-![Example 1](images/baseline_data_0_2_comparison.png)
+### Baseline ak01 to ak06
+![Example 1](images/baseline_data_0_5_multi_comparison.png)
 
-### Baseline ak00 to ak06
-![Example 1](images/baseline_data_0_6_comparison.png)
+### Baseline ak01 to ak07
+![Example 1](images/baseline_data_0_6_multi_comparison.png)
 
 ### Tukey Parameterisation
 ![Tukey Parameterisation](images/example_tukey.png)
