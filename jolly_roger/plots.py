@@ -17,12 +17,12 @@ from astropy.visualization import (
     time_support,
 )
 
+from jolly_roger.baselines import BaselineData
 from jolly_roger.uvws import WDelays
 from jolly_roger.wrap import calculate_wrapped_data, iterate_over_zones
 
 if TYPE_CHECKING:
     from jolly_roger.delays import DelayTime
-    from jolly_roger.tractor import BaselineData
 
 
 def plot_baseline_data(

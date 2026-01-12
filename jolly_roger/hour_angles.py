@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import astropy.units as u
 import numpy as np
@@ -146,7 +147,7 @@ def make_hour_angles_for_ms(
 
     return PositionHourAngles(
         hour_angle=hour_angle,
-        time_mjds=times_mjds,
+        time_mjds=cast(u.Quantity, times_mjds),
         location=location,
         position=sky_position,
         elevation=altaz.alt.to(u.rad),
