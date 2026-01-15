@@ -898,7 +898,7 @@ def tukey_tractor(
         )
 
     logger.info(
-        f"Nulling time: {total_tukey_time_s:0.2f} s, reading/writing: {runtime_s - total_tukey_time_s:0.2f}"
+        f"Nulling time: {total_tukey_time_s:0.2f}s, reading/writing: {runtime_s - total_tukey_time_s:0.2f}s"
     )
 
     plot_paths: list[Path] | None
