@@ -11,7 +11,11 @@ from astropy.constants import c as speed_of_light
 from casacore.tables import table, taql
 from tqdm import tqdm
 
-from jolly_roger.baselines import Baselines, get_baselines_from_ms
+from jolly_roger.baselines import (
+    BaselineData,
+    Baselines,
+    get_baselines_from_ms,
+)
 from jolly_roger.hour_angles import PositionHourAngles, make_hour_angles_for_ms
 from jolly_roger.logging import logger
 
@@ -26,7 +30,7 @@ class WDelays:
     """The w-derived delay. Shape is [baseline, time]"""
     b_map: dict[tuple[int, int], int]
     """The mapping between (ANTENNA1,ANTENNA2) to baseline index"""
-    time_map: dict[u.Quantity, int]
+    time_map: dict[float, int]
     """The mapping between time (MJDs from measurement set) to index"""
     elevation: u.Quantity
     """The elevation of the target object in time order of steps in the MS"""
@@ -69,11 +73,11 @@ def get_object_delay_for_ms(
         # in w-coordinate is the delay distance
         w_diffs = uvws_object.uvws[2] - uvws_phase.uvws[2]
 
-        delay_object = (w_diffs / speed_of_light).decompose()
+        delay_for_object = (w_diffs / speed_of_light).decompose()
 
         w_delay = WDelays(
             object_name=_object_name,
-            w_delays=delay_object,
+            w_delays=delay_for_object,
             b_map=baselines.b_map,
             time_map=hour_angles_phase.time_map,
             elevation=hour_angles_object.elevation,
@@ -82,6 +86,84 @@ def get_object_delay_for_ms(
         object_w_delays.append(w_delay)
 
     return object_w_delays
+
+
+@dataclass(frozen=True)
+class WDelayRates:
+    """Representation and mappings for the w-coordinate derived delays"""
+
+    object_name: str
+    """The name of the object that the delays are derived towards"""
+    w_delays: u.Quantity
+    """The w-derived delay. Shape is [baseline, time]"""
+    w_rates: u.Quantity
+    """The w-derived rates. Shape is [baseline, time]"""
+    b_map: dict[tuple[int, int], int]
+    """The mapping between (ANTENNA1,ANTENNA2) to baseline index"""
+    time_map: dict[float, int]
+    """The mapping between time (MJDs from measurement set) to index"""
+    elevation: u.Quantity
+    """The elevation of the target object in time order of steps in the MS"""
+
+
+def get_object_delayrate_for_baseline(
+    baseline_data: BaselineData,
+    object_name: str | list[str] = "sun",
+    reverse_baselines: bool = False,
+) -> list[WDelayRates]:
+    object_name = [object_name] if isinstance(object_name, str) else object_name
+    assert isinstance(object_name, list), (
+        f"Expected type list, got {type(object_name)=}"
+    )
+
+    # Generate the two sets of uvw coordinate objects
+    baselines = get_baselines_from_ms(
+        ms_path=baseline_data.ms_path,
+        reverse_baselines=reverse_baselines,
+    )
+    hour_angles_phase = make_hour_angles_for_ms(
+        ms_path=baseline_data.ms_path,
+        position=None,  # gets the position from phase direction
+    )
+    uvws_phase = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_phase)
+
+    baseline_idx = baselines.b_map[(baseline_data.ant_1, baseline_data.ant_2)]
+
+    object_w_delay_rates: list[WDelayRates] = []
+
+    for _object_name in object_name:
+        hour_angles_object = make_hour_angles_for_ms(
+            ms_path=baseline_data.ms_path,
+            position=_object_name,  # gets the position from phase direction
+        )
+        uvws_object = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_object)
+
+        # Subtract the w-coordinates out. Since these uvws have
+        # been computed towards different directions the difference
+        # in w-coordinate is the delay distance
+        w_diffs = (uvws_object.uvws[2] - uvws_phase.uvws[2])[baseline_idx]
+
+        delay_for_object = (w_diffs / speed_of_light).decompose()
+
+        mean_freq = baseline_data.freq_chan.mean().to(u.Hz)
+
+        delay_rate_for_object = (
+            np.gradient(delay_for_object, (hour_angles_object.time.jd * u.day).to(u.s))
+            * mean_freq
+        )  # s / s * Hz
+
+        w_delay_rate = WDelayRates(
+            object_name=_object_name,
+            w_delays=delay_for_object,
+            w_rates=delay_rate_for_object,
+            b_map=baselines.b_map,
+            time_map=hour_angles_phase.time_map,
+            elevation=hour_angles_object.elevation,
+        )
+        logger.info(f"Have created for {w_delay_rate.object_name}")
+        object_w_delay_rates.append(w_delay_rate)
+
+    return object_w_delay_rates
 
 
 @dataclass

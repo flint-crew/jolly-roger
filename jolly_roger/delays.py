@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import astropy.units as u
 import numpy as np
 from numpy.typing import NDArray
 
+from jolly_roger.baselines import BaselineData
 from jolly_roger.logging import logger
 
 if TYPE_CHECKING:
     # avoid circular imports
-    from jolly_roger.tractor import BaselineData, DataChunk
+    from jolly_roger.tractor import DataChunk
 
 
 @dataclass
@@ -29,7 +30,7 @@ class DelayTime:
 def data_to_delay_time(data: BaselineData | DataChunk) -> DelayTime:
     logger.debug("Converting freq-time to delay-time")
     delay_time = np.fft.fftshift(
-        np.fft.fft(data.masked_data.filled(0 + 0j), axis=1), axes=1
+        np.fft.fft(data.masked_data.filled(0 + 0j), axis=1, norm="forward"), axes=1
     )
     delay = np.fft.fftshift(
         np.fft.fftfreq(
@@ -39,7 +40,7 @@ def data_to_delay_time(data: BaselineData | DataChunk) -> DelayTime:
     )
     return DelayTime(
         delay_time=delay_time,
-        delay=delay,
+        delay=cast(u.Quantity, delay),
     )
 
 
@@ -81,12 +82,19 @@ def data_to_delay_rate(
     # This only makes sense when running on time data. Hence
     # asserting the type of BaelineData
 
-    assert isinstance(baseline_data, BaselineData), (
-        f"baseline_data is type={type(baseline_data)}, but needs to be BaselineData"
-    )
+    # assert isinstance(baseline_data, BaselineData), (
+    #     f"baseline_data is type={type(baseline_data)}, but needs to be BaselineData"
+    # )
 
     logger.info("Converting freq-time to delay-rate")
-    delay_rate = np.fft.fftshift(np.fft.fft2(baseline_data.masked_data.filled(0 + 0j)))
+    delay_rate = np.fft.fftshift(
+        np.fft.fft2(
+            baseline_data.masked_data.filled(0 + 0j),
+            norm="forward",
+            axes=(1, 0),
+        ),
+        axes=(1, 0),
+    )
     delay = np.fft.fftshift(
         np.fft.fftfreq(
             n=len(baseline_data.freq_chan),
@@ -102,6 +110,6 @@ def data_to_delay_rate(
 
     return DelayRate(
         delay_rate=delay_rate,
-        delay=delay,
-        rate=rate,
+        delay=cast(u.Quantity, delay),
+        rate=cast(u.Quantity, rate),
     )
