@@ -719,17 +719,21 @@ def tukey_tractor(
 
     if not tukey_tractor_options.dry_run:
         start = time()
+        total_tukey_time_s = 0.0
         with tqdm(total=len(open_ms_tables.main_table), desc="Rows") as pbar:
             for data_chunk in get_data_chunks(
                 open_ms_tables=open_ms_tables,
                 chunk_size=tukey_tractor_options.chunk_size,
                 data_column=tukey_tractor_options.data_column,
             ):
+                start_tukey = time()
                 taper_data_chunk, flags_to_apply = _tukey_multi_tractor(
                     data_chunk=data_chunk,
                     tukey_tractor_options=tukey_tractor_options,
                     w_delays_list=w_delays_list,
                 )
+                end_tukey = time()
+                total_tukey_time_s += end_tukey - start_tukey
 
                 pbar.update(len(taper_data_chunk.masked_data))
 
@@ -752,6 +756,10 @@ def tukey_tractor(
         logger.info(
             f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(taper_data_chunk.freq_chan)} chans in {runtime_s:0.2f}s"
         )
+
+    logger.info(
+        f"Nulling time: {total_tukey_time_s:0.2f}s, reading/writing: {runtime_s - total_tukey_time_s:0.2f}s"
+    )
 
     plot_paths: list[Path] | None
     if tukey_tractor_options.make_plots:
