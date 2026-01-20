@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from collections.abc import Generator
+
+# from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from itertools import combinations
 from pathlib import Path
 from time import time
@@ -323,6 +327,51 @@ def get_data_chunks(
             row_start=data_chunk_array.row_start,
             chunk_size=data_chunk_array.chunk_size,
         )
+
+
+def get_multiple_data_chunks(
+    open_ms_tables: OpenMSTables,
+    chunk_size: int,
+    data_column: str,
+    number_of_chunks: int = 1,
+) -> Generator[tuple[DataChunk, ...], None, None]:
+    """
+    Wrapper around ``get_data_chunks`` to yield a list of
+    data chunks.
+
+    Each data chunk is a collection of rows with appropriate units
+    attached to the quantities. These quantities are not
+    the same data encoded in the measurement set, e.g.
+    masked array has been formed, astropy units have
+    been attached.
+
+    Args:
+        open_ms_tables (OpenMSTables): References to open tables from the measurement set
+        chunk_size (int): The number of rows to return at a time
+        data_column (str): The data column that would be modified
+        number_of_chunks (int, optional): The number of chunks to return on each yield. Defaults to 1.
+
+    Yields:
+        Generator[tuple[DataChunk, ...], None, None]: Representation of the current chunk of rows
+    """
+    # To hold the set of data chunks
+    base_chunks: list[DataChunk] = []
+
+    # We are using the existing generator. Termination should be
+    # straightforward.
+    for data_chunk in get_data_chunks(
+        open_ms_tables=open_ms_tables, chunk_size=chunk_size, data_column=data_column
+    ):
+        base_chunks.append(data_chunk)
+
+        # Once we hit the numbner of requested chunks return them, then empty
+        if len(base_chunks) == number_of_chunks:
+            yield tuple(base_chunks)
+            base_chunks = []
+
+    # Throw out any left overs
+    if len(base_chunks) > 0:
+        yield tuple(base_chunks)
 
 
 def _get_baseline_data(
@@ -798,6 +847,8 @@ class TukeyTractorOptions:
     """Do not apply the tukey taper if object is beyond this Nyquist zone"""
     reverse_baselines: bool = False
     """Reverse baseline ordering"""
+    max_workers: int = 1
+    """The number of compute processes to establish. Each process gets chunk_size of rows. If max_worker==1 all work is performed in main thread."""
 
 
 @dataclass(frozen=True)
@@ -858,39 +909,70 @@ def tukey_tractor(
     )
 
     if not tukey_tractor_options.dry_run:
+        pool: None | ThreadPoolExecutor = None
+        if tukey_tractor_options.max_workers > 1:
+            logger.info(
+                f"Starting {tukey_tractor_options.max_workers} computer workers. Be mindful of {tukey_tractor_options.chunk_size=}"
+            )
+            pool = ThreadPoolExecutor(max_workers=tukey_tractor_options.max_workers)
+
+            # This could be offloaded to some other function if we end up
+            # havig multiple modes
+            partial_compute_func = partial(
+                _tukey_multi_tractor,
+                tukey_tractor_options=tukey_tractor_options,
+                w_delays_list=w_delays_list,
+            )
+
         start = time()
         total_tukey_time_s = 0.0
         with tqdm(total=len(open_ms_tables.main_table), desc="Rows") as pbar:
-            for data_chunk in get_data_chunks(
+            for data_chunk_tuple in get_multiple_data_chunks(
                 open_ms_tables=open_ms_tables,
                 chunk_size=tukey_tractor_options.chunk_size,
                 data_column=tukey_tractor_options.data_column,
+                number_of_chunks=tukey_tractor_options.max_workers,
             ):
                 start_tukey = time()
-                taper_data_chunk, flags_to_apply = _tukey_multi_tractor(
-                    data_chunk=data_chunk,
-                    tukey_tractor_options=tukey_tractor_options,
-                    w_delays_list=w_delays_list,
-                )
+                taper_data_and_flags: list[tuple[DataChunk, NDArray[np.bool]]] = []
+                if len(data_chunk_tuple) == 1:
+                    taper_results = partial_compute_func(
+                        data_chunk=data_chunk_tuple[0],
+                    )
+                    taper_data_and_flags = [taper_results]
+                else:
+                    assert pool is not None, f"{pool=}, and should not be None"
+                    # This creates an iterator that will return objects as they are completed,
+                    # but breaks timing stats. Not a clear increase of throughput in (brief) testing
+                    # taper_data_and_flags = pool.map(partial_compute_func, data_chunk_tuple)
+
+                    # The list collects all results in order.
+                    taper_data_and_flags = list(
+                        pool.map(partial_compute_func, data_chunk_tuple)
+                    )
+
                 end_tukey = time()
                 total_tukey_time_s += end_tukey - start_tukey
 
-                pbar.update(len(taper_data_chunk.masked_data))
+                # Iterate over the result set in a serial manner. Note that depending on
+                # how the .map is called in max_workers>1 case this could be a generator
+                for taper_data_chunk, flags_to_apply in taper_data_and_flags:
+                    pbar.update(len(taper_data_chunk.masked_data))
 
-                # Only update here is we pass the dry run check above
-                open_ms_tables.main_table.putcol(
-                    columnname=tukey_tractor_options.output_column,
-                    value=taper_data_chunk.masked_data,
-                    startrow=taper_data_chunk.row_start,
-                    nrow=taper_data_chunk.chunk_size,
-                )
-                if flags_to_apply is not None:
+                    # Only update here is we pass the dry run check above
                     open_ms_tables.main_table.putcol(
-                        columnname="FLAG",
-                        value=flags_to_apply,
+                        columnname=tukey_tractor_options.output_column,
+                        value=taper_data_chunk.masked_data,
                         startrow=taper_data_chunk.row_start,
                         nrow=taper_data_chunk.chunk_size,
                     )
+                    if flags_to_apply is not None:
+                        open_ms_tables.main_table.putcol(
+                            columnname="FLAG",
+                            value=flags_to_apply,
+                            startrow=taper_data_chunk.row_start,
+                            nrow=taper_data_chunk.chunk_size,
+                        )
         stop = time()
         runtime_s = stop - start
         logger.info(
@@ -900,6 +982,9 @@ def tukey_tractor(
     logger.info(
         f"Nulling time: {total_tukey_time_s:0.2f}s, reading/writing: {runtime_s - total_tukey_time_s:0.2f}s"
     )
+    if isinstance(pool, ThreadPoolExecutor):
+        logger.info("Closing process pool...")
+        del pool
 
     plot_paths: list[Path] | None
     if tukey_tractor_options.make_plots:
@@ -1013,6 +1098,12 @@ def get_parser() -> ArgumentParser:
         action="store_true",
         help="Reverse baseline ordering",
     )
+    tukey_parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help="The number of workers to use. If 1 all work is in main thread. Each compute process receives chunk_size of rows.",
+    )
 
     return parser
 
@@ -1039,6 +1130,7 @@ def cli() -> None:
             target_objects=args.target_objects,
             ignore_nyquist_zone=args.ignore_nyquist_zone,
             reverse_baselines=args.reverse_baselines,
+            max_workers=args.max_workers,
         )
 
         tukey_tractor(tukey_tractor_options=tukey_tractor_options)
