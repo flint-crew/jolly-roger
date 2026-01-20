@@ -979,9 +979,14 @@ def tukey_tractor(
             f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(taper_data_chunk.freq_chan)} chans in {runtime_s:0.2f}s"
         )
 
-    logger.info(
-        f"Nulling time: {total_tukey_time_s:0.2f}s, reading/writing: {runtime_s - total_tukey_time_s:0.2f}s"
-    )
+        logger.info(
+            f"Nulling time: {total_tukey_time_s:0.2f}s, reading/writing: {runtime_s - total_tukey_time_s:0.2f}s"
+        )
+        if tukey_tractor_options.max_workers > 1:
+            logger.info(
+                f"Used {tukey_tractor_options.max_workers} workers with a {tukey_tractor_options.chunk_size} chunk size"
+            )
+
     if isinstance(pool, ThreadPoolExecutor):
         logger.info("Closing process pool...")
         del pool
