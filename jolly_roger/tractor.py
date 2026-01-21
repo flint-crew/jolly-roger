@@ -669,6 +669,9 @@ def _tukey_tractor(
     if delay_time is None:
         delay_time = data_to_delay_time(data=data_chunk)
 
+    # Create these here in case of potential early returns
+    flags_to_return = np.zeros_like(data_chunk.masked_data.mask)
+
     # Set up the offsets. By default we will be tapering around the field,
     # but should w_delays be specified these will be modified to direct
     # towards the nominated object in the if below
@@ -678,6 +681,10 @@ def _tukey_tractor(
         w_delays=w_delays, data_chunk=data_chunk
     )
     original_tukey_x_offset = w_delays.w_delays[baseline_idx, time_idx]
+
+    elevation_mask = w_delays.elevation < tukey_tractor_options.elevation_cut
+    if np.all(elevation_mask[time_idx]):
+        return None, None, None
 
     # Make a copy for later use post wrapping
     tukey_x_offset = original_tukey_x_offset.copy()
@@ -724,7 +731,7 @@ def _tukey_tractor(
     taper[ignore_wrapping_for, :, :] = 1.0
 
     # Delay with the elevation of the target object
-    elevation_mask = w_delays.elevation < tukey_tractor_options.elevation_cut
+    # Note elevation_nask created earlier to check for early exit
     taper[elevation_mask[time_idx], :, :] = 1.0
 
     # Compute flags to ignore the objects delay crossing 0, Do
@@ -750,8 +757,8 @@ def _tukey_tractor(
     #     ~elevation_mask[time_idx] &
     #     ~ignore_wrapping_for
     # ] = 0.0
+
     # Update flags
-    flags_to_return = np.zeros_like(data_chunk.masked_data.mask)
     flags_to_return[intersecting_taper] = True
     flags_to_return = (
         ~np.isfinite(data_chunk.masked_data.filled(np.nan)) | flags_to_return
@@ -793,6 +800,8 @@ def _tukey_multi_tractor(
     delay_time: DelayTime | None = None
     taper_list: list[NDArray[np.float64]] = []
     flag_list: list[NDArray[np.bool]] = []
+    delay_time_list: list[DelayTime] = []
+
     for w_delays in w_delays_list:
         taper, flags_to_return, delay_time = _tukey_tractor(
             data_chunk=data_chunk,
@@ -800,19 +809,24 @@ def _tukey_multi_tractor(
             w_delays=w_delays,
             delay_time=delay_time,
         )
-        taper_list.append(taper)
-        flag_list.append(flags_to_return)
+        if taper is not None:
+            taper_list.append(taper)
+            flag_list.append(flags_to_return)
+            delay_time_list.append(delay_time)
+
+    if len(taper_list) == 0:
+        return data_chunk, None, False
 
     combined_taper = np.min(taper_list, axis=0)
     combined_flags = np.sum(flag_list, axis=0).astype(bool)
 
     tapered_data = _apply_taper(
         data_chunk=data_chunk,
-        delay_time=cast(DelayTime, delay_time),
+        delay_time=cast(DelayTime, delay_time_list[0]),
         taper=combined_taper,
     )
 
-    return tapered_data, combined_flags
+    return tapered_data, combined_flags, np.any(combined_taper != 1.0)
 
 
 @dataclass
@@ -956,8 +970,11 @@ def tukey_tractor(
 
                 # Iterate over the result set in a serial manner. Note that depending on
                 # how the .map is called in max_workers>1 case this could be a generator
-                for taper_data_chunk, flags_to_apply in taper_data_and_flags:
+                for taper_data_chunk, flags_to_apply, modified in taper_data_and_flags:
                     pbar.update(len(taper_data_chunk.masked_data))
+
+                    if not modified:
+                        continue
 
                     # Only update here is we pass the dry run check above
                     open_ms_tables.main_table.putcol(
