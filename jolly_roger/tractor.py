@@ -989,7 +989,7 @@ def tukey_tractor(
 
     if isinstance(pool, ThreadPoolExecutor):
         logger.info("Closing thread pool...")
-        del pool
+        pool.shutdown()
 
     plot_paths: list[Path] | None
     if tukey_tractor_options.make_plots:
