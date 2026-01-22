@@ -988,7 +988,7 @@ def tukey_tractor(
             )
 
     if isinstance(pool, ThreadPoolExecutor):
-        logger.info("Closing process pool...")
+        logger.info("Closing thread pool...")
         del pool
 
     plot_paths: list[Path] | None
