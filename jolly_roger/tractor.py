@@ -916,13 +916,13 @@ def tukey_tractor(
             )
             pool = ThreadPoolExecutor(max_workers=tukey_tractor_options.max_workers)
 
-            # This could be offloaded to some other function if we end up
-            # havig multiple modes
-            partial_compute_func = partial(
-                _tukey_multi_tractor,
-                tukey_tractor_options=tukey_tractor_options,
-                w_delays_list=w_delays_list,
-            )
+        # This could be offloaded to some other function if we end up
+        # havig multiple modes
+        partial_compute_func = partial(
+            _tukey_multi_tractor,
+            tukey_tractor_options=tukey_tractor_options,
+            w_delays_list=w_delays_list,
+        )
 
         start = time()
         total_tukey_time_s = 0.0
