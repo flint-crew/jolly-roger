@@ -987,9 +987,9 @@ def tukey_tractor(
                 f"Used {tukey_tractor_options.max_workers} workers with a {tukey_tractor_options.chunk_size} chunk size"
             )
 
-    if isinstance(pool, ThreadPoolExecutor):
-        logger.info("Closing thread pool...")
-        pool.shutdown()
+        if isinstance(pool, ThreadPoolExecutor):
+            logger.info("Closing thread pool...")
+            pool.shutdown()
 
     plot_paths: list[Path] | None
     if tukey_tractor_options.make_plots:
