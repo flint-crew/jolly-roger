@@ -13,9 +13,6 @@ from casacore.tables import table
 
 from jolly_roger.logging import logger
 
-# Default location with XYZ based on mean of antenna positions
-ASKAP = EarthLocation.of_site("ASKAP")
-
 
 @dataclass
 class PositionHourAngles:
@@ -95,9 +92,33 @@ def _process_position(
     raise ValueError(msg)
 
 
+def _get_average_location(locations: EarthLocation) -> EarthLocation:
+    centroid = EarthLocation.from_geocentric(
+        x=locations.x.mean(),
+        y=locations.y.mean(),
+        z=locations.z.mean(),
+    )
+
+    lon, lat, _ = centroid.to_geodetic()
+    height = locations.to_geodetic().height.mean()
+    return EarthLocation.from_geodetic(
+        lon=lon,
+        lat=lat,
+        height=height,
+    )
+
+
+def get_location_from_ms(ms_path: Path) -> EarthLocation:
+    with table(ms_path.as_posix()) as tab:
+        positions = table(tab.getkeyword("ANTENNA")).getcol("POSITION")
+
+    locations = EarthLocation.from_geocentric(*positions.T, unit=u.m)
+
+    return _get_average_location(locations)
+
+
 def make_hour_angles_for_ms(
     ms_path: Path,
-    location: EarthLocation = ASKAP,
     position: SkyCoord | str | None = None,
     whole_day: bool = False,
 ) -> PositionHourAngles:
@@ -106,7 +127,6 @@ def make_hour_angles_for_ms(
 
     Args:
         ms_path (Path): Measurement set to usefor time and sky-position information
-        location (EarthLocation, optional): The location to use when calculate LST. Defaults to ASKAP.
         position (SkyCoord | str | None, optional): The sky-direction hour-angles will be calculated towards. Defaults to None.
         whole_day (bool, optional): Calaculate for a 24 hour persion starting from the first time step. Defaults to False.
 
@@ -137,6 +157,8 @@ def make_hour_angles_for_ms(
     times = Time(times_mjds, format="mjd", scale="utc")
 
     sky_position = _process_position(position=position, times=times, ms_path=ms_path)
+
+    location = get_location_from_ms(ms_path)
 
     lst = times.sidereal_time("apparent", longitude=location.lon)
     hour_angle = (lst - sky_position.ra).wrap_at(12 * u.hourangle)
