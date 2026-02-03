@@ -158,7 +158,7 @@ def make_hour_angles_for_ms(
 
     sky_position = _process_position(position=position, times=times, ms_path=ms_path)
 
-    location = get_location_from_ms()
+    location = get_location_from_ms(ms_path)
 
     lst = times.sidereal_time("apparent", longitude=location.lon)
     hour_angle = (lst - sky_position.ra).wrap_at(12 * u.hourangle)
