@@ -905,6 +905,7 @@ def tukey_tractor(
         ms_path=tukey_tractor_options.ms_path,
         object_name=tukey_tractor_options.target_objects,
         reverse_baselines=tukey_tractor_options.reverse_baselines,
+        flip_uvw_sign=tukey_tractor_options.flip_uvw_sign,
     )
     assert all(len(w_delays.w_delays.shape) == 2 for w_delays in w_delays_list), (
         "Sanity check failed, incorrect dimensionality returned"
