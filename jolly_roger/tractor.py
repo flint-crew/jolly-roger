@@ -847,6 +847,8 @@ class TukeyTractorOptions:
     """Do not apply the tukey taper if object is beyond this Nyquist zone"""
     reverse_baselines: bool = False
     """Reverse baseline ordering"""
+    flip_uvw_sign: bool = False
+    """Flip the sign of UVWs (required for LOFAR)"""
     max_workers: int = 1
     """The number of compute processes to establish. Each process gets chunk_size of rows. If max_worker==1 all work is performed in main thread."""
 
@@ -1103,6 +1105,11 @@ def get_parser() -> ArgumentParser:
         action="store_true",
         help="Reverse baseline ordering",
     )
+    parser.add_argument(
+        "--flip-uvw-sign",
+        action="store_true",
+        help="Flips the UVW sign. May be required for LOFAR.",
+    )
     tukey_parser.add_argument(
         "--max-workers",
         type=int,
@@ -1135,6 +1142,7 @@ def cli() -> None:
             target_objects=args.target_objects,
             ignore_nyquist_zone=args.ignore_nyquist_zone,
             reverse_baselines=args.reverse_baselines,
+            flip_uvw_sign=args.flip_uvw_sign,
             max_workers=args.max_workers,
         )
 
