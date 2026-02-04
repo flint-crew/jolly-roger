@@ -1105,7 +1105,7 @@ def get_parser() -> ArgumentParser:
         action="store_true",
         help="Reverse baseline ordering",
     )
-    parser.add_argument(
+    tukey_parser.add_argument(
         "--flip-uvw-sign",
         action="store_true",
         help="Flips the UVW sign. May be required for LOFAR.",
