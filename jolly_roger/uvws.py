@@ -160,6 +160,7 @@ def xyz_to_uvw(
     logger.debug(f"{uvw.shape=}")
 
     if flip_uvw_sign:
+        logger.warning("Flipping sign of UVWs!")
         uvw *= -1
 
     return UVWs(uvws=uvw, hour_angles=hour_angles, baselines=baselines)
