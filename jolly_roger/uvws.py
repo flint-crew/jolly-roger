@@ -36,6 +36,7 @@ def get_object_delay_for_ms(
     ms_path: Path,
     object_name: str | list[str] = "sun",
     reverse_baselines: bool = False,
+    flip_uvw_sign: bool = False,
 ) -> list[WDelays]:
     object_name = [object_name] if isinstance(object_name, str) else object_name
     assert isinstance(object_name, list), (
@@ -51,7 +52,9 @@ def get_object_delay_for_ms(
         ms_path=ms_path,
         position=None,  # gets the position from phase direction
     )
-    uvws_phase: UVWs = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_phase)
+    uvws_phase = xyz_to_uvw(
+        baselines=baselines, hour_angles=hour_angles_phase, flip_uvw_sign=flip_uvw_sign
+    )
 
     object_w_delays = []
 
@@ -60,8 +63,10 @@ def get_object_delay_for_ms(
             ms_path=ms_path,
             position=_object_name,  # gets the position from phase direction
         )
-        uvws_object: UVWs = xyz_to_uvw(
-            baselines=baselines, hour_angles=hour_angles_object
+        uvws_object = xyz_to_uvw(
+            baselines=baselines,
+            hour_angles=hour_angles_object,
+            flip_uvw_sign=flip_uvw_sign,
         )
 
         # Subtract the w-coordinates out. Since these uvws have
@@ -99,6 +104,7 @@ class UVWs:
 def xyz_to_uvw(
     baselines: Baselines,
     hour_angles: PositionHourAngles,
+    flip_uvw_sign: bool = False,
 ) -> UVWs:
     """Generate the UVWs for a given set of baseline vectors towards a position
     across a series of hour angles.
@@ -106,6 +112,7 @@ def xyz_to_uvw(
     Args:
         baselines (Baselines): The set of baselines vectors to use
         hour_angles (PositionHourAngles): The hour angles and position to generate UVWs for
+        flip_uvw_sign (bool, optional): Flip the UVWs (required for LOFAR). Defaults to False.
 
     Returns:
         UVWs: The generated set of UVWs
@@ -155,6 +162,10 @@ def xyz_to_uvw(
     # i,l,k -> (3, baseline, time)
 
     logger.debug(f"{uvw.shape=}")
+
+    if flip_uvw_sign:
+        logger.warning("Flipping sign of UVWs!")
+        uvw *= -1
 
     return UVWs(uvws=uvw, hour_angles=hour_angles, baselines=baselines)
 
