@@ -96,13 +96,14 @@ report.exclude_also = [
 
 [tool.mypy]
 files = ["jolly_roger", "tests"]
-python_version = "3.9"
+python_version = "3.10"
 warn_unused_configs = true
 strict = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 warn_unreachable = true
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
+plugins = ['pydantic.mypy']
 
 [[tool.mypy.overrides]]
 module = "jolly_roger.*"

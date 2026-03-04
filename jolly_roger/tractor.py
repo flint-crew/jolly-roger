@@ -630,9 +630,7 @@ def _get_baseline_time_indicies(
     baseline_idx = np.array(
         [
             w_delays.b_map[(int(ant_1), int(ant_2))] if ant_1 != ant_2 else 0
-            for ant_1, ant_2 in zip(  # type: ignore[call-overload]
-                data_chunk.ant_1, data_chunk.ant_2, strict=False
-            )
+            for ant_1, ant_2 in zip(data_chunk.ant_1, data_chunk.ant_2, strict=False)
         ]
     )
 

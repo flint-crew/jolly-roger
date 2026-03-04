@@ -56,7 +56,7 @@ def get_object_delay_for_ms(
         baselines=baselines, hour_angles=hour_angles_phase, flip_uvw_sign=flip_uvw_sign
     )
 
-    object_w_delays = []
+    object_w_delays: list[WDelays] = []
 
     for _object_name in object_name:
         hour_angles_object = make_hour_angles_for_ms(
