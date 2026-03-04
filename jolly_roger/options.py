@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict
-from typing_extensions import Self  # noqa: UP035
 
 
 # Using same style a primary flint repo
