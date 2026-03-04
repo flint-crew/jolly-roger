@@ -24,6 +24,7 @@ from tqdm.auto import tqdm
 
 from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
 from jolly_roger.logging import logger
+from jolly_roger.options import BaseOptions
 from jolly_roger.plots import plot_baseline_comparison_data
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
@@ -647,7 +648,7 @@ def _tukey_tractor(
     tukey_tractor_options: TukeyTractorOptions,
     w_delays: WDelays,
     delay_time: DelayTime | None = None,
-) -> tuple[NDArray[np.float64], NDArray[np.bool], DelayTime]:
+) -> tuple[NDArray[np.float64], NDArray[np.bool_], DelayTime]:
     """Compute a tukey taper for a dataset and then apply it
     to the dataset. Here the data corresponds to a (chan, time, pol)
     array. Data is not necessarily a single baseline.
@@ -664,7 +665,7 @@ def _tukey_tractor(
         delay_time (DelayTime | None, optional): Optional pre-computed DelayTime object.
 
     Returns:
-        tuple[DataChunk,NDArray[np.bool],DelayTime]: Scaled complex visibilities, corresponding flags, and delays.
+        tuple[DataChunk,NDArray[np.bool_],DelayTime]: Scaled complex visibilities, corresponding flags, and delays.
     """
     if delay_time is None:
         delay_time = data_to_delay_time(data=data_chunk)
@@ -724,7 +725,9 @@ def _tukey_tractor(
     taper[ignore_wrapping_for, :, :] = 1.0
 
     # Delay with the elevation of the target object
-    elevation_mask = w_delays.elevation < tukey_tractor_options.elevation_cut
+    elevation_mask = w_delays.elevation < (
+        tukey_tractor_options.elevation_cut_deg * u.deg
+    )
     taper[elevation_mask[time_idx], :, :] = 1.0
 
     # Compute flags to ignore the objects delay crossing 0, Do
@@ -788,11 +791,11 @@ def _tukey_multi_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays_list: list[WDelays],
-) -> tuple[DataChunk, NDArray[np.bool]]:
+) -> tuple[DataChunk, NDArray[np.bool_]]:
     # Initialise to None, then reuse to save on computation
     delay_time: DelayTime | None = None
     taper_list: list[NDArray[np.float64]] = []
-    flag_list: list[NDArray[np.bool]] = []
+    flag_list: list[NDArray[np.bool_]] = []
     for w_delays in w_delays_list:
         taper, flags_to_return, delay_time = _tukey_tractor(
             data_chunk=data_chunk,
@@ -815,8 +818,7 @@ def _tukey_multi_tractor(
     return tapered_data, combined_flags
 
 
-@dataclass
-class TukeyTractorOptions:
+class TukeyTractorOptions(BaseOptions):
     """Options to describe the tukey taper to apply"""
 
     ms_path: Path
@@ -841,8 +843,8 @@ class TukeyTractorOptions:
     """If the output column exists it will be overwritten"""
     chunk_size: int = 1000
     """Size of the row-wise chunking iterator"""
-    elevation_cut: u.Quantity = -1 * u.deg
-    """The elevation cut-off for the target object. Defaults to 0 degrees."""
+    elevation_cut_deg: float = -1.0
+    """The elevation cut-off for the target object in degrees. Defaults to -1 degrees."""
     ignore_nyquist_zone: int = 2
     """Do not apply the tukey taper if object is beyond this Nyquist zone"""
     reverse_baselines: bool = False
@@ -937,7 +939,7 @@ def tukey_tractor(
                 number_of_chunks=tukey_tractor_options.max_workers,
             ):
                 start_tukey = time()
-                taper_data_and_flags: list[tuple[DataChunk, NDArray[np.bool]]] = []
+                taper_data_and_flags: list[tuple[DataChunk, NDArray[np.bool_]]] = []
                 if len(data_chunk_tuple) == 1:
                     taper_results = partial_compute_func(
                         data_chunk=data_chunk_tuple[0],

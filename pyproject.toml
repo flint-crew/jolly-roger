@@ -28,12 +28,12 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    "astropy",
     "numpy>=2.0.0",
     "python-casacore>=3.6.0",
-    "tqdm",
-    "matplotlib",
-    "dask-ms"
+    "pydantic>=2.12.5",
+    "astropy>=7.2.0",
+    "tqdm>=4.67.3",
+    "matplotlib>=3.10.8",
 ]
 
 [project.urls]
