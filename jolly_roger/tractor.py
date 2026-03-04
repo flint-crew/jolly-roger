@@ -869,7 +869,7 @@ def tukey_tractor(
 ) -> TukeyTractorResults:
     """Iterate row-wise over a specified measurement set and
     apply a tukey taper operation to the delay data. Iteration
-    is performed based on a chunk soize, indicating the number
+    is performed based on a chunk size, indicating the number
     of rows to read in at a time.
 
     Full description of options are outlined in `TukeyTaperOptions`.
