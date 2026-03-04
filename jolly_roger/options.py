@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict
+from typing_extensions import Self  # noqa: UP035
 
 
 # Using same style a primary flint repo
@@ -21,3 +24,12 @@ class BaseOptions(BaseModel):
         extra="forbid",
         arbitrary_types_allowed=True,
     )
+
+    def with_options(self: Self, /, **kwargs: dict[str, Any]) -> Self:
+        new_args = self.__dict__.copy()
+        new_args.update(**kwargs)
+
+        return self.__class__(**new_args)
+
+    def _asdict(self: Self) -> dict[str, Any]:
+        return self.model_dump()
