@@ -875,6 +875,7 @@ def tukey_tractor(
     Full description of options are outlined in `TukeyTaperOptions`.
 
     Args:
+        ms_path (Path): The MS to be modified.
         tukey_tractor_options (TukeyTractorOptions): The settings to use during the taper, and measurement set to apply them to.
 
     Returns:
