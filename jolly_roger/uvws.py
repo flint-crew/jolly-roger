@@ -39,8 +39,8 @@ def get_object_delay_for_ms(
     flip_uvw_sign: bool = False,
 ) -> list[WDelays]:
     object_name = [object_name] if isinstance(object_name, str) else object_name
-    assert isinstance(object_name, list), (
-        f"Expected type list, got {type(object_name)=}"
+    assert isinstance(object_name, list | tuple), (
+        f"Expected type list | tuple, got {type(object_name)=}"
     )
 
     # Generate the two sets of uvw coordinate objects
