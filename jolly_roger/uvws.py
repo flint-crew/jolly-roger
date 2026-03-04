@@ -34,7 +34,7 @@ class WDelays:
 
 def get_object_delay_for_ms(
     ms_path: Path,
-    object_name: str | list[str] = "sun",
+    object_name: str | list[str] | tuple[str] = ("sun",),
     reverse_baselines: bool = False,
     flip_uvw_sign: bool = False,
 ) -> list[WDelays]:

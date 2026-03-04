@@ -819,9 +819,7 @@ def _tukey_multi_tractor(
 class TukeyTractorOptions(BaseOptions):
     """Options to describe the tukey taper to apply"""
 
-    ms_path: Path
-    """Measurement set to be modified"""
-    target_objects: list[str]
+    target_objects: tuple[str] = ("sun",)
     """The target object to apply the delay towards."""
     outer_width_ns: float = 10
     """The start of the tapering in nanoseconds"""
@@ -866,6 +864,7 @@ class TukeyTractorResults:
 
 
 def tukey_tractor(
+    ms_path: Path,
     tukey_tractor_options: TukeyTractorOptions,
 ) -> TukeyTractorResults:
     """Iterate row-wise over a specified measurement set and
@@ -887,9 +886,7 @@ def tukey_tractor(
     )
 
     # acquire all the tables necessary to get unit information and data from
-    open_ms_tables = get_open_ms_tables(
-        ms_path=tukey_tractor_options.ms_path, read_only=False
-    )
+    open_ms_tables = get_open_ms_tables(ms_path=ms_path, read_only=False)
 
     if not tukey_tractor_options.dry_run:
         add_output_column(
@@ -902,7 +899,7 @@ def tukey_tractor(
 
     # Generate the delay for all baselines and time steps
     w_delays_list = get_object_delay_for_ms(
-        ms_path=tukey_tractor_options.ms_path,
+        ms_path=ms_path,
         object_name=tukey_tractor_options.target_objects,
         reverse_baselines=tukey_tractor_options.reverse_baselines,
         flip_uvw_sign=tukey_tractor_options.flip_uvw_sign,
@@ -1128,7 +1125,6 @@ def cli() -> None:
 
     if args.mode == "tukey":
         tukey_tractor_options = TukeyTractorOptions(
-            ms_path=args.ms_path,
             outer_width_ns=args.outer_width,
             tukey_width_ns=args.tukey_width
             if args.tukey_width is not None
@@ -1147,7 +1143,7 @@ def cli() -> None:
             max_workers=args.max_workers,
         )
 
-        tukey_tractor(tukey_tractor_options=tukey_tractor_options)
+        tukey_tractor(ms_path=args.ms_path, tukey_tractor_options=tukey_tractor_options)
     else:
         parser.print_help()
 
