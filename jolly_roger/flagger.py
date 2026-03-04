@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from argparse import ArgumentParser
-from dataclasses import dataclass
 from pathlib import Path
 
 import astropy.units as u
@@ -11,11 +10,11 @@ import astropy.units as u
 from jolly_roger.baselines import get_baselines_from_ms
 from jolly_roger.hour_angles import make_hour_angles_for_ms
 from jolly_roger.logging import logger
+from jolly_roger.options import BaseOptions
 from jolly_roger.uvws import uvw_flagger, xyz_to_uvw
 
 
-@dataclass
-class JollyRogerFlagOptions:
+class JollyRogerFlagOptions(BaseOptions):
     """Specifications of the flagging to carry out"""
 
     min_scale_deg: float = 0.075
