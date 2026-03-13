@@ -10,7 +10,7 @@ from functools import partial
 from itertools import combinations
 from pathlib import Path
 from time import time
-from typing import Any, cast
+from typing import cast
 
 import astropy.units as u
 import numpy as np
