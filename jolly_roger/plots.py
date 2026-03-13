@@ -18,6 +18,7 @@ from astropy.visualization import (
 )
 
 from jolly_roger.baselines import BaselineData
+from jolly_roger.logging import logger
 from jolly_roger.uvws import WDelays
 from jolly_roger.wrap import calculate_wrapped_data, iterate_over_zones
 
@@ -83,16 +84,22 @@ def plot_baseline_comparison_data(
             / 2
         )
 
-        # We may end up flagging all the data
-        if not after_amp_stokesi.mask.all():
+        # We may end up flagging all the data. If the after data is completely flagged, fall back
+        # to the before data. If, however, all that is also flagged (e.g. sun is too close across
+        # all timesteps and hence all timesteps are flagged) we no normalise.
+        norm_plot_data = (
+            after_amp_stokesi
+            if not after_amp_stokesi.mask.all()
+            else before_amp_stokesi
+        )
+        if not norm_plot_data.all():
             norm = ImageNormalize(
-                after_amp_stokesi
-                if not after_amp_stokesi.mask.all()
-                else before_amp_stokesi,
+                norm_plot_data,
                 interval=ZScaleInterval(),
                 stretch=SqrtStretch(),
             )
         else:
+            logger.warning("No valid data found. No attempt to normalise data.")
             norm = None
 
         cmap = plt.cm.viridis

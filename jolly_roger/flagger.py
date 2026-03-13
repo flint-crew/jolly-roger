@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from argparse import ArgumentParser
-from dataclasses import dataclass
 from pathlib import Path
 
 import astropy.units as u
@@ -11,11 +10,11 @@ import astropy.units as u
 from jolly_roger.baselines import get_baselines_from_ms
 from jolly_roger.hour_angles import make_hour_angles_for_ms
 from jolly_roger.logging import logger
+from jolly_roger.options import BaseOptions
 from jolly_roger.uvws import uvw_flagger, xyz_to_uvw
 
 
-@dataclass
-class JollyRogerFlagOptions:
+class JollyRogerFlagOptions(BaseOptions):
     """Specifications of the flagging to carry out"""
 
     min_scale_deg: float = 0.075
@@ -26,6 +25,8 @@ class JollyRogerFlagOptions:
     """The minimum elevation for the sun projected baselines to be considered for flagging"""
     dry_run: bool = False
     """Do not apply the flags"""
+    flip_uvw_sign: bool = False
+    """Flip the sign of UVWs (required for LOFAR)"""
 
 
 def flag(ms_path: Path, flag_options: JollyRogerFlagOptions) -> Path:
@@ -38,7 +39,11 @@ def flag(ms_path: Path, flag_options: JollyRogerFlagOptions) -> Path:
     baselines = get_baselines_from_ms(ms_path=ms_path)
     hour_angles = make_hour_angles_for_ms(ms_path=ms_path, position="sun")
 
-    uvws = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles)
+    uvws = xyz_to_uvw(
+        baselines=baselines,
+        hour_angles=hour_angles,
+        flip_uvw_sign=flag_options.flip_uvw_sign,
+    )
     ms_path = uvw_flagger(
         computed_uvws=uvws,
         min_horizon_lim=flag_options.min_horizon_limit_deg * u.deg,
@@ -78,6 +83,11 @@ def get_parser() -> ArgumentParser:
     parser.add_argument(
         "--dry-run", action="store_true", help="Do not apply the computed flags"
     )
+    parser.add_argument(
+        "--flip-uvw-sign",
+        action="store_true",
+        help="Flips the UVW sign. May be required for LOFAR.",
+    )
 
     return parser
 
@@ -92,6 +102,7 @@ def cli() -> None:
         min_horizon_limit_deg=args.min_horizon_limit_deg,
         max_horizon_limit_deg=args.max_horizon_limit_deg,
         dry_run=args.dry_run,
+        flip_uvw_sign=args.flip_uvw_sign,
     )
 
     flag(ms_path=args.ms_path, flag_options=flag_options)

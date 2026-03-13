@@ -28,12 +28,12 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    "astropy",
     "numpy>=2.0.0",
     "python-casacore>=3.6.0",
-    "tqdm",
-    "matplotlib",
-    "dask-ms"
+    "pydantic>=2",
+    "astropy>=7.2.0",
+    "tqdm>=4.67.3",
+    "matplotlib>=3.10.8",
 ]
 
 [project.urls]
@@ -96,13 +96,14 @@ report.exclude_also = [
 
 [tool.mypy]
 files = ["jolly_roger", "tests"]
-python_version = "3.9"
+python_version = "3.11"
 warn_unused_configs = true
 strict = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 warn_unreachable = true
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
+plugins = ['pydantic.mypy']
 
 [[tool.mypy.overrides]]
 module = "jolly_roger.*"
