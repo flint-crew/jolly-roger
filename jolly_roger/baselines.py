@@ -7,13 +7,166 @@ from argparse import ArgumentParser
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
+from typing import cast
 
 import astropy.units as u
 import matplotlib.pyplot as plt
 import numpy as np
-from casacore.tables import table
+from astropy.coordinates import SkyCoord
+from astropy.time import Time
+from casacore.tables import table, taql
+from numpy.typing import NDArray
 
 from jolly_roger.logging import logger
+
+
+@dataclass(frozen=True)
+class OpenMSTables:
+    """Open MS table references"""
+
+    main_table: table
+    """The main MS table"""
+    spw_table: table
+    """The spectral window table"""
+    field_table: table
+    """The field table"""
+    ms_path: Path
+    """The path to the MS used to open tables"""
+
+
+def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
+    """Open up the set of MS table and sub-tables necessary for tractoring.
+
+    Args:
+        ms_path (Path): The path to the measurement set
+        read_only (bool, optional): Whether to open in a read-only mode. Defaults to True.
+
+    Returns:
+        OpenMSTables: Set of open table references
+    """
+    main_table = table(str(ms_path), ack=False, readonly=read_only)
+    spw_table = table(str(ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=read_only)
+    field_table = table(str(ms_path / "FIELD"), ack=False, readonly=read_only)
+
+    # TODO: Get the data without auto-correlations e.g.
+    # no_auto_main_table = taql(
+    #     "select from $main_table where ANTENNA1 != ANTENNA2",
+    # )
+
+    return OpenMSTables(
+        main_table=main_table,
+        spw_table=spw_table,
+        field_table=field_table,
+        ms_path=ms_path,
+    )
+
+
+@dataclass
+class BaselineData:
+    """Container for baseline data and associated metadata."""
+
+    ms_path: Path
+    """MS from which the data was fetched"""
+    masked_data: np.ma.MaskedArray
+    """The baseline data, masked where flags are set. shape=(time, chan, pol)"""
+    freq_chan: u.Quantity
+    """The frequency channels corresponding to the data."""
+    phase_center: SkyCoord
+    """The target sky coordinate for the baseline."""
+    uvws_phase_center: u.Quantity
+    """The UVW coordinates of the phase center of the baseline."""
+    time: Time
+    """The time of the observations."""
+    ant_1: int
+    """The first antenna in the baseline."""
+    ant_2: int
+    """The second antenna in the baseline."""
+
+
+@dataclass
+class BaselineArrays:
+    data: NDArray[np.complexfloating]
+    flags: NDArray[np.bool_]
+    uvws: NDArray[np.floating]
+    time_centroid: NDArray[np.floating]
+
+
+def _get_baseline_data(
+    ms_tab: table,
+    ant_1: int,
+    ant_2: int,
+    data_column: str = "DATA",
+) -> BaselineArrays:
+    _ = ms_tab, ant_1, ant_2
+    with taql(
+        "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
+    ) as subtab:
+        logger.info(f"Opening subtable for baseline {ant_1} {ant_2}")
+        data = subtab.getcol(data_column)
+        flags = subtab.getcol("FLAG")
+        uvws = subtab.getcol("UVW")
+        time_centroid = subtab.getcol("TIME_CENTROID")
+
+    return BaselineArrays(
+        data=data,
+        flags=flags,
+        uvws=uvws,
+        time_centroid=time_centroid,
+    )
+
+
+def get_baseline_data(
+    open_ms_tables: OpenMSTables,
+    ant_1: int,
+    ant_2: int,
+    data_column: str = "DATA",
+) -> BaselineData:
+    """Get data of a baseline from a measurement set
+
+    Args:
+        open_ms_tables (OpenMSTables): The measurement set to draw data from
+        ant_1 (int): The first antenna of the baseline
+        ant_2 (int): The second antenna of the baseline
+        data_column (str, optional): The data column to extract. Defaults to "DATA".
+
+    Returns:
+        BaselineData:  Extracted baseline data
+    """
+    logger.info(f"Getting baseline {ant_1} {ant_2}")
+
+    freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ")
+    phase_dir = open_ms_tables.field_table.getcol("PHASE_DIR")
+
+    logger.debug(f"Processing {ant_1=} {ant_2=}")
+
+    baseline_data = _get_baseline_data(
+        ms_tab=open_ms_tables.main_table,
+        ant_1=ant_1,
+        ant_2=ant_2,
+        data_column=data_column,
+    )
+
+    freq_chan = freq_chan.squeeze() * u.Hz
+    target = SkyCoord(*(phase_dir * u.rad).squeeze())
+    uvws_phase_center = np.swapaxes(baseline_data.uvws * u.m, 0, 1)
+    time = Time(
+        baseline_data.time_centroid.squeeze() * u.s,
+        format="mjd",
+        scale="utc",
+    )
+    masked_data = np.ma.masked_array(baseline_data.data, mask=baseline_data.flags)
+
+    logger.info(f"Got data for baseline {ant_1} {ant_2} with shape {masked_data.shape}")
+    return BaselineData(
+        ms_path=open_ms_tables.ms_path,
+        masked_data=masked_data,
+        freq_chan=freq_chan,
+        phase_center=target,
+        uvws_phase_center=cast(u.Quantity, uvws_phase_center),
+        time=time,
+        ant_1=ant_1,
+        ant_2=ant_2,
+    )
 
 
 @dataclass
