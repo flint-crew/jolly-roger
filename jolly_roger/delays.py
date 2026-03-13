@@ -78,7 +78,7 @@ class DelayRate:
 def data_to_delay_rate(
     baseline_data: BaselineData,
 ) -> DelayRate:
-    """Convert baseline data to delay rate."""
+    """Convert baseline data to delay rates."""
     # This only makes sense when running on time data. Hence
     # asserting the type of BaselineData
 
