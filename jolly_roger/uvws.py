@@ -385,7 +385,7 @@ def uvw_flagger(
         for ant_1, ant_2 in tqdm(antennas_for_baselines):
             logger.debug(f"Processing {ant_1=} {ant_2=}")
 
-            # Keeps the ruff from complaining about and unused varuable wheen
+            # Keeps the ruff from complaining about and unused variable when
             # it is used in the table access command below
             _ = ms_tab
 

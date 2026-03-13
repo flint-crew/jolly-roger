@@ -55,12 +55,12 @@ dev = [
   { include-group = "test" },
 ]
 docs = [
-  "sphinx>=7.0",
+  "sphinx<9",
   "myst_parser>=0.13",
   "sphinx_copybutton",
   "sphinx_autodoc_typehints",
   "furo>=2023.08.17",
-  "sphinx-argparse",
+  "sphinx-argparse>=0.5",
 ]
 
 
