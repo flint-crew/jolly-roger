@@ -83,9 +83,10 @@ def data_to_delay_rate(
     # asserting the type of BaselineData
 
     if not isinstance(baseline_data, BaselineData):
-        msg = f"baseline_data is type={type(baseline_data)}, but needs to be BaselineData"
+        msg = (
+            f"baseline_data is type={type(baseline_data)}, but needs to be BaselineData"
+        )
         raise TypeError(msg)
-        
 
     logger.info("Converting freq-time to delay-rate")
     delay_rate = np.fft.fftshift(
