@@ -6,11 +6,11 @@ from argparse import ArgumentParser
 from pathlib import Path
 
 import astropy.units as u
+from capn_crunch import BaseOptions
 
 from jolly_roger.baselines import get_baselines_from_ms
 from jolly_roger.hour_angles import make_hour_angles_for_ms
 from jolly_roger.logging import logger
-from jolly_roger.options import BaseOptions
 from jolly_roger.uvws import uvw_flagger, xyz_to_uvw
 
 

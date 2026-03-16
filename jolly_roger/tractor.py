@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from collections.abc import Generator
-
-# from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -18,6 +16,7 @@ from astropy.coordinates import (
     SkyCoord,
 )
 from astropy.time import Time
+from capn_crunch import BaseOptions
 from casacore.tables import makecoldesc, table, taql
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
@@ -30,7 +29,6 @@ from jolly_roger.baselines import (
 )
 from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
 from jolly_roger.logging import logger
-from jolly_roger.options import BaseOptions
 from jolly_roger.plots import plot_baseline_comparison_data
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
