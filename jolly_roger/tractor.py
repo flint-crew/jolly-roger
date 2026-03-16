@@ -16,7 +16,7 @@ from astropy.coordinates import (
     SkyCoord,
 )
 from astropy.time import Time
-from capn_crunch import BaseOptions
+from capn_crunch import BaseOptions, add_options_to_parser, create_options_from_parser
 from casacore.tables import makecoldesc, table, taql
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
@@ -887,84 +887,9 @@ def get_parser() -> ArgumentParser:
         type=Path,
         help="The measurement set to process with the Tukey tractor",
     )
-    tukey_parser.add_argument(
-        "--outer-width",
-        type=float,
-        default=10,
-        help="The outer width of the Tukey taper in nanoseconds. If unset defaults to --tukey-width",
-    )
-    tukey_parser.add_argument(
-        "--tukey-width",
-        type=float,
-        default=None,
-        help="The Tukey width of the Tukey taper in nanoseconds",
-    )
-    tukey_parser.add_argument(
-        "--data-column",
-        type=str,
-        default="DATA",
-        help="The data column to use for the Tukey tractor",
-    )
-    tukey_parser.add_argument(
-        "--output-column",
-        type=str,
-        default="CORRECTED_DATA",
-        help="The output column to write the Tukey tractor results to",
-    )
-    tukey_parser.add_argument(
-        "--copy-column-data",
-        action="store_true",
-        help="If set, the Tukey tractor will copy the data from the data column to the output column before applying the taper",
-    )
-    tukey_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="If set, the Tukey tractor will not write any output, but will log what it would do",
-    )
-    tukey_parser.add_argument(
-        "--make-plots",
-        action="store_true",
-        help="If set, the Tukey tractor will make plots of the results. This can be slow.",
-    )
-    tukey_parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="If set, the Tukey tractor will overwrite the output column if it already exists",
-    )
-    tukey_parser.add_argument(
-        "--chunk-size",
-        type=int,
-        default=10000,
-        help="The number of rows to process in one chunk. Larger numbers require more memory but fewer interactions with I/O.",
-    )
-    tukey_parser.add_argument(
-        "--target-objects",
-        type=str,
-        nargs="+",
-        default=["Sun"],
-        help="The target object(s) to apply the delay towards. Defaults to 'Sun'. Can supply multiple targets.",
-    )
-    tukey_parser.add_argument(
-        "--ignore-nyquist-zone",
-        type=int,
-        default=2,
-        help="Do not apply the taper if the objects delays beyond this Nyquist zone",
-    )
-    tukey_parser.add_argument(
-        "--reverse-baselines",
-        action="store_true",
-        help="Reverse baseline ordering",
-    )
-    tukey_parser.add_argument(
-        "--flip-uvw-sign",
-        action="store_true",
-        help="Flips the UVW sign. May be required for LOFAR.",
-    )
-    tukey_parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=1,
-        help="The number of workers to use. If 1 all work is in main thread. Each compute process receives chunk_size of rows.",
+    tukey_parser = add_options_to_parser(
+        parser=tukey_parser,
+        options_class=TukeyTractorOptions,
     )
 
     return parser
@@ -976,23 +901,9 @@ def cli() -> None:
     args = parser.parse_args()
 
     if args.mode == "tukey":
-        tukey_tractor_options = TukeyTractorOptions(
-            outer_width_ns=args.outer_width,
-            tukey_width_ns=args.tukey_width
-            if args.tukey_width is not None
-            else args.outer_width,
-            data_column=args.data_column,
-            output_column=args.output_column,
-            copy_column_data=args.copy_column_data,
-            dry_run=args.dry_run,
-            make_plots=args.make_plots,
-            overwrite=args.overwrite,
-            chunk_size=args.chunk_size,
-            target_objects=args.target_objects,
-            ignore_nyquist_zone=args.ignore_nyquist_zone,
-            reverse_baselines=args.reverse_baselines,
-            flip_uvw_sign=args.flip_uvw_sign,
-            max_workers=args.max_workers,
+        tukey_tractor_options = create_options_from_parser(
+            parser_namespace=args,
+            options_class=TukeyTractorOptions,
         )
 
         tukey_tractor(ms_path=args.ms_path, tukey_tractor_options=tukey_tractor_options)

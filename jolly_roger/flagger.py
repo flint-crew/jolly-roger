@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from argparse import ArgumentParser
+from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from pathlib import Path
 
 import astropy.units as u
-from capn_crunch import BaseOptions
+from capn_crunch import BaseOptions, add_options_to_parser, create_options_from_parser
 
 from jolly_roger.baselines import get_baselines_from_ms
 from jolly_roger.hour_angles import make_hour_angles_for_ms
@@ -26,7 +26,7 @@ class JollyRogerFlagOptions(BaseOptions):
     dry_run: bool = False
     """Do not apply the flags"""
     flip_uvw_sign: bool = False
-    """Flip the sign of UVWs (required for LOFAR)"""
+    """Flip the sign of UVWs (may be required for LOFAR)"""
 
 
 def flag(ms_path: Path, flag_options: JollyRogerFlagOptions) -> Path:
@@ -58,38 +58,15 @@ def flag(ms_path: Path, flag_options: JollyRogerFlagOptions) -> Path:
 
 def get_parser() -> ArgumentParser:
     parser = ArgumentParser(
-        description="Flag a measurement set based on properties of the Sun"
+        description="Flag a measurement set based on properties of the Sun",
+        formatter_class=ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("ms_path", type=Path, help="The measurement set to flag")
 
-    parser.add_argument(
-        "--min-scale-deg",
-        type=float,
-        default=0.075,
-        help="The minimum scale required for flagging",
+    return add_options_to_parser(
+        parser=parser,
+        options_class=JollyRogerFlagOptions,
     )
-    parser.add_argument(
-        "--min-horizon-limit-deg",
-        type=float,
-        default=-3,
-        help="The minimum elevation of the centroid of the object (e.g. sun) for uvw flagging to be activated",
-    )
-    parser.add_argument(
-        "--max-horizon-limit-deg",
-        type=float,
-        default=-3,
-        help="The maximum elevation of the centroid of the object (e.g. sun) for uvw flagging to be activated",
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true", help="Do not apply the computed flags"
-    )
-    parser.add_argument(
-        "--flip-uvw-sign",
-        action="store_true",
-        help="Flips the UVW sign. May be required for LOFAR.",
-    )
-
-    return parser
 
 
 def cli() -> None:
@@ -97,12 +74,9 @@ def cli() -> None:
 
     args = parser.parse_args()
 
-    flag_options = JollyRogerFlagOptions(
-        min_scale_deg=args.min_scale_deg,
-        min_horizon_limit_deg=args.min_horizon_limit_deg,
-        max_horizon_limit_deg=args.max_horizon_limit_deg,
-        dry_run=args.dry_run,
-        flip_uvw_sign=args.flip_uvw_sign,
+    flag_options = create_options_from_parser(
+        parser_namespace=args,
+        options_class=JollyRogerFlagOptions,
     )
 
     flag(ms_path=args.ms_path, flag_options=flag_options)
