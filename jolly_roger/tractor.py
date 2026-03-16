@@ -670,7 +670,7 @@ def _tukey_multi_tractor(
 class TukeyTractorOptions(BaseOptions):
     """Options to describe the tukey taper to apply"""
 
-    target_objects: tuple[str] = ("sun",)
+    target_objects: tuple[str, ...] = ("sun",)
     """The target object to apply the delay towards."""
     outer_width_ns: float = 10
     """The start of the tapering in nanoseconds"""
