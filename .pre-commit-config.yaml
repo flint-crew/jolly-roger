@@ -50,6 +50,7 @@ repos:
         additional_dependencies:
           - pytest
           - pydantic
+          - capn-crunch>=1.1.0
 
   - repo: https://github.com/codespell-project/codespell
     rev: "v2.4.2"
