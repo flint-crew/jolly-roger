@@ -53,6 +53,7 @@ def delay_time_to_data(
     new_data = np.fft.ifft(
         np.fft.ifftshift(delay_time.delay_time, axes=1),
         axis=1,
+        norm="forward",
     )
     new_data_masked = np.ma.masked_array(
         new_data,
