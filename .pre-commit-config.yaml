@@ -35,7 +35,7 @@ repos:
       - id: rst-inline-touching-normal
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: "v0.15.7"
+    rev: "v0.15.8"
     hooks:
       - id: ruff-check
         args: ["--fix", "--show-fixes"]
@@ -79,7 +79,7 @@ repos:
         additional_dependencies: ["validate-pyproject-schema-store[all]"]
 
   - repo: https://github.com/python-jsonschema/check-jsonschema
-    rev: "0.37.0"
+    rev: "0.37.1"
     hooks:
       - id: check-dependabot
       - id: check-github-workflows
