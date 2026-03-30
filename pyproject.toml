@@ -34,6 +34,7 @@ dependencies = [
     "astropy>=7.2.0",
     "tqdm>=4.67.3",
     "matplotlib>=3.10.8",
+    "capn-crunch>=1.1.0",
 ]
 
 [project.urls]
@@ -53,6 +54,10 @@ test = [
 ]
 dev = [
   { include-group = "test" },
+  "mypy>=1.19.1",
+  "pre-commit>=4.5.1",
+  "prek>=0.3.5",
+  "ruff>=0.15.6",
 ]
 docs = [
   "sphinx<9",
@@ -109,6 +114,10 @@ plugins = ['pydantic.mypy']
 module = "jolly_roger.*"
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = "astropy.*"
+ignore_missing_imports = true
 
 
 [tool.ruff]
