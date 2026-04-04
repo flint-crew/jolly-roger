@@ -596,21 +596,28 @@ def _tukey_tractor(
     intersecting_taper = np.any(
         np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
     )
-    
+
     # Here we consider what to do if want to compare brightness of the object in delay
-    # space is less than that of the field. If the object is not detected we ought to 
+    # space is less than that of the field. If the object is not detected we ought to
     # set the tape to 1 so the data are not modified
     if tukey_tractor_options.compare_to_field:
+        # The delay spectrum are complex quantities, and we need to compare
+        # the flux
         abs_delay_time = np.abs(delay_time.delay_time)
-        field_sum = np.sum(
-            abs_delay_time * (1. - field_taper), axis=1
+
+        # output of the field taper is constant over rows, so
+        # some broadcasting is needed to handle the array shapes
+        _field_taper = np.squeeze(field_taper)
+        field_sum = np.sum(abs_delay_time * (1.0 - _field_taper)[None, :, None], axis=1)
+        object_sum = np.sum(abs_delay_time * (1.0 - taper), axis=1)
+        flux_mask = np.any(
+            object_sum < tukey_tractor_options.compare_to_field * field_sum, axis=1
         )
-        object_sum = np.sum(
-            abs_delay_time * (1. - taper), axis=1
-        )
-        taper[object_sum < tukey_tractor_options.compare_to_field * field_sum] = 1.0
-    
-    
+
+        # For any element where there is not enough flux set the taper so
+        # it does not modify the data
+        taper[flux_mask] = 1.0
+
     # # Should the data need to be modified in conjunction with the flags
     # taper[
     #     intersecting_taper &
@@ -716,7 +723,7 @@ class TukeyTractorOptions(BaseOptions):
     max_workers: int = 1
     """The number of compute processes to establish. Each process gets chunk_size of rows. If max_worker==1 all work is performed in main thread."""
     compare_to_field: float | None = None
-    """Compare the source brightness in delay space to the field. If the source is fainter than the field multipled by this factor, do not taper. Defaults to None."""
+    """Compare the source brightness in delay space to the field. If the source is fainter than the field multiplied by this factor, do not taper. Defaults to None."""
 
 
 @dataclass(frozen=True)

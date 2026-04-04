@@ -92,7 +92,7 @@ def plot_baseline_comparison_data(
             if not after_amp_stokesi.mask.all()
             else before_amp_stokesi
         )
-        if not norm_plot_data.all():
+        if not norm_plot_data.mask.all():
             norm = ImageNormalize(
                 norm_plot_data,
                 interval=ZScaleInterval(),
@@ -100,6 +100,7 @@ def plot_baseline_comparison_data(
             )
         else:
             logger.warning("No valid data found. No attempt to normalise data.")
+
             norm = None
 
         cmap = plt.cm.viridis
