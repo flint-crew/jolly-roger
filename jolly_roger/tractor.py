@@ -563,6 +563,7 @@ def _tukey_tractor(
     # Since we want to dampen the target object we invert the taper.
     # By default the taper dampers outside the inner region.
     taper = 1.0 - taper
+    # taper shape is [chunk_size, no_channels, no_pols]
 
     # apply the flags to ignore the tapering if the object is larger
     # than one wrap away
@@ -588,10 +589,11 @@ def _tukey_tractor(
     # that are not 1 (where 1 is 'no change').
     field_taper = tukey_taper(
         x=delay_time.delay.to("s").value,
-        outer_width=tukey_tractor_options.outer_width_ns * 1e-9 / 4,
-        tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9 / 4,
+        outer_width=tukey_tractor_options.outer_width_ns * 1e-9,
+        tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9,
         tukey_x_offset=None,
     )
+    # field_taper.shape is [no_channels, ]
     # We need to account for no broadcasting when offset is None
     # as the returned shape is different
     field_taper = field_taper[None, :, None]
@@ -606,20 +608,24 @@ def _tukey_tractor(
     if tukey_tractor_options.compare_to_field:
         # The delay spectrum are complex quantities, and we need to compare
         # the flux
-        abs_delay_time = np.abs(delay_time.delay_time)
-
+        # Make a stokes I type spectrum
+        # logger.info(f"{delay_time.delay_time.shape=}")
+        abs_delay_time = np.abs(np.sum(delay_time.delay_time[..., [0, -1]], axis=-1))
         # output of the field taper is constant over rows, so
         # some broadcasting is needed to handle the array shapes
         _field_taper = np.squeeze(field_taper)
-        field_sum = np.sum(abs_delay_time * (1.0 - _field_taper)[None, :, None], axis=1)
-        object_sum = np.sum(abs_delay_time * (1.0 - taper), axis=1)
-        flux_mask = np.any(
-            object_sum < tukey_tractor_options.compare_to_field * field_sum, axis=1
-        )
+        field_stats = np.max(abs_delay_time * (1.0 - _field_taper)[None, :], axis=1)
+        object_stats = np.max(abs_delay_time * (1.0 - taper[..., 0]), axis=1)
+
+        # Depending on size of chunk this could be expensive
+        logger.debug("np.sum(_field_taper)=%f", np.sum(_field_taper))
+        logger.debug("np.sum(taper[0, :, 0])=%f", np.sum(taper[0, :, 0]))
+
+        flux_mask = object_stats < tukey_tractor_options.compare_to_field * field_stats
 
         # For any element where there is not enough flux set the taper so
         # it does not modify the data
-        taper[flux_mask] = 1.0
+        taper[flux_mask, :] = 1.0
 
     # # Should the data need to be modified in conjunction with the flags
     # taper[
