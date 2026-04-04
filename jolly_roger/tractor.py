@@ -381,6 +381,7 @@ def make_plot_results(
     w_delays: WDelays | list[WDelays] | None = None,
     reverse_baselines: bool = False,
     outer_width_ns: float | None = None,
+    max_baselines: int = 10,
 ) -> list[Path]:
     """Create plots useful for diagnostics
 
@@ -392,10 +393,13 @@ def make_plot_results(
         w_delays (WDelays | None, optional): Description of a track through delay space. If ``None`` some plotting will be skipped. Defaults to None.
         reverse_baselines (bool, optional): Needed in some circumstances should antenna ordering in MS be different. Defaults to False.
         outer_width_ns (float | None, optional): Size, in nanoseconds, of the tukey taper. Defaults to None.
+        max_baselines (int, optional): The maximum number of baseline plots to create. Defaults to 10.
 
     Returns:
         list[Path]: Collection of paths to use
     """
+    assert max_baselines > 0, f"{max_baselines=}, but should be at least 0"
+
     output_paths = []
     output_dir = open_ms_tables.ms_path.parent / "plots"
     output_dir.mkdir(exist_ok=True, parents=True)
@@ -405,7 +409,6 @@ def make_plot_results(
 
     logger.info(f"MS contains {n_ant} antennas ({len(b_idx)} baselines)")
 
-    max_baselines = 10
     b_idx = b_idx[:max_baselines]
     logger.info(f"Plotting {len(b_idx)} baselines")
 
@@ -708,6 +711,8 @@ class TukeyTractorOptions(BaseOptions):
     """Indicates whether the data will be written back to the measurement set"""
     make_plots: bool = False
     """Create a small set of diagnostic plots. This can be slow."""
+    number_of_plots: int = 10
+    """The number of output plots to make. Defaults to 10."""
     overwrite: bool = False
     """If the output column exists it will be overwritten"""
     chunk_size: int = 1000
@@ -876,6 +881,7 @@ def tukey_tractor(
             w_delays=w_delays_list,
             reverse_baselines=tukey_tractor_options.reverse_baselines,
             outer_width_ns=tukey_tractor_options.outer_width_ns,
+            max_baselines=tukey_tractor_options.number_of_plots,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
