@@ -740,7 +740,9 @@ def _tukey_multi_tractor(
 
     # Handle all the cases
     if all(not taper_result.attached_payload for taper_result in taper_results):
-        return TaperedChunkResult(chunk_size=chunk_size, nothing_to_do=True)
+        return TaperedChunkResult(
+            chunk_size=chunk_size, nothing_to_do=True, data_chunk=data_chunk
+        )
 
     # Throw away objects that are unnecessary in subsequent stages
     taper_results = [
@@ -933,7 +935,13 @@ def tukey_tractor(
                 for taper_chunk_result in taper_data_and_flags:
                     pbar.update(taper_chunk_result.chunk_size)
 
-                    if taper_chunk_result.nothing_to_do:
+                    # TODO: This needs to have a check in place to see if adata are being written out to the
+                    # input column as well. Essentially we have to write out if the column is new and we have
+                    # not copied it up front.
+                    if (
+                        taper_chunk_result.nothing_to_do
+                        and tukey_tractor_options.copy_column_data
+                    ):
                         logger.debug("No attached data payload, skipping")
                         continue
 
@@ -942,8 +950,12 @@ def tukey_tractor(
                         f"{data_chunk=}, which should not happen"
                     )
 
-                    # Only update here is we pass the dry run check above
-                    if taper_chunk_result.update_data:
+                    # Only update here is we pass the dry run check above. If data are not copied
+                    # upfront for new column than this is necessary
+                    if (
+                        taper_chunk_result.update_data
+                        or not tukey_tractor_options.copy_column_data
+                    ):
                         open_ms_tables.main_table.putcol(
                             columnname=tukey_tractor_options.output_column,
                             value=data_chunk.masked_data,
