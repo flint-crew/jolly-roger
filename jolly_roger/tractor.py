@@ -495,12 +495,30 @@ def _get_baseline_time_indicies(
     return baseline_idx, time_idx
 
 
+@dataclass
+class TaperResult:
+    """Simple container to help ensure consistent and trackable behaviour
+    across levels
+    """
+
+    attached_payload: bool = False
+    """Indicates whether anything to do."""
+    taper: NDArray[np.floating] | None = None
+    """The taper to apply. If None nothing to do."""
+    update_flags: bool = False
+    """Indicates whether flags need to be updated"""
+    flags: NDArray[bool] | None = None
+    """The fupdated flags"""
+    delay_time: DelayTime | None = None
+    """The delay_time taper was constructede against"""
+
+
 def _tukey_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays: WDelays,
     delay_time: DelayTime | None = None,
-) -> tuple[NDArray[np.float64], NDArray[np.bool_], DelayTime]:
+) -> TaperResult:
     """Compute a tukey taper for a dataset and then apply it
     to the dataset. Here the data corresponds to a (chan, time, pol)
     array. Data is not necessarily a single baseline.
@@ -517,8 +535,21 @@ def _tukey_tractor(
         delay_time (DelayTime | None, optional): Optional pre-computed DelayTime object.
 
     Returns:
-        tuple[DataChunk,NDArray[np.bool_],DelayTime]: Scaled complex visibilities, corresponding flags, and delays.
+        TaperResult: Scaled complex visibilities, corresponding flags, and delays.
     """
+
+    baseline_idx, time_idx = _get_baseline_time_indicies(
+        w_delays=w_delays, data_chunk=data_chunk
+    )
+
+    # Delay with the elevation of the target object
+    elevation_mask = w_delays.elevation < (
+        tukey_tractor_options.elevation_cut_deg * u.deg
+    )
+    # Bail out early if there is nothing that can be done with this source
+    if np.all(elevation_mask[time_idx]):
+        return TaperResult(attached_payload=False)
+
     if delay_time is None:
         delay_time = data_to_delay_time(data=data_chunk)
 
@@ -527,9 +558,6 @@ def _tukey_tractor(
     # towards the nominated object in the if below
     tukey_x_offset: u.Quantity = np.zeros_like(delay_time.delay)
 
-    baseline_idx, time_idx = _get_baseline_time_indicies(
-        w_delays=w_delays, data_chunk=data_chunk
-    )
     original_tukey_x_offset = w_delays.w_delays[baseline_idx, time_idx]
 
     # Make a copy for later use post wrapping
@@ -577,10 +605,6 @@ def _tukey_tractor(
     )
     taper[ignore_wrapping_for, :, :] = 1.0
 
-    # Delay with the elevation of the target object
-    elevation_mask = w_delays.elevation < (
-        tukey_tractor_options.elevation_cut_deg * u.deg
-    )
     taper[elevation_mask[time_idx], :, :] = 1.0
 
     # Compute flags to ignore the objects delay crossing 0, Do
@@ -640,7 +664,13 @@ def _tukey_tractor(
         ~np.isfinite(data_chunk.masked_data.filled(np.nan)) | flags_to_return
     )
 
-    return taper, flags_to_return, delay_time
+    return TaperResult(
+        attached_payload=True,
+        taper=taper,
+        update_flags=np.any(flags_to_return),
+        flags=flags_to_return,
+        delay_time=delay_time,
+    )
 
 
 def _apply_taper(
@@ -667,27 +697,75 @@ def _apply_taper(
     return tapered_data
 
 
+@dataclass
+class TaperedChunkResult:
+    """ "Simple container for the application of tapered data and associated
+    meta-data to write back to the MS
+    """
+
+    chunk_size: int
+    """The size of the chunk this result represents"""
+    nothing_to_do: bool = False
+    """Simple flag indicating this chunk contains nothing that needs updating so can be skipped"""
+    update_data: bool = False
+    """Indicates whether the data chunk needs to be written back"""
+    data_chunk: DataChunk | None = None
+    """The data to write back"""
+    update_flags: bool = False
+    """"Indicates whether the flags need to be written back to MS"""
+    flags: NDArray[bool] | None = None
+    """The flags to write back"""
+
+
 def _tukey_multi_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays_list: list[WDelays],
-) -> tuple[DataChunk, NDArray[np.bool_]]:
-    # Initialise to None, then reuse to save on computation
+) -> TaperedChunkResult:
+    chunk_size = data_chunk.chunk_size
+
+    # Get the results for each object. Note reusing the delay_time object
+    # to avoid unnecessary recomputes. Also why the for loop and not list comphrension
     delay_time: DelayTime | None = None
-    taper_list: list[NDArray[np.float64]] = []
-    flag_list: list[NDArray[np.bool_]] = []
+    taper_results = []
     for w_delays in w_delays_list:
-        taper, flags_to_return, delay_time = _tukey_tractor(
+        taper_result = _tukey_tractor(
             data_chunk=data_chunk,
             tukey_tractor_options=tukey_tractor_options,
             w_delays=w_delays,
             delay_time=delay_time,
         )
-        taper_list.append(taper)
-        flag_list.append(flags_to_return)
+        delay_time = taper_result.delay_time
+        taper_results.append(taper_result)
 
-    combined_taper = np.min(taper_list, axis=0)
-    combined_flags = np.sum(flag_list, axis=0).astype(bool)
+    # Handle all the cases
+    if all(not taper_result.attached_payload for taper_result in taper_results):
+        return TaperedChunkResult(chunk_size=chunk_size, nothing_to_do=True)
+
+    # Throw away objects that are unnecessary in subsequent stages
+    taper_results = [
+        taper_result for taper_result in taper_results if taper_result.attached_payload
+    ]
+
+    combined_taper = np.min(
+        [
+            taper_result.taper
+            for taper_result in taper_results
+            if taper_result.taper is not None
+        ],
+        axis=0,
+    )
+
+    update_flag_list = [
+        taper_result.flags
+        for taper_result in taper_results
+        if taper_result.update_flags
+    ]
+    update_flags = len(update_flag_list) > 0
+
+    combined_flags = (
+        np.sum(update_flag_list, axis=0).astype(bool) if update_flags else None
+    )
 
     tapered_data = _apply_taper(
         data_chunk=data_chunk,
@@ -695,7 +773,14 @@ def _tukey_multi_tractor(
         taper=combined_taper,
     )
 
-    return tapered_data, combined_flags
+    return TaperedChunkResult(
+        chunk_size=chunk_size,
+        nothing_to_do=False,
+        update_data=True,
+        data_chunk=tapered_data,
+        update_flags=update_flags,
+        flags=combined_flags,
+    )
 
 
 class TukeyTractorOptions(BaseOptions):
@@ -821,7 +906,7 @@ def tukey_tractor(
                 number_of_chunks=tukey_tractor_options.max_workers,
             ):
                 start_tukey = time()
-                taper_data_and_flags: list[tuple[DataChunk, NDArray[np.bool_]]] = []
+                taper_data_and_flags: list[TaperedChunkResult] = []
                 if len(data_chunk_tuple) == 1:
                     taper_results = partial_compute_func(
                         data_chunk=data_chunk_tuple[0],
@@ -843,27 +928,46 @@ def tukey_tractor(
 
                 # Iterate over the result set in a serial manner. Note that depending on
                 # how the .map is called in max_workers>1 case this could be a generator
-                for taper_data_chunk, flags_to_apply in taper_data_and_flags:
-                    pbar.update(len(taper_data_chunk.masked_data))
+                # for taper_data_chunk, flags_to_apply in taper_data_and_flags:
+                taper_chunk_result: TaperedChunkResult
+                for taper_chunk_result in taper_data_and_flags:
+                    pbar.update(taper_chunk_result.chunk_size)
+
+                    if taper_chunk_result.nothing_to_do:
+                        logger.debug("No attached data payload, skipping")
+                        continue
+
+                    data_chunk = taper_chunk_result.data_chunk
+                    assert data_chunk is not None, (
+                        f"{data_chunk=}, which should not happen"
+                    )
 
                     # Only update here is we pass the dry run check above
-                    open_ms_tables.main_table.putcol(
-                        columnname=tukey_tractor_options.output_column,
-                        value=taper_data_chunk.masked_data,
-                        startrow=taper_data_chunk.row_start,
-                        nrow=taper_data_chunk.chunk_size,
-                    )
-                    if flags_to_apply is not None:
+                    if taper_chunk_result.update_data:
+                        open_ms_tables.main_table.putcol(
+                            columnname=tukey_tractor_options.output_column,
+                            value=data_chunk.masked_data,
+                            startrow=data_chunk.row_start,
+                            nrow=data_chunk.chunk_size,
+                        )
+                    else:
+                        logger.debug("No update of data required, skipping")
+                    if taper_chunk_result.update_flags:
                         open_ms_tables.main_table.putcol(
                             columnname="FLAG",
-                            value=flags_to_apply,
-                            startrow=taper_data_chunk.row_start,
-                            nrow=taper_data_chunk.chunk_size,
+                            value=taper_chunk_result.flags,
+                            startrow=data_chunk.row_start,
+                            nrow=data_chunk.chunk_size,
+                        )
+                    else:
+                        logger.debug(
+                            "No updating of flags required, skipping for chunk"
                         )
         stop = time()
         runtime_s = stop - start
+        assert data_chunk is not None, "data_chunk is not formed correctly"
         logger.info(
-            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(taper_data_chunk.freq_chan)} chans in {runtime_s:0.2f}s"
+            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(data_chunk.freq_chan)} chans in {runtime_s:0.2f}s"
         )
 
         logger.info(
