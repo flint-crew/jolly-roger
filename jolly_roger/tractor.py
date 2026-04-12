@@ -911,6 +911,7 @@ def tukey_tractor(
             w_delays_list=w_delays_list,
         )
 
+        logger.info(f"Incremental data flushes {write_back_required=}")
         start = time()
         total_tukey_time_s = 0.0
         with tqdm(total=len(open_ms_tables.main_table), desc="Rows") as pbar:
