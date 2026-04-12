@@ -309,7 +309,7 @@ def add_output_column(
     output_column: str = "CORRECTED_DATA",
     overwrite: bool = False,
     copy_column_data: bool = False,
-) -> None:
+) -> bool:
     """Add in the output data column where the modified data
     will be recorded
 
@@ -320,9 +320,14 @@ def add_output_column(
         overwrite (bool, optional): Whether to overwrite the new output column. Defaults to False.
         copy_column_data (bool, optional): Copy the original data over to the output column. Defaults to False.
 
+    Retuurns:
+        bool: Indicates whether output column is empty (True) or contains data (False). This is useful for determining whether to write back to the MS after applying the taper.
+
     Raises:
         ValueError: Raised if the output column already exists and overwrite is False
+
     """
+    column_is_empty: bool = True
     colnames = tab.colnames()
     if output_column in colnames:
         if not overwrite:
@@ -332,16 +337,21 @@ def add_output_column(
         logger.warning(
             f"Output column {output_column} already exists in the measurement set. Will be overwritten!"
         )
+        column_is_empty = False
     else:
         logger.info(f"Adding {output_column=}")
         desc = makecoldesc(data_column, tab.getcoldesc(data_column))
         desc["name"] = output_column
         tab.addcols(desc)
         tab.flush()
+        column_is_empty = True
 
     if copy_column_data:
         logger.info(f"Copying {data_column=} to {output_column=}")
         taql(f"UPDATE $tab SET {output_column}={data_column}")
+        column_is_empty = False
+
+    return column_is_empty
 
 
 def write_output_column(
@@ -861,9 +871,12 @@ def tukey_tractor(
 
     # acquire all the tables necessary to get unit information and data from
     open_ms_tables = get_open_ms_tables(ms_path=ms_path, read_only=False)
+    write_back_required: bool = True
 
     if not tukey_tractor_options.dry_run:
-        add_output_column(
+        # Data will need to be written back to the MS after each chunk if the
+        # output column has not data
+        write_back_required = add_output_column(
             tab=open_ms_tables.main_table,
             output_column=tukey_tractor_options.output_column,
             data_column=tukey_tractor_options.data_column,
@@ -935,13 +948,7 @@ def tukey_tractor(
                 for taper_chunk_result in taper_data_and_flags:
                     pbar.update(taper_chunk_result.chunk_size)
 
-                    # TODO: This needs to have a check in place to see if adata are being written out to the
-                    # input column as well. Essentially we have to write out if the column is new and we have
-                    # not copied it up front.
-                    if (
-                        taper_chunk_result.nothing_to_do
-                        and tukey_tractor_options.copy_column_data
-                    ):
+                    if taper_chunk_result.nothing_to_do and not write_back_required:
                         logger.debug("No attached data payload, skipping")
                         continue
 
@@ -952,10 +959,7 @@ def tukey_tractor(
 
                     # Only update here is we pass the dry run check above. If data are not copied
                     # upfront for new column than this is necessary
-                    if (
-                        taper_chunk_result.update_data
-                        or not tukey_tractor_options.copy_column_data
-                    ):
+                    if taper_chunk_result.update_data or write_back_required:
                         open_ms_tables.main_table.putcol(
                             columnname=tukey_tractor_options.output_column,
                             value=data_chunk.masked_data,
