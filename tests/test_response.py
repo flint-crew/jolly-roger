@@ -107,3 +107,6 @@ def test_nth_sidelobe() -> None:
 
     nth_sidelobe_delay = get_delay_of_nth_sidelobe(sinc_width=width, n=4)
     assert nth_sidelobe_delay == (1.5679442508710802e-08 * u.s)
+
+    nth_sidelobe_delay = get_delay_of_nth_sidelobe(sinc_width=width, n=0)
+    assert nth_sidelobe_delay == (0 * u.s)

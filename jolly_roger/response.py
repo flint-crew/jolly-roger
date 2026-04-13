@@ -44,7 +44,7 @@ def calculate_expected_sinc_width(
         (1 / bandwidth).decompose().to("s")
     )  # The width of the sinc response in seconds
 
-    logger.debug(f"Calculated expected sinc width: {sinc_width=} for {bandwidth=}")
+    logger.info(f"Calculated expected sinc width: {sinc_width=} for {bandwidth=}")
 
     return sinc_width
 
@@ -58,6 +58,8 @@ def get_delay_of_nth_sidelobe(
 
     >>> (n + 0.5) * sinc_width
 
+    For the special case of n=0, 0 seconds is returned, which is the location of the main response.
+
     Args:
         n (int): The order of the sidelobe (1 for first sidelobe, 2 for second, etc.)
         sinc_width (u.Quantity | np.floating): The width of the sinc response in seconds. If no units are attached seconds are assumed.
@@ -67,5 +69,8 @@ def get_delay_of_nth_sidelobe(
     """
     if not isinstance(sinc_width, u.Quantity):
         sinc_width *= u.s
+
+    if n == 0:
+        return 0 * u.s
 
     return sinc_width * (n + 0.5)

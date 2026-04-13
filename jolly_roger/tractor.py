@@ -30,7 +30,10 @@ from jolly_roger.baselines import (
 from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
 from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
-from jolly_roger.response import calculate_expected_sinc_width
+from jolly_roger.response import (
+    calculate_expected_sinc_width,
+    get_delay_of_nth_sidelobe,
+)
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
@@ -529,6 +532,7 @@ def _tukey_tractor(
     tukey_tractor_options: TukeyTractorOptions,
     w_delays: WDelays,
     delay_time: DelayTime | None = None,
+    sidelobe_offset: u.Quantity | None = None,
 ) -> TaperResult:
     """Compute a tukey taper for a dataset and then apply it
     to the dataset. Here the data corresponds to a (chan, time, pol)
@@ -544,6 +548,7 @@ def _tukey_tractor(
         tukey_tractor_options (TukeyTractorOptions): Options for the tukey taper
         w_delays (WDelays): The w-derived delays to apply.
         delay_time (DelayTime | None, optional): Optional pre-computed DelayTime object.
+        sidelobe_offset (u.Quantity | None, optional): If provided, the tukey taper will be offset by this amount in delay space in order to target specific sidelobes of the response. Defaults to None.
 
     Returns:
         TaperResult: Scaled complex visibilities, corresponding flags, and delays.
@@ -573,6 +578,8 @@ def _tukey_tractor(
 
     # Make a copy for later use post wrapping
     tukey_x_offset = original_tukey_x_offset.copy()
+    if isinstance(sidelobe_offset, u.Quantity):
+        tukey_x_offset += sidelobe_offset.to(u.s)
 
     # need to scale the x offset to the -pi to pi (radians) wrap
     # keeping units in seconds though
@@ -735,6 +742,8 @@ def _tukey_multi_tractor(
 ) -> TaperedChunkResult:
     chunk_size = data_chunk.chunk_size
 
+    outer_width = tukey_tractor_options.outer_width_ns * 1e-9 * u.s
+
     # Get the results for each object. Note reusing the delay_time object
     # to avoid unnecessary recomputes. Also why the for loop and not list comphrension
     delay_time: DelayTime | None = None
@@ -748,6 +757,29 @@ def _tukey_multi_tractor(
         )
         delay_time = taper_result.delay_time
         taper_results.append(taper_result)
+
+        if (
+            not taper_result.attached_payload
+            or tukey_tractor_options.nth_sidelobe_null is None
+        ):
+            continue
+
+        # If sidelobe nulling is used than the outer_width has been configured
+        # by the auto-size option
+        for sign in (1, -1):
+            for sidelobe in range(1, tukey_tractor_options.nth_sidelobe_null + 1):
+                sidelobe_offset = get_delay_of_nth_sidelobe(
+                    n=sidelobe, sinc_width=outer_width
+                )
+                taper_result = _tukey_tractor(
+                    data_chunk=data_chunk,
+                    tukey_tractor_options=tukey_tractor_options,
+                    w_delays=w_delays,
+                    delay_time=delay_time,
+                    sidelobe_offset=sidelobe_offset * sign,
+                )
+                delay_time = taper_result.delay_time
+                taper_results.append(taper_result)
 
     # Handle all the cases
     if all(not taper_result.attached_payload for taper_result in taper_results):
@@ -835,6 +867,8 @@ class TukeyTractorOptions(BaseOptions):
     """Compare the source brightness in delay space to the field. If the source is fainter than the field multiplied by this factor, do not taper. Defaults to None."""
     auto_size: bool = False
     """Automatically size the outer width of the tukey taper based on the data"""
+    nth_sidelobe_null: int | None = None
+    """Null up to the N'th sidelobe. Only used in auto_size mode. Defaults to None."""
 
 
 @dataclass(frozen=True)
@@ -898,6 +932,17 @@ def tukey_tractor(
     log_dataclass_attributes(
         to_log=tukey_tractor_options, class_name="TukeyTaperOptions"
     )
+
+    if (
+        not tukey_tractor_options.auto_size
+        and tukey_tractor_options.nth_sidelobe_null is not None
+    ):
+        logger.warning(
+            "nth_sidelobe_null is only used in auto_size mode. Since auto_size is False, nth_sidelobe_null will be ignored."
+        )
+        tukey_tractor_options = tukey_tractor_options.with_options(
+            nth_sidelobe_null=None,  # type: ignore[arg-type]
+        )
 
     # acquire all the tables necessary to get unit information and data from
     open_ms_tables = get_open_ms_tables(ms_path=ms_path, read_only=False)
