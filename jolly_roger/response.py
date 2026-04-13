@@ -54,7 +54,9 @@ def get_delay_of_nth_sidelobe(
 ) -> u.Quantity:
     """Calculate the expected delay of the N'th sidelobe of a sinc response given the width of the sinc response.
 
-    The N'th sidelobe is located at n * sinc_width. The first sidelobe is located at sinc_width, the second at 2 * sinc_width, and so on.
+    The main response is located at delay 0 seconds and ends at +/1 sinc_width. The peak position of the N'th sidelobe is:
+
+    >>> (n + 0.5) * sinc_width
 
     Args:
         n (int): The order of the sidelobe (1 for first sidelobe, 2 for second, etc.)
