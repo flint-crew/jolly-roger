@@ -873,6 +873,7 @@ def _set_auto_taper_widths(
         outer_width_ns=outer_width_ns,
         tukey_width_ns=0.0,  # type: ignore[arg-type]
     )
+    # TODO: Removing the type ignore above results in a mypy error in capn_crunch
 
 
 def tukey_tractor(
