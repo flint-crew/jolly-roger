@@ -30,6 +30,7 @@ from jolly_roger.baselines import (
 from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
 from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
+from jolly_roger.response import calculate_expected_sinc_width
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
@@ -832,6 +833,8 @@ class TukeyTractorOptions(BaseOptions):
     """The number of compute processes to establish. Each process gets chunk_size of rows. If max_worker==1 all work is performed in main thread."""
     compare_to_field: float | None = None
     """Compare the source brightness in delay space to the field. If the source is fainter than the field multiplied by this factor, do not taper. Defaults to None."""
+    auto_size: bool = False
+    """Automatically size the outer width of the tukey taper based on the data"""
 
 
 @dataclass(frozen=True)
@@ -844,6 +847,32 @@ class TukeyTractorResults:
     """The name of the column that has the modified/tapered visibilities"""
     output_plots: list[Path] | None = None
     """The output plots that were created, if any"""
+
+
+def _set_auto_taper_widths(
+    open_ms_tables: OpenMSTables, tukey_tractor_options: TukeyTractorOptions
+) -> TukeyTractorOptions:
+    """Obtain the expected size of the sinc function for the spectral information
+    contained in the MS
+
+    Args:
+        open_ms_tables (OpenMSTables): Collection of MS tables to inspected
+        tukey_tractor_options (TukeyTractorOptions): Tukey tractor options to inspect
+
+    Returns:
+        TukeyTractorOptions: Duplicate options as input, expect the specification of the taper is overwritten
+    """
+
+    freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze() * u.Hz
+
+    sinc_width = calculate_expected_sinc_width(freqs=freq_chan)
+    outer_width_ns = sinc_width.to("ns").value
+    logger.info(f"Setting automatic {outer_width_ns=}")
+
+    return tukey_tractor_options.with_options(
+        outer_width_ns=outer_width_ns,
+        tukey_width_ns=0.0,  # type: ignore[arg-type]
+    )
 
 
 def tukey_tractor(
@@ -871,8 +900,13 @@ def tukey_tractor(
 
     # acquire all the tables necessary to get unit information and data from
     open_ms_tables = get_open_ms_tables(ms_path=ms_path, read_only=False)
-    write_back_required: bool = True
 
+    if tukey_tractor_options.auto_size:
+        tukey_tractor_options = _set_auto_taper_widths(
+            open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
+        )
+
+    write_back_required: bool = True
     if not tukey_tractor_options.dry_run:
         # Data will need to be written back to the MS after each chunk if the
         # output column has not data
