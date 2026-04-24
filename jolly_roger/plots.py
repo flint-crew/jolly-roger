@@ -87,20 +87,23 @@ def plot_baseline_comparison_data(
         # We may end up flagging all the data. If the after data is completely flagged, fall back
         # to the before data. If, however, all that is also flagged (e.g. sun is too close across
         # all timesteps and hence all timesteps are flagged) we no normalise.
+        norm = None
         norm_plot_data = (
             after_amp_stokesi
             if not after_amp_stokesi.mask.all()
             else before_amp_stokesi
         )
         if not norm_plot_data.all():
-            norm = ImageNormalize(
-                norm_plot_data,
-                interval=ZScaleInterval(),
-                stretch=SqrtStretch(),
-            )
+            try:
+                norm = ImageNormalize(
+                    norm_plot_data,
+                    interval=ZScaleInterval(),
+                    stretch=SqrtStretch(),
+                )
+            except ValueError:
+                logger.warning("Automatic normalisation failed. Continuing.")
         else:
             logger.warning("No valid data found. No attempt to normalise data.")
-            norm = None
 
         cmap = plt.cm.viridis
 
