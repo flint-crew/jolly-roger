@@ -100,7 +100,7 @@ def plot_baseline_comparison_data(
                     interval=ZScaleInterval(),
                     stretch=SqrtStretch(),
                 )
-            except ValueError:
+            except (ValueError, IndexError):
                 logger.warning("Automatic normalisation failed. Continuing.")
         else:
             logger.warning("No valid data found. No attempt to normalise data.")
