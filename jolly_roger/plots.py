@@ -93,15 +93,13 @@ def plot_baseline_comparison_data(
             if not after_amp_stokesi.mask.all()
             else before_amp_stokesi
         )
-        if not norm_plot_data.all():
-            try:
-                norm = ImageNormalize(
-                    norm_plot_data,
-                    interval=ZScaleInterval(),
-                    stretch=SqrtStretch(),
-                )
-            except (ValueError, IndexError):
-                logger.warning("Automatic normalisation failed. Continuing.")
+        if not norm_plot_data.mask.all():
+            norm = ImageNormalize(
+                norm_plot_data,
+                interval=ZScaleInterval(),
+                stretch=SqrtStretch(),
+            )
+        
         else:
             logger.warning("No valid data found. No attempt to normalise data.")
 
