@@ -32,6 +32,36 @@ class OpenMSTables:
     """The field table"""
     ms_path: Path
     """The path to the MS used to open tables"""
+    phase_dir: SkyCoord
+    """The phase direction appropriate for the data"""
+
+
+def _get_phase_dir_for_field_id(ms_table: table, field_table: table) -> SkyCoord:
+    """Examine the FIELD_IDs in the main ms data table to extract the
+    appropriate phase direction from the MS field table. Useful should
+    there be multiple fields recorded in the meta-data table. A strong
+    constrain of a single FIELD_ID is enforced in the main data table.
+
+    Args:
+        ms_table (table): The opened main data table in an MS
+        field_table (table): The corresponding opened FIELD table
+
+    Raises:
+        ValueError: Raised when more than one FIELD_ID is found in the data table
+
+    Returns:
+        SkyCoord: The phase direction of the field
+    """
+
+    field_id = np.unique(ms_table.getcol("FIELD_ID"))
+    if len(field_id) > 1:
+        msg = f"Expected a single FIELD_ID, found: {field_id=}"
+        raise ValueError(msg)
+
+    field_id = field_id[0]
+
+    sky_pos = field_table.getcol("PHASE_DIR")[field_id]
+    return SkyCoord(*(sky_pos).squeeze() * u.rad)
 
 
 def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
@@ -48,6 +78,9 @@ def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
     spw_table = table(str(ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=read_only)
     field_table = table(str(ms_path / "FIELD"), ack=False, readonly=read_only)
 
+    phase_dir = _get_phase_dir_for_field_id(
+        ms_table=main_table, field_table=field_table
+    )
     # TODO: Get the data without auto-correlations e.g.
     # no_auto_main_table = taql(
     #     "select from $main_table where ANTENNA1 != ANTENNA2",
@@ -58,6 +91,7 @@ def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
         spw_table=spw_table,
         field_table=field_table,
         ms_path=ms_path,
+        phase_dir=phase_dir,
     )
 
 
@@ -135,7 +169,6 @@ def get_baseline_data(
     logger.info(f"Getting baseline {ant_1} {ant_2}")
 
     freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ")
-    phase_dir = open_ms_tables.field_table.getcol("PHASE_DIR")
 
     logger.debug(f"Processing {ant_1=} {ant_2=}")
 
@@ -147,7 +180,7 @@ def get_baseline_data(
     )
 
     freq_chan = freq_chan.squeeze() * u.Hz
-    target = SkyCoord(*(phase_dir * u.rad).squeeze())
+    phase_dir = open_ms_tables.phase_dir
     uvws_phase_center = np.swapaxes(baseline_data.uvws * u.m, 0, 1)
     time = Time(
         baseline_data.time_centroid.squeeze() * u.s,
@@ -161,7 +194,7 @@ def get_baseline_data(
         ms_path=open_ms_tables.ms_path,
         masked_data=masked_data,
         freq_chan=freq_chan,
-        phase_center=target,
+        phase_center=phase_dir,
         uvws_phase_center=cast(u.Quantity, uvws_phase_center),
         time=time,
         ant_1=ant_1,

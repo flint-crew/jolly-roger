@@ -223,10 +223,9 @@ def get_data_chunks(
         Generator[DataChunk, None, None]: Representation of the current chunk of rows
     """
     freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ")
-    phase_dir = open_ms_tables.field_table.getcol("PHASE_DIR")
+    phase_dir = open_ms_tables.phase_dir
 
     freq_chan = freq_chan.squeeze() * u.Hz
-    target = SkyCoord(*(phase_dir * u.rad).squeeze())
 
     for data_chunk_array in _get_data_chunk_from_main_table(
         ms_table=open_ms_tables.main_table,
@@ -247,7 +246,7 @@ def get_data_chunks(
         yield DataChunk(
             masked_data=masked_data,
             freq_chan=freq_chan,
-            phase_center=target,
+            phase_center=phase_dir,
             uvws_phase_center=uvws_phase_center,
             time=time,
             time_mjds=data_chunk_array.time_centroid,
@@ -752,6 +751,7 @@ def tukey_tractor(
     # Generate the delay for all baselines and time steps
     w_delays_list = get_object_delay_for_ms(
         ms_path=ms_path,
+        phase_dir=open_ms_tables.phase_dir,
         object_name=tukey_tractor_options.target_objects,
         reverse_baselines=tukey_tractor_options.reverse_baselines,
         flip_uvw_sign=tukey_tractor_options.flip_uvw_sign,
