@@ -76,13 +76,25 @@ def _process_position(
             position = SkyCoord.from_name(position)
 
     if position is None:
+        # Best effort basis here
         if ms_path is None:
             msg = f"{position=}, so default position can't be drawn. Provide a ms_path="
             raise ValueError(msg)
 
-        with table(str(ms_path / "FIELD")) as tab:
+        logger.info("Examining FIELD_ID in data table")
+        with table(str(ms_path), readonly=True, ack=False) as tab:
+            field_id = np.unique(tab.getcol("FIELD_ID"))
+            logger.info(f"Found {len(field_id)} field directions")
+            if field_id > 1:
+                msg = f"More than one field found in data table, {field_id=}"
+                raise ValueError(msg)
+
+            field_id = field_id[0]
+
+        with table(str(ms_path / "FIELD"), readonly=True, ack=False) as tab:
             logger.info(f"Getting the sky-position from PHASE_DIR of {ms_path=}")
-            field_positions = tab.getcol("PHASE_DIR")[:]
+            field_positions = tab.getcol("PHASE_DIR")[field_id]
+            logger.info(f"Extracted {field_positions=}")
             position = SkyCoord(*(field_positions * u.rad).squeeze())
 
     if isinstance(position, SkyCoord):
@@ -128,6 +140,7 @@ def make_hour_angles_for_ms(
 
     Args:
         ms_path (Path): Measurement set to usefor time and sky-position information
+        phase_dir (SkyCoord): The phase direction of the measurement set
         position (SkyCoord | str | None, optional): The sky-direction hour-angles will be calculated towards. Defaults to None.
         whole_day (bool, optional): Calaculate for a 24 hour persion starting from the first time step. Defaults to False.
 

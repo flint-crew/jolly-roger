@@ -8,6 +8,7 @@ from pathlib import Path
 import astropy.units as u
 import numpy as np
 from astropy.constants import c as speed_of_light
+from astropy.coordinates import SkyCoord
 from casacore.tables import table, taql
 from tqdm import tqdm
 
@@ -38,6 +39,7 @@ class WDelays:
 
 def get_object_delay_for_ms(
     ms_path: Path,
+    phase_dir: SkyCoord,
     object_name: str | list[str] | tuple[str, ...] = "sun",
     reverse_baselines: bool = False,
     flip_uvw_sign: bool = False,
@@ -54,7 +56,7 @@ def get_object_delay_for_ms(
     )
     hour_angles_phase = make_hour_angles_for_ms(
         ms_path=ms_path,
-        position=None,  # gets the position from phase direction
+        position=phase_dir,  # gets the position from phase direction
     )
     uvws_phase = xyz_to_uvw(
         baselines=baselines, hour_angles=hour_angles_phase, flip_uvw_sign=flip_uvw_sign
@@ -65,7 +67,7 @@ def get_object_delay_for_ms(
     for _object_name in object_name:
         hour_angles_object = make_hour_angles_for_ms(
             ms_path=ms_path,
-            position=_object_name,  # gets the position from phase direction
+            position=_object_name,  # gets the position from phase direction,
         )
         uvws_object = xyz_to_uvw(
             baselines=baselines,
