@@ -30,6 +30,10 @@ from jolly_roger.baselines import (
 from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
 from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
+from jolly_roger.response import (
+    calculate_expected_sinc_width,
+    get_delay_of_nth_sidelobe,
+)
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
@@ -308,7 +312,7 @@ def add_output_column(
     output_column: str = "CORRECTED_DATA",
     overwrite: bool = False,
     copy_column_data: bool = False,
-) -> None:
+) -> bool:
     """Add in the output data column where the modified data
     will be recorded
 
@@ -319,9 +323,14 @@ def add_output_column(
         overwrite (bool, optional): Whether to overwrite the new output column. Defaults to False.
         copy_column_data (bool, optional): Copy the original data over to the output column. Defaults to False.
 
+    Retuurns:
+        bool: Indicates whether output column is empty (True) or contains data (False). This is useful for determining whether to write back to the MS after applying the taper.
+
     Raises:
         ValueError: Raised if the output column already exists and overwrite is False
+
     """
+    column_is_empty: bool = True
     colnames = tab.colnames()
     if output_column in colnames:
         if not overwrite:
@@ -331,16 +340,21 @@ def add_output_column(
         logger.warning(
             f"Output column {output_column} already exists in the measurement set. Will be overwritten!"
         )
+        column_is_empty = False
     else:
         logger.info(f"Adding {output_column=}")
         desc = makecoldesc(data_column, tab.getcoldesc(data_column))
         desc["name"] = output_column
         tab.addcols(desc)
         tab.flush()
+        column_is_empty = True
 
     if copy_column_data:
         logger.info(f"Copying {data_column=} to {output_column=}")
         taql(f"UPDATE $tab SET {output_column}={data_column}")
+        column_is_empty = False
+
+    return column_is_empty
 
 
 def write_output_column(
@@ -380,6 +394,7 @@ def make_plot_results(
     w_delays: WDelays | list[WDelays] | None = None,
     reverse_baselines: bool = False,
     outer_width_ns: float | None = None,
+    max_baselines: int = 10,
 ) -> list[Path]:
     """Create plots useful for diagnostics
 
@@ -391,10 +406,13 @@ def make_plot_results(
         w_delays (WDelays | None, optional): Description of a track through delay space. If ``None`` some plotting will be skipped. Defaults to None.
         reverse_baselines (bool, optional): Needed in some circumstances should antenna ordering in MS be different. Defaults to False.
         outer_width_ns (float | None, optional): Size, in nanoseconds, of the tukey taper. Defaults to None.
+        max_baselines (int, optional): The maximum number of baseline plots to create. Defaults to 10.
 
     Returns:
         list[Path]: Collection of paths to use
     """
+    assert max_baselines > 0, f"{max_baselines=}, but should be at least 1"
+
     output_paths = []
     output_dir = open_ms_tables.ms_path.parent / "plots"
     output_dir.mkdir(exist_ok=True, parents=True)
@@ -404,7 +422,6 @@ def make_plot_results(
 
     logger.info(f"MS contains {n_ant} antennas ({len(b_idx)} baselines)")
 
-    max_baselines = 10
     b_idx = b_idx[:max_baselines]
     logger.info(f"Plotting {len(b_idx)} baselines")
 
@@ -491,12 +508,31 @@ def _get_baseline_time_indicies(
     return baseline_idx, time_idx
 
 
+@dataclass
+class TaperResult:
+    """Simple container to help ensure consistent and trackable behaviour
+    across levels
+    """
+
+    attached_payload: bool = False
+    """Indicates whether anything to do."""
+    taper: NDArray[np.floating] | None = None
+    """The taper to apply. If None nothing to do."""
+    update_flags: bool = False
+    """Indicates whether flags need to be updated"""
+    flags: NDArray[bool] | None = None
+    """The fupdated flags"""
+    delay_time: DelayTime | None = None
+    """The delay_time taper was constructede against"""
+
+
 def _tukey_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays: WDelays,
     delay_time: DelayTime | None = None,
-) -> tuple[NDArray[np.float64], NDArray[np.bool_], DelayTime]:
+    sidelobe_offset: u.Quantity | None = None,
+) -> TaperResult:
     """Compute a tukey taper for a dataset and then apply it
     to the dataset. Here the data corresponds to a (chan, time, pol)
     array. Data is not necessarily a single baseline.
@@ -511,10 +547,24 @@ def _tukey_tractor(
         tukey_tractor_options (TukeyTractorOptions): Options for the tukey taper
         w_delays (WDelays): The w-derived delays to apply.
         delay_time (DelayTime | None, optional): Optional pre-computed DelayTime object.
+        sidelobe_offset (u.Quantity | None, optional): If provided, the tukey taper will be offset by this amount in delay space in order to target specific sidelobes of the response. Defaults to None.
 
     Returns:
-        tuple[DataChunk,NDArray[np.bool_],DelayTime]: Scaled complex visibilities, corresponding flags, and delays.
+        TaperResult: Scaled complex visibilities, corresponding flags, and delays.
     """
+
+    baseline_idx, time_idx = _get_baseline_time_indicies(
+        w_delays=w_delays, data_chunk=data_chunk
+    )
+
+    # Delay with the elevation of the target object
+    elevation_mask = w_delays.elevation < (
+        tukey_tractor_options.elevation_cut_deg * u.deg
+    )
+    # Bail out early if there is nothing that can be done with this source
+    if np.all(elevation_mask[time_idx]):
+        return TaperResult(attached_payload=False)
+
     if delay_time is None:
         delay_time = data_to_delay_time(data=data_chunk)
 
@@ -523,13 +573,12 @@ def _tukey_tractor(
     # towards the nominated object in the if below
     tukey_x_offset: u.Quantity = np.zeros_like(delay_time.delay)
 
-    baseline_idx, time_idx = _get_baseline_time_indicies(
-        w_delays=w_delays, data_chunk=data_chunk
-    )
     original_tukey_x_offset = w_delays.w_delays[baseline_idx, time_idx]
 
     # Make a copy for later use post wrapping
     tukey_x_offset = original_tukey_x_offset.copy()
+    if isinstance(sidelobe_offset, u.Quantity):
+        tukey_x_offset += sidelobe_offset.to(u.s)
 
     # need to scale the x offset to the -pi to pi (radians) wrap
     # keeping units in seconds though
@@ -559,6 +608,7 @@ def _tukey_tractor(
     # Since we want to dampen the target object we invert the taper.
     # By default the taper dampers outside the inner region.
     taper = 1.0 - taper
+    # taper shape is [chunk_size, no_channels, no_pols]
 
     # apply the flags to ignore the tapering if the object is larger
     # than one wrap away
@@ -572,10 +622,6 @@ def _tukey_tractor(
     )
     taper[ignore_wrapping_for, :, :] = 1.0
 
-    # Delay with the elevation of the target object
-    elevation_mask = w_delays.elevation < (
-        tukey_tractor_options.elevation_cut_deg * u.deg
-    )
     taper[elevation_mask[time_idx], :, :] = 1.0
 
     # Compute flags to ignore the objects delay crossing 0, Do
@@ -584,10 +630,11 @@ def _tukey_tractor(
     # that are not 1 (where 1 is 'no change').
     field_taper = tukey_taper(
         x=delay_time.delay.to("s").value,
-        outer_width=tukey_tractor_options.outer_width_ns * 1e-9 / 4,
-        tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9 / 4,
+        outer_width=tukey_tractor_options.outer_width_ns * 1e-9,
+        tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9,
         tukey_x_offset=None,
     )
+    # field_taper.shape is [no_channels, ]
     # We need to account for no broadcasting when offset is None
     # as the returned shape is different
     field_taper = field_taper[None, :, None]
@@ -595,6 +642,32 @@ def _tukey_tractor(
     intersecting_taper = np.any(
         np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
     )
+
+    # Here we consider what to do if want to compare brightness of the object in delay
+    # space is less than that of the field. If the object is not detected we ought to
+    # set the tape to 1 so the data are not modified
+    if tukey_tractor_options.compare_to_field:
+        # The delay spectrum are complex quantities, and we need to compare
+        # the flux
+        # Make a stokes I type spectrum
+        # logger.info(f"{delay_time.delay_time.shape=}")
+        abs_delay_time = np.abs(np.sum(delay_time.delay_time[..., [0, -1]], axis=-1))
+        # output of the field taper is constant over rows, so
+        # some broadcasting is needed to handle the array shapes
+        _field_taper = np.squeeze(field_taper)
+        field_stats = np.max(abs_delay_time * (1.0 - _field_taper)[None, :], axis=1)
+        object_stats = np.max(abs_delay_time * (1.0 - taper[..., 0]), axis=1)
+
+        # Depending on size of chunk this could be expensive
+        logger.debug("np.sum(_field_taper)=%f", np.sum(_field_taper))
+        logger.debug("np.sum(taper[0, :, 0])=%f", np.sum(taper[0, :, 0]))
+
+        flux_mask = object_stats < tukey_tractor_options.compare_to_field * field_stats
+
+        # For any element where there is not enough flux set the taper so
+        # it does not modify the data
+        taper[flux_mask, :] = 1.0
+
     # # Should the data need to be modified in conjunction with the flags
     # taper[
     #     intersecting_taper &
@@ -608,7 +681,13 @@ def _tukey_tractor(
         ~np.isfinite(data_chunk.masked_data.filled(np.nan)) | flags_to_return
     )
 
-    return taper, flags_to_return, delay_time
+    return TaperResult(
+        attached_payload=True,
+        taper=taper,
+        update_flags=np.any(flags_to_return),
+        flags=flags_to_return,
+        delay_time=delay_time,
+    )
 
 
 def _apply_taper(
@@ -635,27 +714,102 @@ def _apply_taper(
     return tapered_data
 
 
+@dataclass
+class TaperedChunkResult:
+    """ "Simple container for the application of tapered data and associated
+    meta-data to write back to the MS
+    """
+
+    chunk_size: int
+    """The size of the chunk this result represents"""
+    nothing_to_do: bool = False
+    """Simple flag indicating this chunk contains nothing that needs updating so can be skipped"""
+    update_data: bool = False
+    """Indicates whether the data chunk needs to be written back"""
+    data_chunk: DataChunk | None = None
+    """The data to write back"""
+    update_flags: bool = False
+    """"Indicates whether the flags need to be written back to MS"""
+    flags: NDArray[bool] | None = None
+    """The flags to write back"""
+
+
 def _tukey_multi_tractor(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays_list: list[WDelays],
-) -> tuple[DataChunk, NDArray[np.bool_]]:
-    # Initialise to None, then reuse to save on computation
+) -> TaperedChunkResult:
+    chunk_size = data_chunk.chunk_size
+
+    outer_width = tukey_tractor_options.outer_width_ns * 1e-9 * u.s
+
+    # Get the results for each object. Note reusing the delay_time object
+    # to avoid unnecessary recomputes. Also why the for loop and not list comphrension
     delay_time: DelayTime | None = None
-    taper_list: list[NDArray[np.float64]] = []
-    flag_list: list[NDArray[np.bool_]] = []
+    taper_results = []
     for w_delays in w_delays_list:
-        taper, flags_to_return, delay_time = _tukey_tractor(
+        taper_result = _tukey_tractor(
             data_chunk=data_chunk,
             tukey_tractor_options=tukey_tractor_options,
             w_delays=w_delays,
             delay_time=delay_time,
         )
-        taper_list.append(taper)
-        flag_list.append(flags_to_return)
+        delay_time = taper_result.delay_time
+        taper_results.append(taper_result)
 
-    combined_taper = np.min(taper_list, axis=0)
-    combined_flags = np.sum(flag_list, axis=0).astype(bool)
+        if (
+            not taper_result.attached_payload
+            or tukey_tractor_options.nth_sidelobe_null is None
+        ):
+            continue
+
+        # If sidelobe nulling is used than the outer_width has been configured
+        # by the auto-size option
+        for sign in (1, -1):
+            for sidelobe in range(1, tukey_tractor_options.nth_sidelobe_null + 1):
+                sidelobe_offset = get_delay_of_nth_sidelobe(
+                    n=sidelobe, sinc_width=outer_width
+                )
+                taper_result = _tukey_tractor(
+                    data_chunk=data_chunk,
+                    tukey_tractor_options=tukey_tractor_options,
+                    w_delays=w_delays,
+                    delay_time=delay_time,
+                    sidelobe_offset=sidelobe_offset * sign,
+                )
+                delay_time = taper_result.delay_time
+                taper_results.append(taper_result)
+
+    # Handle all the cases
+    if all(not taper_result.attached_payload for taper_result in taper_results):
+        return TaperedChunkResult(
+            chunk_size=chunk_size, nothing_to_do=True, data_chunk=data_chunk
+        )
+
+    # Throw away objects that are unnecessary in subsequent stages
+    taper_results = [
+        taper_result for taper_result in taper_results if taper_result.attached_payload
+    ]
+
+    combined_taper = np.min(
+        [
+            taper_result.taper
+            for taper_result in taper_results
+            if taper_result.taper is not None
+        ],
+        axis=0,
+    )
+
+    update_flag_list = [
+        taper_result.flags
+        for taper_result in taper_results
+        if taper_result.update_flags
+    ]
+    update_flags = len(update_flag_list) > 0
+
+    combined_flags = (
+        np.sum(update_flag_list, axis=0).astype(bool) if update_flags else None
+    )
 
     tapered_data = _apply_taper(
         data_chunk=data_chunk,
@@ -663,7 +817,14 @@ def _tukey_multi_tractor(
         taper=combined_taper,
     )
 
-    return tapered_data, combined_flags
+    return TaperedChunkResult(
+        chunk_size=chunk_size,
+        nothing_to_do=False,
+        update_data=True,
+        data_chunk=tapered_data,
+        update_flags=update_flags,
+        flags=combined_flags,
+    )
 
 
 class TukeyTractorOptions(BaseOptions):
@@ -685,6 +846,8 @@ class TukeyTractorOptions(BaseOptions):
     """Indicates whether the data will be written back to the measurement set"""
     make_plots: bool = False
     """Create a small set of diagnostic plots. This can be slow."""
+    number_of_plots: int = 10
+    """The number of output plots to make. Defaults to 10."""
     overwrite: bool = False
     """If the output column exists it will be overwritten"""
     chunk_size: int = 1000
@@ -699,6 +862,12 @@ class TukeyTractorOptions(BaseOptions):
     """Flip the sign of UVWs (required for LOFAR)"""
     max_workers: int = 1
     """The number of compute processes to establish. Each process gets chunk_size of rows. If max_worker==1 all work is performed in main thread."""
+    compare_to_field: float | None = None
+    """Compare the source brightness in delay space to the field. If the source is fainter than the field multiplied by this factor, do not taper. Defaults to None."""
+    auto_size: bool = False
+    """Automatically size the outer width of the tukey taper based on the data"""
+    nth_sidelobe_null: int | None = None
+    """Null up to the N'th sidelobe. Only used in auto_size mode. Defaults to None."""
 
 
 @dataclass(frozen=True)
@@ -711,6 +880,33 @@ class TukeyTractorResults:
     """The name of the column that has the modified/tapered visibilities"""
     output_plots: list[Path] | None = None
     """The output plots that were created, if any"""
+
+
+def _set_auto_taper_widths(
+    open_ms_tables: OpenMSTables, tukey_tractor_options: TukeyTractorOptions
+) -> TukeyTractorOptions:
+    """Obtain the expected size of the sinc function for the spectral information
+    contained in the MS
+
+    Args:
+        open_ms_tables (OpenMSTables): Collection of MS tables to inspected
+        tukey_tractor_options (TukeyTractorOptions): Tukey tractor options to inspect
+
+    Returns:
+        TukeyTractorOptions: Duplicate options as input, expect the specification of the taper is overwritten
+    """
+
+    freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze() * u.Hz
+
+    sinc_width = calculate_expected_sinc_width(freqs=freq_chan)
+    outer_width_ns = sinc_width.to("ns").value
+    logger.info(f"Setting automatic {outer_width_ns=}")
+
+    return tukey_tractor_options.with_options(
+        outer_width_ns=outer_width_ns,
+        tukey_width_ns=0.0,  # type: ignore[arg-type]
+    )
+    # TODO: Removing the type ignore above results in a mypy error in capn_crunch
 
 
 def tukey_tractor(
@@ -736,11 +932,30 @@ def tukey_tractor(
         to_log=tukey_tractor_options, class_name="TukeyTaperOptions"
     )
 
+    if (
+        not tukey_tractor_options.auto_size
+        and tukey_tractor_options.nth_sidelobe_null is not None
+    ):
+        logger.warning(
+            "nth_sidelobe_null is only used in auto_size mode. Since auto_size is False, nth_sidelobe_null will be ignored."
+        )
+        tukey_tractor_options = tukey_tractor_options.with_options(
+            nth_sidelobe_null=None,  # type: ignore[arg-type]
+        )
+
     # acquire all the tables necessary to get unit information and data from
     open_ms_tables = get_open_ms_tables(ms_path=ms_path, read_only=False)
 
+    if tukey_tractor_options.auto_size:
+        tukey_tractor_options = _set_auto_taper_widths(
+            open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
+        )
+
+    write_back_required: bool = True
     if not tukey_tractor_options.dry_run:
-        add_output_column(
+        # Data will need to be written back to the MS after each chunk if the
+        # output column has not data
+        write_back_required = add_output_column(
             tab=open_ms_tables.main_table,
             output_column=tukey_tractor_options.output_column,
             data_column=tukey_tractor_options.data_column,
@@ -776,6 +991,7 @@ def tukey_tractor(
             w_delays_list=w_delays_list,
         )
 
+        logger.info(f"Incremental data flushes {write_back_required=}")
         start = time()
         total_tukey_time_s = 0.0
         with tqdm(total=len(open_ms_tables.main_table), desc="Rows") as pbar:
@@ -786,7 +1002,7 @@ def tukey_tractor(
                 number_of_chunks=tukey_tractor_options.max_workers,
             ):
                 start_tukey = time()
-                taper_data_and_flags: list[tuple[DataChunk, NDArray[np.bool_]]] = []
+                taper_data_and_flags: list[TaperedChunkResult] = []
                 if len(data_chunk_tuple) == 1:
                     taper_results = partial_compute_func(
                         data_chunk=data_chunk_tuple[0],
@@ -808,27 +1024,47 @@ def tukey_tractor(
 
                 # Iterate over the result set in a serial manner. Note that depending on
                 # how the .map is called in max_workers>1 case this could be a generator
-                for taper_data_chunk, flags_to_apply in taper_data_and_flags:
-                    pbar.update(len(taper_data_chunk.masked_data))
+                # for taper_data_chunk, flags_to_apply in taper_data_and_flags:
+                taper_chunk_result: TaperedChunkResult
+                for taper_chunk_result in taper_data_and_flags:
+                    pbar.update(taper_chunk_result.chunk_size)
 
-                    # Only update here is we pass the dry run check above
-                    open_ms_tables.main_table.putcol(
-                        columnname=tukey_tractor_options.output_column,
-                        value=taper_data_chunk.masked_data,
-                        startrow=taper_data_chunk.row_start,
-                        nrow=taper_data_chunk.chunk_size,
+                    if taper_chunk_result.nothing_to_do and not write_back_required:
+                        logger.debug("No attached data payload, skipping")
+                        continue
+
+                    data_chunk = taper_chunk_result.data_chunk
+                    assert data_chunk is not None, (
+                        f"{data_chunk=}, which should not happen"
                     )
-                    if flags_to_apply is not None:
+
+                    # Only update here is we pass the dry run check above. If data are not copied
+                    # upfront for new column than this is necessary
+                    if taper_chunk_result.update_data or write_back_required:
+                        open_ms_tables.main_table.putcol(
+                            columnname=tukey_tractor_options.output_column,
+                            value=data_chunk.masked_data,
+                            startrow=data_chunk.row_start,
+                            nrow=data_chunk.chunk_size,
+                        )
+                    else:
+                        logger.debug("No update of data required, skipping")
+                    if taper_chunk_result.update_flags:
                         open_ms_tables.main_table.putcol(
                             columnname="FLAG",
-                            value=flags_to_apply,
-                            startrow=taper_data_chunk.row_start,
-                            nrow=taper_data_chunk.chunk_size,
+                            value=taper_chunk_result.flags,
+                            startrow=data_chunk.row_start,
+                            nrow=data_chunk.chunk_size,
+                        )
+                    else:
+                        logger.debug(
+                            "No updating of flags required, skipping for chunk"
                         )
         stop = time()
         runtime_s = stop - start
+        assert data_chunk is not None, "data_chunk is not formed correctly"
         logger.info(
-            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(taper_data_chunk.freq_chan)} chans in {runtime_s:0.2f}s"
+            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(data_chunk.freq_chan)} chans in {runtime_s:0.2f}s"
         )
 
         logger.info(
@@ -852,6 +1088,7 @@ def tukey_tractor(
             w_delays=w_delays_list,
             reverse_baselines=tukey_tractor_options.reverse_baselines,
             outer_width_ns=tukey_tractor_options.outer_width_ns,
+            max_baselines=tukey_tractor_options.number_of_plots,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
