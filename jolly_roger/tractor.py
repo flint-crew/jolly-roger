@@ -411,7 +411,7 @@ def make_plot_results(
     Returns:
         list[Path]: Collection of paths to use
     """
-    assert max_baselines > 0, f"{max_baselines=}, but should be at least 0"
+    assert max_baselines > 0, f"{max_baselines=}, but should be at least 1"
 
     output_paths = []
     output_dir = open_ms_tables.ms_path.parent / "plots"
