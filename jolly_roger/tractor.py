@@ -868,7 +868,8 @@ class TukeyTractorOptions(BaseOptions):
     """Automatically size the outer width of the tukey taper based on the data"""
     nth_sidelobe_null: int | None = None
     """Null up to the N'th sidelobe. Only used in auto_size mode. Defaults to None."""
-
+    reweight: bool = False
+    """Attempt to identify a WEIGHT-like column and rescale to indicate modified data. Defaults to False."""
 
 @dataclass(frozen=True)
 class TukeyTractorResults:
