@@ -129,6 +129,8 @@ class DataChunkArray:
     """The starting row of the portion of data loaded"""
     chunk_size: int
     """The size of the data chunk loaded (may be larger if this is the last record)"""
+    weights: NDArray[np.floating] | None = None
+    """The weights associated with the data. Only used if reweighting is activated. Defaults to None."""
 
 
 @dataclass
@@ -157,22 +159,31 @@ class DataChunk:
     """Starting row index of the data"""
     chunk_size: int
     """Size of the chunked portion of the data"""
+    weights: NDArray[np.floating] | None = None
+    """The weights associated with the data. Only used if reweighting is activated. Defaults to None."""
 
 
 def _get_data_chunk_from_main_table(
     ms_table: table,
     chunk_size: int,
     data_column: str,
+    weight_column: str | None = None,
 ) -> Generator[DataChunkArray, None, None]:
     """Return an appropriately size data chunk from the main
     table of a measurement set. These data are ase they are
     in the measurement set without any additional scaling
     or unit adjustments.
 
+    Weights are only returned if the ``weight_column`` is
+    set. No distinction is made between a WEIGHT float or
+    a WEIGHT spectrum type data. No attempt to validate
+    existence of ``weight_column`` is made.
+
     Args:
         ms_table (table): The opened main table of a measurement set
         chunk_size (int): The size of the data to chunk and return
         data_column (str): The data column to be returned
+        weight_column (str | None, optional): The weight column to be returned. Defaults to None.
 
     Yields:
         Generator[DataChunkArray, None, None]: A segment of rows and columns
@@ -193,6 +204,12 @@ def _get_data_chunk_from_main_table(
         ant_1 = ms_table.getcol("ANTENNA1", startrow=lower_row, nrow=chunk_size)
         ant_2 = ms_table.getcol("ANTENNA2", startrow=lower_row, nrow=chunk_size)
 
+        weights = None
+        if weight_column:
+            weights = ms_table.getcol(
+                weight_column, startrow=lower_row, nrow=chunk_size
+            )
+
         yield DataChunkArray(
             data=data,
             flags=flags,
@@ -202,6 +219,7 @@ def _get_data_chunk_from_main_table(
             ant_2=ant_2,
             row_start=lower_row,
             chunk_size=chunk_size,
+            weights=weights,
         )
 
         lower_row += chunk_size
