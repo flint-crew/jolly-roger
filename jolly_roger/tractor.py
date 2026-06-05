@@ -870,6 +870,9 @@ class TukeyTractorOptions(BaseOptions):
     """Null up to the N'th sidelobe. Only used in auto_size mode. Defaults to None."""
     reweight: bool = False
     """Attempt to identify a WEIGHT-like column and rescale to indicate modified data. Defaults to False."""
+    weight_column: str | None = None
+    """The name of the WEIGHT-like column. If None when rewrite is True the WEIGHT-like column will be searched for. Defaults to None."""
+
 
 @dataclass(frozen=True)
 class TukeyTractorResults:
