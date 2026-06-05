@@ -74,6 +74,7 @@ def set_weight_column(ms_path: Path, weight_column: str | None = None) -> str | 
             msg = f"Specified {weight_column=} not found in {columns=}"
             raise ValueError(msg)
 
+        logger.info(f"Using specified {weight_column=} as WEIGHT-like column")
         return weight_column
 
     return find_weight_column(ms_path=ms_path)

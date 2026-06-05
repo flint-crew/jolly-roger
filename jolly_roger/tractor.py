@@ -36,6 +36,7 @@ from jolly_roger.response import (
 )
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
+from jolly_roger.weights import set_weight_column
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
 
 
@@ -167,7 +168,7 @@ def _get_data_chunk_from_main_table(
     ms_table: table,
     chunk_size: int,
     data_column: str,
-    weight_column: str | None = None,
+    weights_column: str | None = None,
 ) -> Generator[DataChunkArray, None, None]:
     """Return an appropriately size data chunk from the main
     table of a measurement set. These data are ase they are
@@ -205,9 +206,9 @@ def _get_data_chunk_from_main_table(
         ant_2 = ms_table.getcol("ANTENNA2", startrow=lower_row, nrow=chunk_size)
 
         weights = None
-        if weight_column:
+        if weights_column:
             weights = ms_table.getcol(
-                weight_column, startrow=lower_row, nrow=chunk_size
+                weights_column, startrow=lower_row, nrow=chunk_size
             )
 
         yield DataChunkArray(
@@ -229,6 +230,7 @@ def get_data_chunks(
     open_ms_tables: OpenMSTables,
     chunk_size: int,
     data_column: str,
+    weights_column: str | None = None,
 ) -> Generator[DataChunk, None, None]:
     """Yield a collection of rows with appropriate units
     attached to the quantities. These quantities are not
@@ -240,6 +242,7 @@ def get_data_chunks(
         open_ms_tables (OpenMSTables): References to open tables from the measurement set
         chunk_size (int): The number of rows to return at a time
         data_column (str): The data column that would be modified
+        weights_column (str | None, optional): The weights column that would be modified if specified. Defaults to None.
 
     Yields:
         Generator[DataChunk, None, None]: Representation of the current chunk of rows
@@ -253,6 +256,7 @@ def get_data_chunks(
         ms_table=open_ms_tables.main_table,
         chunk_size=chunk_size,
         data_column=data_column,
+        weights_column=weights_column,
     ):
         # Transform the native arrays but attach astropy quantities
         uvws_phase_center = data_chunk_array.uvws * u.m
@@ -276,6 +280,7 @@ def get_data_chunks(
             ant_2=data_chunk_array.ant_2,
             row_start=data_chunk_array.row_start,
             chunk_size=data_chunk_array.chunk_size,
+            weights=data_chunk_array.weights,
         )
 
 
@@ -284,6 +289,7 @@ def get_multiple_data_chunks(
     chunk_size: int,
     data_column: str,
     number_of_chunks: int = 1,
+    weights_column: str | None = None,
 ) -> Generator[tuple[DataChunk, ...], None, None]:
     """
     Wrapper around ``get_data_chunks`` to yield a list of
@@ -300,6 +306,7 @@ def get_multiple_data_chunks(
         chunk_size (int): The number of rows to return at a time
         data_column (str): The data column that would be modified
         number_of_chunks (int, optional): The number of chunks to return on each yield. Defaults to 1.
+        weights_column (str | None, optional): The weights column that would be modified if specified. Defaults to None.
 
     Yields:
         Generator[tuple[DataChunk, ...], None, None]: Representation of the current chunk of rows
@@ -310,7 +317,10 @@ def get_multiple_data_chunks(
     # We are using the existing generator. Termination should be
     # straightforward.
     for data_chunk in get_data_chunks(
-        open_ms_tables=open_ms_tables, chunk_size=chunk_size, data_column=data_column
+        open_ms_tables=open_ms_tables,
+        chunk_size=chunk_size,
+        data_column=data_column,
+        weights_column=weights_column,
     ):
         base_chunks.append(data_chunk)
 
@@ -973,6 +983,10 @@ def tukey_tractor(
             open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
         )
 
+    weights_column = set_weight_column(
+        ms_path=ms_path, weight_column=tukey_tractor_options.weight_column
+    )
+
     write_back_required: bool = True
     if not tukey_tractor_options.dry_run:
         # Data will need to be written back to the MS after each chunk if the
@@ -1022,6 +1036,7 @@ def tukey_tractor(
                 chunk_size=tukey_tractor_options.chunk_size,
                 data_column=tukey_tractor_options.data_column,
                 number_of_chunks=tukey_tractor_options.max_workers,
+                weights_column=weights_column,
             ):
                 start_tukey = time()
                 taper_data_and_flags: list[TaperedChunkResult] = []
