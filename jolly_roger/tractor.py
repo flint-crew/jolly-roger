@@ -36,7 +36,7 @@ from jolly_roger.response import (
 )
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
-from jolly_roger.weights import set_weight_column
+from jolly_roger.weights import select_weight_column
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
 
 
@@ -983,7 +983,7 @@ def tukey_tractor(
             open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
         )
 
-    weights_column = set_weight_column(
+    weights_column = select_weight_column(
         ms_path=ms_path, weight_column=tukey_tractor_options.weight_column
     )
 
