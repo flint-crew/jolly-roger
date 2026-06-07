@@ -207,6 +207,7 @@ def _get_data_chunk_from_main_table(
 
         weights = None
         if weights_column:
+            logger.info(f"Getting {weights_column=} {lower_row} {chunk_size}")
             weights = ms_table.getcol(
                 weights_column, startrow=lower_row, nrow=chunk_size
             )
