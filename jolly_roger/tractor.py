@@ -36,7 +36,7 @@ from jolly_roger.response import (
 )
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
-from jolly_roger.weights import select_weight_column
+from jolly_roger.weights import scale_weights, select_weight_column
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
 
 
@@ -760,6 +760,10 @@ class TaperedChunkResult:
     """"Indicates whether the flags need to be written back to MS"""
     flags: NDArray[bool] | None = None
     """The flags to write back"""
+    update_weights: bool = False
+    """Indicates whether data should be written back to the MS"""
+    weights: NDArray[np.floating] | None = None
+    """The scaled weights that should be written back to the MS. If None nothing to write back."""
 
 
 def _tukey_multi_tractor(
@@ -808,7 +812,8 @@ def _tukey_multi_tractor(
                 delay_time = taper_result.delay_time
                 taper_results.append(taper_result)
 
-    # Handle all the cases
+    # Handle all the cases. If all data chunks showed nothing to do we can
+    # return early and provide the original data back to the caller.
     if all(not taper_result.attached_payload for taper_result in taper_results):
         return TaperedChunkResult(
             chunk_size=chunk_size, nothing_to_do=True, data_chunk=data_chunk
@@ -845,6 +850,19 @@ def _tukey_multi_tractor(
         taper=combined_taper,
     )
 
+    # Should weights be provided to the DataChunk than it is assumed that they
+    # need to be scaleded based on the final taper. The driving functions that
+    # call into this multi tractor are responsible to writing this back out to
+    # the appropriate coluumn
+    scaled_weights: None | NDArray[np.floating] = None
+    update_weights = False
+    if data_chunk.weights is not None:
+        scaled_weights = scale_weights(taper=combined_taper, weights=data_chunk.weights)
+
+        # Should there actually be weights attached than at this point
+        # in the code path there is a taper that has been applied.
+        update_weights = True
+
     return TaperedChunkResult(
         chunk_size=chunk_size,
         nothing_to_do=False,
@@ -852,6 +870,8 @@ def _tukey_multi_tractor(
         data_chunk=tapered_data,
         update_flags=update_flags,
         flags=combined_flags,
+        update_weights=update_weights,
+        weights=scaled_weights,
     )
 
 
@@ -1097,6 +1117,15 @@ def tukey_tractor(
                         logger.debug(
                             "No updating of flags required, skipping for chunk"
                         )
+                    if taper_chunk_result.update_weights:
+                        open_ms_tables.main_table.putcol(
+                            columnname=weights_column,
+                            value=taper_chunk_result.weights,
+                            startrow=data_chunk.row_start,
+                            nrow=data_chunk.chunk_size,
+                        )
+                    else:
+                        logger.debug("No updating of weights")
         stop = time()
         runtime_s = stop - start
         assert data_chunk is not None, "data_chunk is not formed correctly"
