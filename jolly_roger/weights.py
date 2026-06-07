@@ -97,6 +97,8 @@ def calculate_scaling_from_taper(taper: NDArray[np.floating]) -> NDArray[np.floa
     Returns:
         NDArray[np.floating]: The scaling terms to adjust weights by. The more data that is nulled the higher the returned value becomes
     """
+    # The aper can be (rows, channels, pols), where pols is really length 1 but is reshaped
+    # accordingly to t the recorded MS data column polarisations
     taper = np.squeeze(taper)
 
     # Basic checks around the taper
