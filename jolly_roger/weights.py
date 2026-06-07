@@ -97,6 +97,8 @@ def calculate_scaling_from_taper(taper: NDArray[np.floating]) -> NDArray[np.floa
     Returns:
         NDArray[np.floating]: The scaling terms to adjust weights by. The more data that is nulled the higher the returned value becomes
     """
+    taper = np.squezze(taper)
+
     # Basic checks around the taper
     assert taper.ndim == 2, f"Expectede a 2D array, got {taper.shape=}"
     assert np.min(taper) >= 0.0, "Taper appears to be less than zero"
