@@ -19,7 +19,7 @@ def _get_column_names(ms_path: Path) -> Sequence[str]:
     """A dumb helper to avoid duplication"""
     assert ms_path.exists(), f"MS file {ms_path} does not exist"
 
-    with table(str(ms_path)) as tab:
+    with table(str(ms_path), ack=False, readonly=True) as tab:
         columns: Sequence[str] = tab.colnames()
 
     return columns
