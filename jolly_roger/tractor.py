@@ -1118,6 +1118,7 @@ def tukey_tractor(
                             "No updating of flags required, skipping for chunk"
                         )
                     if taper_chunk_result.update_weights:
+                        logger.info("Updating weights")
                         open_ms_tables.main_table.putcol(
                             columnname=weights_column,
                             value=taper_chunk_result.weights,
