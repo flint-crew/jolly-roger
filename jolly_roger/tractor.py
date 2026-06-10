@@ -207,7 +207,7 @@ def _get_data_chunk_from_main_table(
 
         weights = None
         if weights_column:
-            logger.info(f"Getting {weights_column=} {lower_row} {chunk_size}")
+            logger.debug(f"Getting {weights_column=} {lower_row} {chunk_size}")
             weights = ms_table.getcol(
                 weights_column, startrow=lower_row, nrow=chunk_size
             )
@@ -1119,7 +1119,7 @@ def tukey_tractor(
                             "No updating of flags required, skipping for chunk"
                         )
                     if taper_chunk_result.update_weights:
-                        logger.info("Updating weights")
+                        logger.debug("Updating weights")
                         open_ms_tables.main_table.putcol(
                             columnname=weights_column,
                             value=taper_chunk_result.weights,
