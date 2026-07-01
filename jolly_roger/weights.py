@@ -25,36 +25,39 @@ def _get_column_names(ms_path: Path) -> Sequence[str]:
     return columns
 
 
-def find_weight_column(ms_path: Path) -> str | None:
+def find_weight_columns(ms_path: Path) -> Sequence[str] | None:
     """Examine the column names in the MS in order to find
-    a WEIGHT-like column. The column names are drawn from
+    WEIGHT-like columns. The column names are drawn from
     a list of recognised column names that may contain WEUGHTS.
 
     Args:
         ms_path (Path): Path to the measurement set
 
     Returns:
-        str | None: The name of the WEIGHT-like column. If not found None is returned.
+        Sequence[str] | None: The names of the WEIGHT-like column. If not found None is returned.
     """
     logger.info("Searching for WEIGHT-like column")
 
-    weight_column: str | None = None
     columns = _get_column_names(ms_path)
+    weight_columns = [col for col in KNOWN_WEIGHTS if col in columns]
 
-    for col in KNOWN_WEIGHTS:
-        if col in columns:
-            weight_column = col
-            break
+    if len(columns) == 0:
+        logger.info("No WEIGHT-like columns were found.")
+        return None
 
-    logger.info(f"Found WEIGHT-like column {weight_column=}")
-    return weight_column
+    logger.info(f"Found WEIGHT-like column {weight_columns=}")
+    return weight_columns
 
 
-def select_weight_column(ms_path: Path, weight_column: str | None = None) -> str | None:
-    """Establish a WEIGHT-like column from provided options. If ``weight_column``
-    is set then verify it exists in the pfovided measurement set. If it is not
-    then the columns in the measurement set are examined for a recognised
-    WEIGHT-like column.
+def select_weight_column(
+    ms_path: Path, weight_column: str | None = None
+) -> Sequence[str] | None:
+    """Establishes the set ofWEIGHT-like column from provided options.
+
+    Known WEIGHT-like column names will be examined to see if they are present in
+    the MS. Multiple columns may be returned in more than one are found. Otherwise
+    a single ``weight_column`` may be provided, and if found to be valid, will
+    overwrite the recognised columns.
 
     Args:
         ms_path (Path): The measurement set to consider
@@ -64,7 +67,7 @@ def select_weight_column(ms_path: Path, weight_column: str | None = None) -> str
         ValueError: Raised if ``weight_column`` is provided but does not exist
 
     Returns:
-        str | None: Name of the WEIGHT-like column if found or set. If not found None is returned.
+        Sequence[str] | None: Names of the WEIGHT-like column if found or set. If not found None is returned.
     """
 
     if weight_column:
@@ -77,9 +80,9 @@ def select_weight_column(ms_path: Path, weight_column: str | None = None) -> str
             raise ValueError(msg)
 
         logger.info(f"Using specified {weight_column=} as WEIGHT-like column")
-        return weight_column
+        return [weight_column]
 
-    return find_weight_column(ms_path=ms_path)
+    return find_weight_columns(ms_path=ms_path)
 
 
 def calculate_scaling_from_taper(taper: NDArray[np.floating]) -> NDArray[np.floating]:
@@ -117,6 +120,7 @@ def calculate_scaling_from_taper(taper: NDArray[np.floating]) -> NDArray[np.floa
 def scale_weights(
     taper: NDArray[np.floating],
     weights: NDArray[np.floating],
+    taper_is_scale: bool = False,
 ) -> NDArray[np.floating]:
     """Accept the taper array and associated set of weights, and appropriately
     scale the weights based on the amount of data nulled. The weights here could
@@ -134,6 +138,7 @@ def scale_weights(
     Args:
         taper (NDArray[np.floating]): The two-dimensional taper that will be applied to data
         weights (NDArray[np.floating]): The extract weights column
+        taper_is_scale (bool, optional): Indicates whether the input ``taper`` has already been t ransformed to a scaling term. Defaults to False.
 
     Raises:
         ValueError: Raised when the supplied weight have a rank that is neither 1 or 2
@@ -141,8 +146,8 @@ def scale_weights(
     Returns:
         NDArray[np.floating]: Scaled weights that should be inserted to the measuremenset set
     """
-
-    scale = calculate_scaling_from_taper(taper=taper)
+    # The scale could be already derieved should multi-ple columns need scaling
+    scale = calculate_scaling_from_taper(taper=taper) if not taper_is_scale else taper
 
     scaled_weights: None | NDArray[np.floating] = None
     # Appropriately handle potential broadcasting issues, e.g. WEIGHT vs WEIGHT_SPECTRUM
@@ -158,3 +163,40 @@ def scale_weights(
 
     assert scaled_weights is not None, "Scaled weights appears unset"
     return scaled_weights
+
+
+def scale_multiple_weights(
+    taper: NDArray[np.floating],
+    weights: dict[str, NDArray[np.floating]],
+) -> dict[str, NDArray[np.floating]]:
+    """Accept the taper array and associated set of weights, and appropriately
+    scale the weights based on the amount of data nulled. The weights here could
+    take a couple of forms:
+
+    - WEIGHT: a single value for a collection of rows
+    - WEIGHT_SPECTRUM: A spectrum of weight values (e.g. channel weights) across a collection of rows
+
+    The taper is assumed to be the Notch filter, with a smooth roll off, and in the 0 to 1 range. Where
+    data is nulled (closer to 0) the weights will increase. Since the taper is intended to be applied
+    in delay space and then subsequently inverted to visibilities, the weights are simply scaled in a
+    pure multiplicative sense. In either the WEIGHT or WEIGHT_SPECTRUM scale a single scalar is used to
+    scale a single row.
+
+    Args:
+        taper (NDArray[np.floating]): The two-dimensional taper that will be applied to data
+        weights (dict[str, NDArray[np.floating]]): The extract weights column. For each key (representing the column name) scakle the mapped data (the weights)
+
+    Returns:
+        dict[str, NDArray[np.floating]]: Scaled weights that should be inserted to the measuremenset set. The output shape will represent the scaled input ``weights``
+    """
+
+    assert isinstance(weights, dict), (
+        f"Expected weights to be a dictionary, got {type(weights)}"
+    )
+
+    scale = calculate_scaling_from_taper(taper=taper)
+
+    return {
+        k: scale_weights(taper=scale, weights=weights[k], taper_is_scale=True)
+        for k in weights
+    }
