@@ -8,7 +8,7 @@ from functools import partial
 from itertools import combinations
 from pathlib import Path
 from time import time
-from typing import cast
+from typing import Any, cast
 
 import astropy.units as u
 import numpy as np
@@ -41,10 +41,10 @@ from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
 
 
 def tukey_taper(
-    x: np.typing.NDArray[np.floating],
+    x: np.typing.NDArray[np.floating[Any]],
     outer_width: float,
     tukey_width: float,
-    tukey_x_offset: NDArray[np.floating] | None = None,
+    tukey_x_offset: NDArray[np.floating[Any]] | None = None,
 ) -> np.ndarray:
     """Describes a tukey window function spanning a -x.min() to x.max() range. In the base case
     the tukey window is centred on 0.0. The ``outer_width`` defines where the window is
@@ -60,10 +60,10 @@ def tukey_taper(
     Between these two bounds the window follows a `1 - cos` type shape.
 
     Args:
-        x (np.typing.NDArray[np.floating]): The intervals to evaluate over. Internally these are concerted to the +/- pi domain
+        x (np.typing.NDArray[np.floating[Any]]): The intervals to evaluate over. Internally these are concerted to the +/- pi domain
         outer_width (float, optional): The +/- boundary beyond which is 0.0.
         tukey_width (float, optional): Describes the width that the transition from 1.0 to 0.0 occurs.
-        tukey_x_offset (NDArray[np.floating] | None, optional): Sets a new zero point (center of window). Defaults to None.
+        tukey_x_offset (NDArray[np.floating[Any]] | None, optional): Sets a new zero point (center of window). Defaults to None.
         notch (bool, optional): Will the taper be used for a notch filter? Defaults to True.
 
     Returns:
@@ -118,9 +118,9 @@ class DataChunkArray:
     """The data from the nominated data column loaded"""
     flags: NDArray[np.bool_]
     """Flags that correspond to the loaded data"""
-    uvws: NDArray[np.floating]
+    uvws: NDArray[np.floating[Any]]
     """The uvw coordinates for each loaded data record"""
-    time_centroid: NDArray[np.floating]
+    time_centroid: NDArray[np.floating[Any]]
     """The time of each data record"""
     ant_1: NDArray[np.int64]
     """Antenna 1 that formed the baseline"""
@@ -130,7 +130,7 @@ class DataChunkArray:
     """The starting row of the portion of data loaded"""
     chunk_size: int
     """The size of the data chunk loaded (may be larger if this is the last record)"""
-    weights: dict[str, NDArray[np.floating]] | None = None
+    weights: dict[str, NDArray[np.floating[Any]]] | None = None
     """The weights associated with the data. Key is the column name and the mapped value are the corresponding weights. Only used if reweighting is activated. Defaults to None."""
 
 
@@ -150,7 +150,7 @@ class DataChunk:
     """The UVW coordinates of the phase center of the baseline."""
     time: Time
     """The time of the observations."""
-    time_mjds: NDArray[np.floating]
+    time_mjds: NDArray[np.floating[Any]]
     """The raw time extracted from the measurement set in MJDs"""
     ant_1: NDArray[np.int64]
     """The first antenna in the baseline."""
@@ -160,7 +160,7 @@ class DataChunk:
     """Starting row index of the data"""
     chunk_size: int
     """Size of the chunked portion of the data"""
-    weights: dict[str, NDArray[np.floating]] | None = None
+    weights: dict[str, NDArray[np.floating[Any]]] | None = None
     """The weights associated with the data. Key is the column name and the mapped value are the corresponding weights. Only used if reweighting is activated. Defaults to None."""
 
 
@@ -550,7 +550,7 @@ class TaperResult:
 
     attached_payload: bool = False
     """Indicates whether anything to do."""
-    taper: NDArray[np.floating] | None = None
+    taper: NDArray[np.floating[Any]] | None = None
     """The taper to apply. If None nothing to do."""
     update_flags: bool = False
     """Indicates whether flags need to be updated"""
@@ -768,7 +768,7 @@ class TaperedChunkResult:
     """The flags to write back"""
     update_weights: bool = False
     """Indicates whether data should be written back to the MS"""
-    weights: dict[str, NDArray[np.floating]] | None = None
+    weights: dict[str, NDArray[np.floating[Any]]] | None = None
     """The scaled weights that should be written back to the MS. The key is the column name and the mapped values are the corresponding scaled weights. If None nothing to write back."""
 
 
@@ -860,7 +860,7 @@ def _tukey_multi_tractor(
     # need to be scaleded based on the final taper. The driving functions that
     # call into this multi tractor are responsible to writing this back out to
     # the appropriate coluumn
-    scaled_weights: None | dict[str, NDArray[np.floating]] = None
+    scaled_weights: None | dict[str, NDArray[np.floating[Any]]] = None
     update_weights = False
     if data_chunk.weights is not None:
         scaled_weights = scale_multiple_weights(

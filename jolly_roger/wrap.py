@@ -5,23 +5,24 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
 
 def symmetric_domain_wrap(
-    values: NDArray[np.floating], upper_limit: float
-) -> NDArray[np.floating]:
+    values: NDArray[np.floating[Any]], upper_limit: float
+) -> NDArray[np.floating[Any]]:
     """Place a set of values into a cyclic domain that is
     symmetric around zero.
 
     Args:
-        values (NDArray[np.floating]): Values that need to be mapped into the cyclic domain
+        values (NDArray[np.floating[Any]]): Values that need to be mapped into the cyclic domain
         upper_limit (float): The upper bound of the symmetric cyclic domain
 
     Returns:
-        NDArray[np.floating]: Values that have been mapped to the -upper_limit to upper_limit domain
+        NDArray[np.floating[Any]]: Values that have been mapped to the -upper_limit to upper_limit domain
     """
     # Calculate an appropriate domain mapping
     # The natural domain is going to be mapped
@@ -37,13 +38,13 @@ def symmetric_domain_wrap(
 
 
 def calculate_nyquist_zone(
-    values: NDArray[np.floating], upper_limit: float
+    values: NDArray[np.floating[Any]], upper_limit: float
 ) -> NDArray[np.int_]:
     """Return the nyquist zone a value is in for a symmetric
     set of bounds around zero
 
     Args:
-        values (NDArray[np.floating]): The values to calculate the zone for
+        values (NDArray[np.floating[Any]]): The values to calculate the zone for
         upper_limit (float): The upper bound to the symmetric domain around zero
 
     Returns:
@@ -56,7 +57,7 @@ def calculate_nyquist_zone(
 
 @dataclass
 class SymmetricWrap:
-    values: NDArray[np.floating]
+    values: NDArray[np.floating[Any]]
     """The wrapped values"""
     zones: NDArray[np.int_]
     """The nyquist zones for the wrapped data"""
@@ -65,12 +66,12 @@ class SymmetricWrap:
 
 
 def calculate_wrapped_data(
-    values: NDArray[np.floating], upper_limit: float
+    values: NDArray[np.floating[Any]], upper_limit: float
 ) -> SymmetricWrap:
     """Helper function to wrap data in a symmetric and cyclic domain.
 
     Args:
-        values (NDArray[np.floating]): The values to wrap
+        values (NDArray[np.floating[Any]]): The values to wrap
         upper_limit (float): The nyquist zone of the wrapped data
 
     Returns:

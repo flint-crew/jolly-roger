@@ -7,7 +7,7 @@ from argparse import ArgumentParser
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import astropy.units as u
 import matplotlib.pyplot as plt
@@ -121,8 +121,8 @@ class BaselineData:
 class BaselineArrays:
     data: NDArray[np.complexfloating]
     flags: NDArray[np.bool_]
-    uvws: NDArray[np.floating]
-    time_centroid: NDArray[np.floating]
+    uvws: NDArray[np.floating[Any]]
+    time_centroid: NDArray[np.floating[Any]]
 
 
 def _get_baseline_data(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import astropy.units as u
 import numpy as np
 from numpy.typing import NDArray
@@ -22,7 +24,7 @@ N'th sidelobe.
 
 
 def calculate_expected_sinc_width(
-    freqs: NDArray[np.floating] | u.Quantity,
+    freqs: NDArray[np.floating[Any]] | u.Quantity,
 ) -> u.Quantity:
     """The expected width of a sinc response in delay space given a set of frequencies,
 
@@ -31,7 +33,7 @@ def calculate_expected_sinc_width(
     bandwidth of the frequencies.
 
     Args:
-        freqs (NDArray[np.floating] | u.Quantity): The sampled frequencies. If units are not specified MHz are assumed.
+        freqs (NDArray[np.floating[Any]] | u.Quantity): The sampled frequencies. If units are not specified MHz are assumed.
 
     Returns:
         u.Quantity: The expected width of the sinc response
@@ -50,7 +52,7 @@ def calculate_expected_sinc_width(
 
 
 def get_delay_of_nth_sidelobe(
-    n: int, sinc_width: u.Quantity | np.floating
+    n: int, sinc_width: u.Quantity | np.floating[Any]
 ) -> u.Quantity:
     """Calculate the expected delay of the N'th sidelobe of a sinc response given the width of the sinc response.
 
@@ -62,7 +64,7 @@ def get_delay_of_nth_sidelobe(
 
     Args:
         n (int): The order of the sidelobe (1 for first sidelobe, 2 for second, etc.)
-        sinc_width (u.Quantity | np.floating): The width of the sinc response in seconds. If no units are attached seconds are assumed.
+        sinc_width (u.Quantity | np.floating[Any]): The width of the sinc response in seconds. If no units are attached seconds are assumed.
 
     Returns:
         u.Quantity: The expected delay of the N'th sidelobe in seconds.
