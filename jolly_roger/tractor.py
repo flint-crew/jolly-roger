@@ -969,6 +969,71 @@ def _set_auto_taper_widths(
     # TODO: Removing the type ignore above results in a mypy error in capn_crunch
 
 
+def write_back_results(
+    open_ms_tables: OpenMSTables,
+    taper_chunk_result: TaperedChunkResult,
+    tukey_tractor_options: TukeyTractorOptions,
+    write_back_required: bool,
+    pbar: tqdm | None = None,
+) -> None:
+    """Write back data chunk results to the measurement set
+
+    Args:
+        open_ms_tables (OpenMSTables): The set of open handlers to the relevant measurement sets
+        taper_chunk_result (TaperedChunkResult): The collect of results to consider around writing back
+        tukey_tractor_options (TukeyTractorOptions): Options relevant to the data selection
+        pbar (tqdm): A handler to the progress bar
+        write_back_required (bool): Whether a write back is required in all cases
+    """
+    if pbar is not None:
+        pbar.update(taper_chunk_result.chunk_size)
+
+    if taper_chunk_result.nothing_to_do and not write_back_required:
+        logger.debug("No attached data payload, skipping")
+        return
+
+    data_chunk = taper_chunk_result.data_chunk
+    assert data_chunk is not None, f"{data_chunk=}, which should not happen"
+
+    # Only update here is we pass the dry run check above. If data are not copied
+    # upfront for new column than this is necessary
+    if taper_chunk_result.update_data or write_back_required:
+        open_ms_tables.main_table.putcol(
+            columnname=tukey_tractor_options.output_column,
+            value=data_chunk.masked_data,
+            startrow=data_chunk.row_start,
+            nrow=data_chunk.chunk_size,
+        )
+    else:
+        logger.debug("No update of data required, skipping")
+    if taper_chunk_result.update_flags:
+        open_ms_tables.main_table.putcol(
+            columnname="FLAG",
+            value=taper_chunk_result.flags,
+            startrow=data_chunk.row_start,
+            nrow=data_chunk.chunk_size,
+        )
+    else:
+        logger.debug("No updating of flags required, skipping for chunk")
+    if taper_chunk_result.update_weights:
+        logger.debug("Updating weights")
+        assert taper_chunk_result.weights is not None, (
+            "Expected weights to be attached, found None"
+        )
+        for (
+            weight_column_name,
+            scaled_weights,
+        ) in taper_chunk_result.weights.items():
+            open_ms_tables.main_table.putcol(
+                columnname=weight_column_name,
+                value=scaled_weights,
+                startrow=data_chunk.row_start,
+                nrow=data_chunk.chunk_size,
+            )
+    else:
+        logger.debug("No updating of weights")
+
+
 def tukey_tractor(
     ms_path: Path,
     tukey_tractor_options: TukeyTractorOptions,
@@ -1092,61 +1157,19 @@ def tukey_tractor(
                 # for taper_data_chunk, flags_to_apply in taper_data_and_flags:
                 taper_chunk_result: TaperedChunkResult
                 for taper_chunk_result in taper_data_and_flags:
-                    pbar.update(taper_chunk_result.chunk_size)
-
-                    if taper_chunk_result.nothing_to_do and not write_back_required:
-                        logger.debug("No attached data payload, skipping")
-                        continue
-
-                    data_chunk = taper_chunk_result.data_chunk
-                    assert data_chunk is not None, (
-                        f"{data_chunk=}, which should not happen"
+                    write_back_results(
+                        open_ms_tables=open_ms_tables,
+                        taper_chunk_result=taper_chunk_result,
+                        tukey_tractor_options=tukey_tractor_options,
+                        write_back_required=write_back_required,
+                        pbar=pbar,
                     )
 
-                    # Only update here is we pass the dry run check above. If data are not copied
-                    # upfront for new column than this is necessary
-                    if taper_chunk_result.update_data or write_back_required:
-                        open_ms_tables.main_table.putcol(
-                            columnname=tukey_tractor_options.output_column,
-                            value=data_chunk.masked_data,
-                            startrow=data_chunk.row_start,
-                            nrow=data_chunk.chunk_size,
-                        )
-                    else:
-                        logger.debug("No update of data required, skipping")
-                    if taper_chunk_result.update_flags:
-                        open_ms_tables.main_table.putcol(
-                            columnname="FLAG",
-                            value=taper_chunk_result.flags,
-                            startrow=data_chunk.row_start,
-                            nrow=data_chunk.chunk_size,
-                        )
-                    else:
-                        logger.debug(
-                            "No updating of flags required, skipping for chunk"
-                        )
-                    if taper_chunk_result.update_weights:
-                        logger.debug("Updating weights")
-                        assert taper_chunk_result.weights is not None, (
-                            "Expected weights to be attached, found None"
-                        )
-                        for (
-                            weight_column_name,
-                            scaled_weights,
-                        ) in taper_chunk_result.weights.items():
-                            open_ms_tables.main_table.putcol(
-                                columnname=weight_column_name,
-                                value=scaled_weights,
-                                startrow=data_chunk.row_start,
-                                nrow=data_chunk.chunk_size,
-                            )
-                    else:
-                        logger.debug("No updating of weights")
         stop = time()
         runtime_s = stop - start
-        assert data_chunk is not None, "data_chunk is not formed correctly"
+        assert data_chunk_tuple[-1] is not None, "data_chunk is not formed correctly"
         logger.info(
-            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(data_chunk.freq_chan)} chans in {runtime_s:0.2f}s"
+            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(data_chunk_tuple[-1].freq_chan)} chans in {runtime_s:0.2f}s"
         )
 
         logger.info(
