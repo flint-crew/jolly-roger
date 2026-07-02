@@ -36,7 +36,7 @@ def test_scale_multiple_weights() -> None:
     taper_1[100, 50:] = 0
     scaled_weights_dict = scale_multiple_weights(taper=taper_1, weights=weights_dict)
 
-    for _column, scaled_weights in weights_dict.items():
+    for _column, scaled_weights in scaled_weights_dict.items():
         assert np.all(scaled_weights[100] == 202)
         for i in range(100):
             assert np.all(scaled_weights[i] == i + 1)

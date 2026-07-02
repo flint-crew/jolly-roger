@@ -49,7 +49,7 @@ def find_weight_columns(ms_path: Path) -> Sequence[str] | None:
     return weight_columns
 
 
-def select_weight_column(
+def select_weight_columns(
     ms_path: Path, weight_column: str | None = None
 ) -> Sequence[str] | None:
     """Establishes the set ofWEIGHT-like column from provided options.
