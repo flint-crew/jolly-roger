@@ -40,10 +40,28 @@ class WDelays:
 def get_object_delay_for_ms(
     ms_path: Path,
     phase_dir: SkyCoord,
-    object_name: str | list[str] | tuple[str, ...] = "sun",
+    object_name: str
+    | SkyCoord
+    | list[str | SkyCoord]
+    | tuple[str | SkyCoord, ...] = "sun",
     reverse_baselines: bool = False,
     flip_uvw_sign: bool = False,
 ) -> list[WDelays]:
+    """Calculate the delay between the phase-direction in the measuurement and a set of object directions.
+    The delay is calculated by computing the UVWs in both directions and examining the difference in the
+    w-term.
+
+    Args:
+        ms_path (Path): The measurement set and associated meta-data
+        phase_dir (SkyCoord): The phase direction (this couuls be more broadly considered direction 1)
+        object_name (str | SkyCoord | list[str  |  SkyCoord] | tuple[str  |  SkyCoord, ...], optional): The collection of other sky positions to calculate the delays towards. Defaults to "sun".
+        reverse_baselines (bool, optional): Whether the MS has antennas recorded as (ant1, ant2) or (ant2, ant1), where ant2 is always larger. Defaults to False.
+        flip_uvw_sign (bool, optional): Indicates whether a sign slip needs to be introduced to the UVWs. Defaults to False.
+
+    Returns:
+        list[WDelays]: Description of the delay towards the nominated object. A list of objects will always be returned.
+    """
+
     object_name = [object_name] if isinstance(object_name, str) else object_name
     assert isinstance(object_name, list | tuple), (
         f"Expected type list | tuple, got {type(object_name)=}"
