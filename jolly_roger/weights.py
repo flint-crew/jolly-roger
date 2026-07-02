@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from casacore.tables import table
@@ -85,7 +86,9 @@ def select_weight_columns(
     return find_weight_columns(ms_path=ms_path)
 
 
-def calculate_scaling_from_taper(taper: NDArray[np.floating]) -> NDArray[np.floating]:
+def calculate_scaling_from_taper(
+    taper: NDArray[np.floating[Any]],
+) -> NDArray[np.floating[Any]]:
     """The taper applied in delay space is essentially a Notch filter, which
     has been implemented to have a smooth Gaussian roll off. This will calculate
     the ratio of modified data and return an appropriate scaling term to indicate
@@ -95,10 +98,10 @@ def calculate_scaling_from_taper(taper: NDArray[np.floating]) -> NDArray[np.floa
     The more data that is nulled the larger this term becomes.
 
     Args:
-        taper (NDArray[np.floating]): The taper that will be applied
+        taper (NDArray[np.floating[Any]]): The taper that will be applied
 
     Returns:
-        NDArray[np.floating]: The scaling terms to adjust weights by. The more data that is nulled the higher the returned value becomes
+        NDArray[np.floating[Any]]: The scaling terms to adjust weights by. The more data that is nulled the higher the returned value becomes
     """
     # The aper can be (rows, channels, pols), where pols is really length 1 but is reshaped
     # accordingly to t the recorded MS data column polarisations
@@ -118,10 +121,10 @@ def calculate_scaling_from_taper(taper: NDArray[np.floating]) -> NDArray[np.floa
 
 
 def scale_weights(
-    taper: NDArray[np.floating],
-    weights: NDArray[np.floating],
+    taper: NDArray[np.floating[Any]],
+    weights: NDArray[np.floating[Any]],
     taper_is_scale: bool = False,
-) -> NDArray[np.floating]:
+) -> NDArray[np.floating[Any]]:
     """Accept the taper array and associated set of weights, and appropriately
     scale the weights based on the amount of data nulled. The weights here could
     take a couple of forms:
@@ -136,20 +139,20 @@ def scale_weights(
     scale a single row.
 
     Args:
-        taper (NDArray[np.floating]): The two-dimensional taper that will be applied to data
-        weights (NDArray[np.floating]): The extract weights column
+        taper (NDArray[np.floating[Any]]): The two-dimensional taper that will be applied to data
+        weights (NDArray[np.floating[Any]]): The extract weights column
         taper_is_scale (bool, optional): Indicates whether the input ``taper`` has already been t ransformed to a scaling term. Defaults to False.
 
     Raises:
         ValueError: Raised when the supplied weight have a rank that is neither 1 or 2
 
     Returns:
-        NDArray[np.floating]: Scaled weights that should be inserted to the measuremenset set
+        NDArray[np.floating[Any]]: Scaled weights that should be inserted to the measuremenset set
     """
     # The scale could be already derieved should multi-ple columns need scaling
     scale = calculate_scaling_from_taper(taper=taper) if not taper_is_scale else taper
 
-    scaled_weights: None | NDArray[np.floating] = None
+    scaled_weights: None | NDArray[np.floating[Any]] = None
     # Appropriately handle potential broadcasting issues, e.g. WEIGHT vs WEIGHT_SPECTRUM
     if weights.ndim == 1:
         # No broadcasting is needed
@@ -166,9 +169,9 @@ def scale_weights(
 
 
 def scale_multiple_weights(
-    taper: NDArray[np.floating],
-    weights: dict[str, NDArray[np.floating]],
-) -> dict[str, NDArray[np.floating]]:
+    taper: NDArray[np.floating[Any]],
+    weights: dict[str, NDArray[np.floating[Any]]],
+) -> dict[str, NDArray[np.floating[Any]]]:
     """Accept the taper array and associated set of weights, and appropriately
     scale the weights based on the amount of data nulled. The weights here could
     take a couple of forms:
@@ -183,11 +186,11 @@ def scale_multiple_weights(
     scale a single row.
 
     Args:
-        taper (NDArray[np.floating]): The two-dimensional taper that will be applied to data
-        weights (dict[str, NDArray[np.floating]]): The extract weights column. For each key (representing the column name) scakle the mapped data (the weights)
+        taper (NDArray[np.floating[Any]]): The two-dimensional taper that will be applied to data
+        weights (dict[str, NDArray[np.floating[Any]]]): The extract weights column. For each key (representing the column name) scakle the mapped data (the weights)
 
     Returns:
-        dict[str, NDArray[np.floating]]: Scaled weights that should be inserted to the measuremenset set. The output shape will represent the scaled input ``weights``
+        dict[str, NDArray[np.floating[Any]]]: Scaled weights that should be inserted to the measuremenset set. The output shape will represent the scaled input ``weights``
     """
 
     assert isinstance(weights, dict), (
