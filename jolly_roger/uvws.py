@@ -64,16 +64,15 @@ def construct_guard_region(uvws: u.Quantity, nominal_fov: u.Quantity) -> u.Quant
         f"Constructing guard region around delay=0 using {nominal_fov.to('deg')}"
     )
 
-    fov = nominal_fov.to("rad") / np.hypot(uvws[0], uvws[1])
+    # Appears as though the np.hyot is returning m2
+    uvws_m = uvws.to("m").value
+    fov = (nominal_fov.to("rad") / np.hypot(uvws_m[0], uvws_m[1])) * u.m
     fov = (fov / speed_of_light).decompose()
 
     assert fov.ndim == 2, f"Unexpected {fov.shape=}"
     assert fov.shape == uvws.shape[1:], (
         f"Mismatch in expected dimensions {fov.shape=} to {uvws.shape[1:]=}"
     )
-
-    logger.info(f"{uvws=}")
-    logger.info(f"{fov=}")
 
     return fov
 
