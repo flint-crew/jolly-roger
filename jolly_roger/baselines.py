@@ -12,6 +12,7 @@ from typing import Any, cast
 import astropy.units as u
 import matplotlib.pyplot as plt
 import numpy as np
+from astropy.constants import c as speed_of_light
 from astropy.coordinates import SkyCoord
 from astropy.time import Time
 from casacore.tables import table, taql
@@ -30,10 +31,14 @@ class OpenMSTables:
     """The spectral window table"""
     field_table: table
     """The field table"""
+    antenna_table: table
+    """The antenna table"""
     ms_path: Path
     """The path to the MS used to open tables"""
     phase_dir: SkyCoord
     """The phase direction appropriate for the data"""
+    nominal_fov: u.Quantity
+    """The field of view that should be representative of the MS"""
 
 
 def _get_phase_dir_for_field_id(ms_table: table, field_table: table) -> SkyCoord:
@@ -64,6 +69,35 @@ def _get_phase_dir_for_field_id(ms_table: table, field_table: table) -> SkyCoord
     return SkyCoord(*(sky_pos).squeeze() * u.rad)
 
 
+def _get_nominal_fov(spw_table: table, antenna_table: table) -> u.Quantity:
+    """Calculate the field of view at the lowest frequency. This is a rather
+    simple calculation that assumes a single SPW and single dish diameter
+
+    Args:
+        spw_table (table): The spectral window table of the MS
+        antenna_table (table): The antenna table of the MS
+
+    Returns:
+        u.Quantity: The nominal field-of-view
+    """
+
+    # TODO: We are assuming a single SPW in the data ftable. This assumption
+    # is consistent with how we calculate the uvws. Just noting.
+    lowest_freq = np.min(spw_table.getcol("CHAN_FREQ")) * u.Hz
+    longest_lambda = (speed_of_light / lowest_freq).decompose()
+
+    dish_diameter = np.unique(antenna_table.getcol("DISH_DIAMETER"))
+    assert len(dish_diameter) == 0, (
+        f"{len(dish_diameter)} dish sizes found, which is not reasonable"
+    )
+    dish_diameter = dish_diameter[0]
+
+    fov = (1.02 * longest_lambda / dish_diameter).decompose() * u.rad
+    logger.info(f"Nominal field-of-view is {fov.to('deg')} deg")
+
+    return fov
+
+
 def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
     """Open up the set of MS table and sub-tables necessary for tractoring.
 
@@ -77,10 +111,12 @@ def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
     main_table = table(str(ms_path), ack=False, readonly=read_only)
     spw_table = table(str(ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=read_only)
     field_table = table(str(ms_path / "FIELD"), ack=False, readonly=read_only)
+    antenna_table = table(str(ms_path / "ANTENNA"), ack=False, readonly=read_only)
 
     phase_dir = _get_phase_dir_for_field_id(
         ms_table=main_table, field_table=field_table
     )
+    nominal_fov = _get_nominal_fov(spw_table=spw_table, antenna_table=antenna_table)
     # TODO: Get the data without auto-correlations e.g.
     # no_auto_main_table = taql(
     #     "select from $main_table where ANTENNA1 != ANTENNA2",
@@ -90,8 +126,10 @@ def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
         main_table=main_table,
         spw_table=spw_table,
         field_table=field_table,
+        antenna_table=antenna_table,
         ms_path=ms_path,
         phase_dir=phase_dir,
+        nominal_fov=nominal_fov,
     )
 
 

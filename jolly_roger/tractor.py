@@ -622,11 +622,17 @@ def _tukey_tractor(
         upper_limit=np.max(delay_time.delay).to("s").value,
     )
 
+    tukey_width = (
+        tukey_tractor_options.tukey_width_ns * 1e-9
+        if w_delays.guard_region is None
+        else w_delays.guard_region[baseline_idx, time_idx].to("s").value
+    )
+
     # Make taper with all units in seconds
     taper = tukey_taper(
         x=delay_time.delay.to("s").value,
         outer_width=tukey_tractor_options.outer_width_ns * 1e-9,
-        tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9,
+        tukey_width=tukey_width,
         tukey_x_offset=tukey_x_offset_sec,
     )
 
@@ -928,6 +934,8 @@ class TukeyTractorOptions(BaseOptions):
     """Attempt to identify a WEIGHT-like column and rescale to indicate modified data. Defaults to False."""
     weight_column: str | None = None
     """The name of the WEIGHT-like column. If None when rewrite is True the WEIGHT-like column will be searched for. Defaults to None."""
+    guard_field: bool = False
+    """If True derive a region around the delay=0 spectrum that is within the nominal field of view. This better informs contamination between an object and the phase-direction."""
 
 
 @dataclass(frozen=True)
@@ -1099,6 +1107,9 @@ def tukey_tractor(
         object_name=tukey_tractor_options.target_objects,
         reverse_baselines=tukey_tractor_options.reverse_baselines,
         flip_uvw_sign=tukey_tractor_options.flip_uvw_sign,
+        nominal_fov=open_ms_tables.nominal_fov
+        if tukey_tractor_options.guard_field
+        else None,
     )
     assert all(len(w_delays.w_delays.shape) == 2 for w_delays in w_delays_list), (
         "Sanity check failed, incorrect dimensionality returned"
