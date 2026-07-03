@@ -622,17 +622,11 @@ def _tukey_tractor(
         upper_limit=np.max(delay_time.delay).to("s").value,
     )
 
-    tukey_width = (
-        tukey_tractor_options.tukey_width_ns * 1e-9
-        if w_delays.guard_region is None
-        else w_delays.guard_region[baseline_idx, time_idx].to("s").value
-    )
-
     # Make taper with all units in seconds
     taper = tukey_taper(
         x=delay_time.delay.to("s").value,
         outer_width=tukey_tractor_options.outer_width_ns * 1e-9,
-        tukey_width=tukey_width,
+        tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9,
         tukey_x_offset=tukey_x_offset_sec,
     )
 
@@ -668,10 +662,16 @@ def _tukey_tractor(
     # This by computing the taper towards the field and
     # see if there are any components of the two sets of tapers
     # that are not 1 (where 1 is 'no change').
+    field_tukey_width = (
+        tukey_tractor_options.tukey_width_ns * 1e-9
+        if w_delays.guard_region is None
+        else w_delays.guard_region[baseline_idx, time_idx].to("s").value
+    )
+
     field_taper = tukey_taper(
         x=delay_time.delay.to("s").value,
         outer_width=tukey_tractor_options.outer_width_ns * 1e-9,
-        tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9,
+        tukey_width=field_tukey_width,
         tukey_x_offset=None,
     )
     # field_taper.shape is [no_channels, ]
