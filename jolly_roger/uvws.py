@@ -120,7 +120,7 @@ def get_object_delay_for_ms(
         baselines=baselines, hour_angles=hour_angles_phase, flip_uvw_sign=flip_uvw_sign
     )
 
-    guard_region = None
+    guard_region: None | u.Quantity = None
     if nominal_fov:
         guard_region = construct_guard_region(uvws=uvws_phase, nominal_fov=nominal_fov)
 
