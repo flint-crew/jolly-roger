@@ -122,7 +122,7 @@ def _get_average_location(locations: EarthLocation) -> EarthLocation:
 
 
 def get_location_from_ms(ms_path: Path) -> EarthLocation:
-    with table(ms_path.as_posix()) as tab:
+    with table(ms_path.as_posix(), ack=False) as tab:
         positions = table(tab.getkeyword("ANTENNA")).getcol("POSITION")
 
     locations = EarthLocation.from_geocentric(*positions.T, unit=u.m)
