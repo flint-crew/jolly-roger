@@ -122,7 +122,9 @@ def get_object_delay_for_ms(
 
     guard_region: None | u.Quantity = None
     if nominal_fov is not None:
-        guard_region = construct_guard_region(uvws=uvws_phase, nominal_fov=nominal_fov)
+        guard_region = construct_guard_region(
+            uvws=uvws_phase.uvws, nominal_fov=nominal_fov
+        )
 
     object_w_delays: list[WDelays] = []
 
