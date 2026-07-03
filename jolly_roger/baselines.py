@@ -90,7 +90,7 @@ def _get_nominal_fov(spw_table: table, antenna_table: table) -> u.Quantity:
     assert len(dish_diameter) == 1, (
         f"{len(dish_diameter)} dish sizes found, which is not reasonable"
     )
-    dish_diameter = dish_diameter[0]
+    dish_diameter = dish_diameter[0] * u.m
 
     fov = (1.02 * longest_lambda / dish_diameter).decompose() * u.rad
     logger.info(f"Nominal field-of-view is {fov.to('deg')} deg")
