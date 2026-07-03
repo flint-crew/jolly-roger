@@ -87,7 +87,7 @@ def _get_nominal_fov(spw_table: table, antenna_table: table) -> u.Quantity:
     longest_lambda = (speed_of_light / lowest_freq).decompose()
 
     dish_diameter = np.unique(antenna_table.getcol("DISH_DIAMETER"))
-    assert len(dish_diameter) == 0, (
+    assert len(dish_diameter) == 1, (
         f"{len(dish_diameter)} dish sizes found, which is not reasonable"
     )
     dish_diameter = dish_diameter[0]
