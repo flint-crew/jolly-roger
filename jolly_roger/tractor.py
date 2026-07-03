@@ -72,7 +72,7 @@ def tukey_taper(
     # Copy to avoid side-effects
     x_local = x.copy()
 
-    if (outer_width - tukey_width) < 0.0:
+    if np.any((outer_width - tukey_width) < 0.0):
         # If this is true than the two 'transition' regions between 1 and 0 overlap.
         # This should not happen, so we simply will make it so no '1' region. In this extreme
         # the window is just a 1 - cos function
