@@ -56,7 +56,7 @@ def construct_guard_region(uvws: u.Quantity, nominal_fov: u.Quantity) -> u.Quant
     """
 
     assert uvws.ndim == 3, f"Expected a rank 3 array, got {uvws.shape=}"
-    assert uvws.shape[0] == 1, (
+    assert uvws.shape[0] == 3, (
         f"Expected first axies to be (u,v,w), got something else, {uvws.shape=}"
     )
 
