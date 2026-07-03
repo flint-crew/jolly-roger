@@ -61,7 +61,7 @@ def construct_guard_region(uvws: u.Quantity, nominal_fov: u.Quantity) -> u.Quant
     )
 
     logger.info(
-        f"Constructing guard region around delay=0 using {nominal_fov.to('deg')} deg"
+        f"Constructing guard region around delay=0 using {nominal_fov.to('deg')}"
     )
 
     fov = nominal_fov.to("rad") / np.hypot(uvws[0], uvws[1])
@@ -71,6 +71,9 @@ def construct_guard_region(uvws: u.Quantity, nominal_fov: u.Quantity) -> u.Quant
     assert fov.shape == uvws.shape[1:], (
         f"Mismatch in expected dimensions {fov.shape=} to {uvws.shape[1:]=}"
     )
+
+    logger.info(f"{uvws=}")
+    logger.info(f"{fov=}")
 
     return fov
 
