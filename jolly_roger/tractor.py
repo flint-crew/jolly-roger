@@ -685,12 +685,10 @@ def _tukey_tractor(
         # The delay spectrum are complex quantities, and we need to compare
         # the flux
         # Make a stokes I type spectrum
-        # logger.info(f"{delay_time.delay_time.shape=}")
         abs_delay_time = np.abs(np.sum(delay_time.delay_time[..., [0, -1]], axis=-1))
-        # output of the field taper is constant over rows, so
-        # some broadcasting is needed to handle the array shapes
+
         _field_taper = np.squeeze(field_taper)
-        field_stats = np.max(abs_delay_time * (1.0 - _field_taper)[None, :], axis=1)
+        field_stats = np.max(abs_delay_time * (1.0 - _field_taper), axis=1)
         object_stats = np.max(abs_delay_time * (1.0 - taper[..., 0]), axis=1)
 
         # Depending on size of chunk this could be expensive
