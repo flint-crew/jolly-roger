@@ -66,7 +66,7 @@ def construct_guard_region(uvws: u.Quantity, nominal_fov: u.Quantity) -> u.Quant
 
     # Appears as though the np.hyot is returning m2
     uvws_m = uvws.to("m").value
-    fov = (nominal_fov.to("rad").value / np.hypot(uvws_m[0], uvws_m[1])) * u.m
+    fov = (nominal_fov.to("rad").value / 2 * np.hypot(uvws_m[0], uvws_m[1])) * u.m
     fov = (fov / speed_of_light).decompose()
 
     assert fov.ndim == 2, f"Unexpected {fov.shape=}"

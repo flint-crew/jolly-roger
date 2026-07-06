@@ -241,7 +241,23 @@ def plot_baseline_comparison_data(
                             )
 
         ax5.axhline(0, ls="-", c="black", label="Field", lw=4)
-        if outer_width_ns:
+        if w_delays is not None and w_delays[0].guard_region is not None:
+            baseline_guard = w_delays[0].guard_region[b_idx].to("ns").value
+            if outer_width_ns:
+                baseline_guard += outer_width_ns
+            logger.info(
+                f"Adding to baseline guard, maximum {np.max(baseline_guard):.3f}"
+            )
+            ax5.fill_between(
+                before_baseline_data.time,
+                -baseline_guard,
+                baseline_guard,
+                alpha=0.3,
+                color="grey",
+                label="Guard Region",
+            )
+
+        elif outer_width_ns:
             ax5.axhspan(
                 -outer_width_ns,
                 outer_width_ns,
