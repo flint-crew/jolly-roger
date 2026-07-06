@@ -1112,7 +1112,7 @@ def tukey_tractor(
         pool: None | ThreadPoolExecutor = None
         if tukey_tractor_options.max_workers > 1:
             logger.info(
-                f"Starting {tukey_tractor_options.max_workers} computer workers. Be mindful of {tukey_tractor_options.chunk_size=}"
+                f"Starting {tukey_tractor_options.max_workers} compute workers. Be mindful of {tukey_tractor_options.chunk_size=}"
             )
             pool = ThreadPoolExecutor(max_workers=tukey_tractor_options.max_workers)
 
