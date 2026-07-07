@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from itertools import combinations
 from pathlib import Path
 from time import time
-from typing import cast
+from typing import Any, cast
 
 import astropy.units as u
 import numpy as np
@@ -36,14 +36,15 @@ from jolly_roger.response import (
 )
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
+from jolly_roger.weights import scale_multiple_weights, select_weight_columns
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
 
 
 def tukey_taper(
-    x: np.typing.NDArray[np.floating],
+    x: np.typing.NDArray[np.floating[Any]],
     outer_width: float,
     tukey_width: float,
-    tukey_x_offset: NDArray[np.floating] | None = None,
+    tukey_x_offset: NDArray[np.floating[Any]] | None = None,
 ) -> np.ndarray:
     """Describes a tukey window function spanning a -x.min() to x.max() range. In the base case
     the tukey window is centred on 0.0. The ``outer_width`` defines where the window is
@@ -59,10 +60,10 @@ def tukey_taper(
     Between these two bounds the window follows a `1 - cos` type shape.
 
     Args:
-        x (np.typing.NDArray[np.floating]): The intervals to evaluate over. Internally these are concerted to the +/- pi domain
+        x (np.typing.NDArray[np.floating[Any]]): The intervals to evaluate over. Internally these are concerted to the +/- pi domain
         outer_width (float, optional): The +/- boundary beyond which is 0.0.
         tukey_width (float, optional): Describes the width that the transition from 1.0 to 0.0 occurs.
-        tukey_x_offset (NDArray[np.floating] | None, optional): Sets a new zero point (center of window). Defaults to None.
+        tukey_x_offset (NDArray[np.floating[Any]] | None, optional): Sets a new zero point (center of window). Defaults to None.
         notch (bool, optional): Will the taper be used for a notch filter? Defaults to True.
 
     Returns:
@@ -117,9 +118,9 @@ class DataChunkArray:
     """The data from the nominated data column loaded"""
     flags: NDArray[np.bool_]
     """Flags that correspond to the loaded data"""
-    uvws: NDArray[np.floating]
+    uvws: NDArray[np.floating[Any]]
     """The uvw coordinates for each loaded data record"""
-    time_centroid: NDArray[np.floating]
+    time_centroid: NDArray[np.floating[Any]]
     """The time of each data record"""
     ant_1: NDArray[np.int64]
     """Antenna 1 that formed the baseline"""
@@ -129,6 +130,8 @@ class DataChunkArray:
     """The starting row of the portion of data loaded"""
     chunk_size: int
     """The size of the data chunk loaded (may be larger if this is the last record)"""
+    weights: dict[str, NDArray[np.floating[Any]]] | None = None
+    """The weights associated with the data. Key is the column name and the mapped value are the corresponding weights. Only used if reweighting is activated. Defaults to None."""
 
 
 @dataclass
@@ -147,7 +150,7 @@ class DataChunk:
     """The UVW coordinates of the phase center of the baseline."""
     time: Time
     """The time of the observations."""
-    time_mjds: NDArray[np.floating]
+    time_mjds: NDArray[np.floating[Any]]
     """The raw time extracted from the measurement set in MJDs"""
     ant_1: NDArray[np.int64]
     """The first antenna in the baseline."""
@@ -157,22 +160,31 @@ class DataChunk:
     """Starting row index of the data"""
     chunk_size: int
     """Size of the chunked portion of the data"""
+    weights: dict[str, NDArray[np.floating[Any]]] | None = None
+    """The weights associated with the data. Key is the column name and the mapped value are the corresponding weights. Only used if reweighting is activated. Defaults to None."""
 
 
 def _get_data_chunk_from_main_table(
     ms_table: table,
     chunk_size: int,
     data_column: str,
+    weight_columns: Sequence[str] | None = None,
 ) -> Generator[DataChunkArray, None, None]:
     """Return an appropriately size data chunk from the main
     table of a measurement set. These data are ase they are
     in the measurement set without any additional scaling
     or unit adjustments.
 
+    Weights are only returned if the ``weight_column`` is
+    set. No distinction is made between a WEIGHT float or
+    a WEIGHT spectrum type data. No attempt to validate
+    existence of ``weight_column`` is made.
+
     Args:
         ms_table (table): The opened main table of a measurement set
         chunk_size (int): The size of the data to chunk and return
         data_column (str): The data column to be returned
+        weight_columns (Sequence[str] | None, optional): The weight columns to be returned. Defaults to None.
 
     Yields:
         Generator[DataChunkArray, None, None]: A segment of rows and columns
@@ -193,6 +205,18 @@ def _get_data_chunk_from_main_table(
         ant_1 = ms_table.getcol("ANTENNA1", startrow=lower_row, nrow=chunk_size)
         ant_2 = ms_table.getcol("ANTENNA2", startrow=lower_row, nrow=chunk_size)
 
+        weights: None | dict[str, NDArray[np.floating[Any]]] = None
+        if weight_columns:
+            weights = {
+                weight_column: ms_table.getcol(
+                    weight_column, startrow=lower_row, nrow=chunk_size
+                )
+                for weight_column in weight_columns
+            }
+            logger.debug(
+                f"Getting weights for {weight_columns=} {lower_row} {chunk_size}"
+            )
+
         yield DataChunkArray(
             data=data,
             flags=flags,
@@ -202,6 +226,7 @@ def _get_data_chunk_from_main_table(
             ant_2=ant_2,
             row_start=lower_row,
             chunk_size=chunk_size,
+            weights=weights,
         )
 
         lower_row += chunk_size
@@ -211,6 +236,7 @@ def get_data_chunks(
     open_ms_tables: OpenMSTables,
     chunk_size: int,
     data_column: str,
+    weight_columns: Sequence[str] | None = None,
 ) -> Generator[DataChunk, None, None]:
     """Yield a collection of rows with appropriate units
     attached to the quantities. These quantities are not
@@ -222,6 +248,7 @@ def get_data_chunks(
         open_ms_tables (OpenMSTables): References to open tables from the measurement set
         chunk_size (int): The number of rows to return at a time
         data_column (str): The data column that would be modified
+        weight_columns (Sequence[str] | None, optional): The weight columns that would be modified if specified. Defaults to None.
 
     Yields:
         Generator[DataChunk, None, None]: Representation of the current chunk of rows
@@ -235,6 +262,7 @@ def get_data_chunks(
         ms_table=open_ms_tables.main_table,
         chunk_size=chunk_size,
         data_column=data_column,
+        weight_columns=weight_columns,
     ):
         # Transform the native arrays but attach astropy quantities
         uvws_phase_center = data_chunk_array.uvws * u.m
@@ -258,6 +286,7 @@ def get_data_chunks(
             ant_2=data_chunk_array.ant_2,
             row_start=data_chunk_array.row_start,
             chunk_size=data_chunk_array.chunk_size,
+            weights=data_chunk_array.weights,
         )
 
 
@@ -266,6 +295,7 @@ def get_multiple_data_chunks(
     chunk_size: int,
     data_column: str,
     number_of_chunks: int = 1,
+    weight_columns: Sequence[str] | None = None,
 ) -> Generator[tuple[DataChunk, ...], None, None]:
     """
     Wrapper around ``get_data_chunks`` to yield a list of
@@ -282,6 +312,7 @@ def get_multiple_data_chunks(
         chunk_size (int): The number of rows to return at a time
         data_column (str): The data column that would be modified
         number_of_chunks (int, optional): The number of chunks to return on each yield. Defaults to 1.
+        weight_columns (Sequence[str] | None, optional): The weight columns that would be modified if specified. Defaults to None.
 
     Yields:
         Generator[tuple[DataChunk, ...], None, None]: Representation of the current chunk of rows
@@ -292,7 +323,10 @@ def get_multiple_data_chunks(
     # We are using the existing generator. Termination should be
     # straightforward.
     for data_chunk in get_data_chunks(
-        open_ms_tables=open_ms_tables, chunk_size=chunk_size, data_column=data_column
+        open_ms_tables=open_ms_tables,
+        chunk_size=chunk_size,
+        data_column=data_column,
+        weight_columns=weight_columns,
     ):
         base_chunks.append(data_chunk)
 
@@ -516,7 +550,7 @@ class TaperResult:
 
     attached_payload: bool = False
     """Indicates whether anything to do."""
-    taper: NDArray[np.floating] | None = None
+    taper: NDArray[np.floating[Any]] | None = None
     """The taper to apply. If None nothing to do."""
     update_flags: bool = False
     """Indicates whether flags need to be updated"""
@@ -732,6 +766,10 @@ class TaperedChunkResult:
     """"Indicates whether the flags need to be written back to MS"""
     flags: NDArray[bool] | None = None
     """The flags to write back"""
+    update_weights: bool = False
+    """Indicates whether data should be written back to the MS"""
+    weights: dict[str, NDArray[np.floating[Any]]] | None = None
+    """The scaled weights that should be written back to the MS. The key is the column name and the mapped values are the corresponding scaled weights. If None nothing to write back."""
 
 
 def _tukey_multi_tractor(
@@ -780,7 +818,8 @@ def _tukey_multi_tractor(
                 delay_time = taper_result.delay_time
                 taper_results.append(taper_result)
 
-    # Handle all the cases
+    # Handle all the cases. If all data chunks showed nothing to do we can
+    # return early and provide the original data back to the caller.
     if all(not taper_result.attached_payload for taper_result in taper_results):
         return TaperedChunkResult(
             chunk_size=chunk_size, nothing_to_do=True, data_chunk=data_chunk
@@ -817,6 +856,21 @@ def _tukey_multi_tractor(
         taper=combined_taper,
     )
 
+    # Should weights be provided to the DataChunk than it is assumed that they
+    # need to be scaleded based on the final taper. The driving functions that
+    # call into this multi tractor are responsible to writing this back out to
+    # the appropriate coluumn
+    scaled_weights: None | dict[str, NDArray[np.floating[Any]]] = None
+    update_weights = False
+    if data_chunk.weights is not None:
+        scaled_weights = scale_multiple_weights(
+            taper=combined_taper, weights=data_chunk.weights
+        )
+
+        # Should there actually be weights attached than at this point
+        # in the code path there is a taper that has been applied.
+        update_weights = True
+
     return TaperedChunkResult(
         chunk_size=chunk_size,
         nothing_to_do=False,
@@ -824,6 +878,8 @@ def _tukey_multi_tractor(
         data_chunk=tapered_data,
         update_flags=update_flags,
         flags=combined_flags,
+        update_weights=update_weights,
+        weights=scaled_weights,
     )
 
 
@@ -868,6 +924,10 @@ class TukeyTractorOptions(BaseOptions):
     """Automatically size the outer width of the tukey taper based on the data"""
     nth_sidelobe_null: int | None = None
     """Null up to the N'th sidelobe. Only used in auto_size mode. Defaults to None."""
+    reweight: bool = False
+    """Attempt to identify a WEIGHT-like column and rescale to indicate modified data. Defaults to False."""
+    weight_column: str | None = None
+    """The name of the WEIGHT-like column. If None when rewrite is True the WEIGHT-like column will be searched for. Defaults to None."""
 
 
 @dataclass(frozen=True)
@@ -907,6 +967,71 @@ def _set_auto_taper_widths(
         tukey_width_ns=0.0,  # type: ignore[arg-type]
     )
     # TODO: Removing the type ignore above results in a mypy error in capn_crunch
+
+
+def write_back_results(
+    open_ms_tables: OpenMSTables,
+    taper_chunk_result: TaperedChunkResult,
+    tukey_tractor_options: TukeyTractorOptions,
+    write_back_required: bool,
+    pbar: tqdm | None = None,
+) -> None:
+    """Write back data chunk results to the measurement set
+
+    Args:
+        open_ms_tables (OpenMSTables): The set of open handlers to the relevant measurement sets
+        taper_chunk_result (TaperedChunkResult): The collect of results to consider around writing back
+        tukey_tractor_options (TukeyTractorOptions): Options relevant to the data selection
+        pbar (tqdm): A handler to the progress bar
+        write_back_required (bool): Whether a write back is required in all cases
+    """
+    if pbar is not None:
+        pbar.update(taper_chunk_result.chunk_size)
+
+    if taper_chunk_result.nothing_to_do and not write_back_required:
+        logger.debug("No attached data payload, skipping")
+        return
+
+    data_chunk = taper_chunk_result.data_chunk
+    assert data_chunk is not None, f"{data_chunk=}, which should not happen"
+
+    # Only update here is we pass the dry run check above. If data are not copied
+    # upfront for new column than this is necessary
+    if taper_chunk_result.update_data or write_back_required:
+        open_ms_tables.main_table.putcol(
+            columnname=tukey_tractor_options.output_column,
+            value=data_chunk.masked_data,
+            startrow=data_chunk.row_start,
+            nrow=data_chunk.chunk_size,
+        )
+    else:
+        logger.debug("No update of data required, skipping")
+    if taper_chunk_result.update_flags:
+        open_ms_tables.main_table.putcol(
+            columnname="FLAG",
+            value=taper_chunk_result.flags,
+            startrow=data_chunk.row_start,
+            nrow=data_chunk.chunk_size,
+        )
+    else:
+        logger.debug("No updating of flags required, skipping for chunk")
+    if taper_chunk_result.update_weights:
+        logger.debug("Updating weights")
+        assert taper_chunk_result.weights is not None, (
+            "Expected weights to be attached, found None"
+        )
+        for (
+            weight_column_name,
+            scaled_weights,
+        ) in taper_chunk_result.weights.items():
+            open_ms_tables.main_table.putcol(
+                columnname=weight_column_name,
+                value=scaled_weights,
+                startrow=data_chunk.row_start,
+                nrow=data_chunk.chunk_size,
+            )
+    else:
+        logger.debug("No updating of weights")
 
 
 def tukey_tractor(
@@ -950,6 +1075,10 @@ def tukey_tractor(
         tukey_tractor_options = _set_auto_taper_widths(
             open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
         )
+
+    weight_columns: Sequence[str] | None = select_weight_columns(
+        ms_path=ms_path, weight_column=tukey_tractor_options.weight_column
+    )
 
     write_back_required: bool = True
     if not tukey_tractor_options.dry_run:
@@ -1000,6 +1129,7 @@ def tukey_tractor(
                 chunk_size=tukey_tractor_options.chunk_size,
                 data_column=tukey_tractor_options.data_column,
                 number_of_chunks=tukey_tractor_options.max_workers,
+                weight_columns=weight_columns,
             ):
                 start_tukey = time()
                 taper_data_and_flags: list[TaperedChunkResult] = []
@@ -1027,44 +1157,19 @@ def tukey_tractor(
                 # for taper_data_chunk, flags_to_apply in taper_data_and_flags:
                 taper_chunk_result: TaperedChunkResult
                 for taper_chunk_result in taper_data_and_flags:
-                    pbar.update(taper_chunk_result.chunk_size)
-
-                    if taper_chunk_result.nothing_to_do and not write_back_required:
-                        logger.debug("No attached data payload, skipping")
-                        continue
-
-                    data_chunk = taper_chunk_result.data_chunk
-                    assert data_chunk is not None, (
-                        f"{data_chunk=}, which should not happen"
+                    write_back_results(
+                        open_ms_tables=open_ms_tables,
+                        taper_chunk_result=taper_chunk_result,
+                        tukey_tractor_options=tukey_tractor_options,
+                        write_back_required=write_back_required,
+                        pbar=pbar,
                     )
 
-                    # Only update here is we pass the dry run check above. If data are not copied
-                    # upfront for new column than this is necessary
-                    if taper_chunk_result.update_data or write_back_required:
-                        open_ms_tables.main_table.putcol(
-                            columnname=tukey_tractor_options.output_column,
-                            value=data_chunk.masked_data,
-                            startrow=data_chunk.row_start,
-                            nrow=data_chunk.chunk_size,
-                        )
-                    else:
-                        logger.debug("No update of data required, skipping")
-                    if taper_chunk_result.update_flags:
-                        open_ms_tables.main_table.putcol(
-                            columnname="FLAG",
-                            value=taper_chunk_result.flags,
-                            startrow=data_chunk.row_start,
-                            nrow=data_chunk.chunk_size,
-                        )
-                    else:
-                        logger.debug(
-                            "No updating of flags required, skipping for chunk"
-                        )
         stop = time()
         runtime_s = stop - start
-        assert data_chunk is not None, "data_chunk is not formed correctly"
+        assert data_chunk_tuple[-1] is not None, "data_chunk is not formed correctly"
         logger.info(
-            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(data_chunk.freq_chan)} chans in {runtime_s:0.2f}s"
+            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(data_chunk_tuple[-1].freq_chan)} chans in {runtime_s:0.2f}s"
         )
 
         logger.info(
