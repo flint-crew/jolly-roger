@@ -207,7 +207,7 @@ def _get_data_chunk_from_main_table(
         ant_1 = ms_table.getcol("ANTENNA1", startrow=lower_row, nrow=chunk_size)
         ant_2 = ms_table.getcol("ANTENNA2", startrow=lower_row, nrow=chunk_size)
 
-        weights = None
+        weights: None | dict[str, NDArray[np.floating[Any]]] = None
         if weight_columns:
             weights = {
                 weight_column: ms_table.getcol(

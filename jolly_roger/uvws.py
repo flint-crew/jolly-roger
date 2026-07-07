@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,10 +81,7 @@ def construct_guard_region(uvws: u.Quantity, radial_fov: u.Quantity) -> u.Quanti
 def get_object_delay_for_ms(
     ms_path: Path,
     phase_dir: SkyCoord,
-    object_name: str
-    | SkyCoord
-    | list[str | SkyCoord]
-    | tuple[str | SkyCoord, ...] = "sun",
+    object_name: str | SkyCoord | Sequence[str | SkyCoord] = "sun",
     reverse_baselines: bool = False,
     flip_uvw_sign: bool = False,
     radial_fov: u.Quantity | None = None,
@@ -95,7 +93,7 @@ def get_object_delay_for_ms(
     Args:
         ms_path (Path): The measurement set and associated meta-data
         phase_dir (SkyCoord): The phase direction (this couuls be more broadly considered direction 1)
-        object_name (str | SkyCoord | list[str  |  SkyCoord] | tuple[str  |  SkyCoord, ...], optional): The collection of other sky positions to calculate the delays towards. Defaults to "sun".
+        object_name (str | SkyCoord | Sequence[str  |  SkyCoord], optional): The collection of other sky positions to calculate the delays towards. Defaults to "sun".
         reverse_baselines (bool, optional): Whether the MS has antennas recorded as (ant1, ant2) or (ant2, ant1), where ant2 is always larger. Defaults to False.
         flip_uvw_sign (bool, optional): Indicates whether a sign slip needs to be introduced to the UVWs. Defaults to False.
         radial_fov (u.Quantity, optional): The radial angular size of the guard region of the main lobe that will be guarded in delay space. If None no guard boundaries are attached to the returned ``WDelays``.
