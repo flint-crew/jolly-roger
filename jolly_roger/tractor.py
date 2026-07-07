@@ -24,6 +24,7 @@ from tqdm.auto import tqdm
 from jolly_roger.baselines import (
     BaselineData,
     OpenMSTables,
+    beam_fraction_to_radius,
     get_baseline_data,
     get_open_ms_tables,
 )
@@ -403,7 +404,7 @@ def write_output_column(
     ant_2 = baseline_data.ant_2
     _ = ant_1, ant_2
     logger.info(f"Writing {output_column=} for baseline {ant_1} {ant_2}")
-    with table(str(ms_path), readonly=False) as tab:
+    with table(str(ms_path), readonly=False, ack=False) as tab:
         colnames = tab.colnames()
         if output_column not in colnames:
             msg = f"Output column {output_column} does not exist in the measurement set. Cannot write data."
@@ -929,6 +930,8 @@ class TukeyTractorOptions(BaseOptions):
     """The name of the WEIGHT-like column. If None when rewrite is True the WEIGHT-like column will be searched for. Defaults to None."""
     guard_field: bool = False
     """If True derive a region around the delay=0 spectrum that is within the nominal field of view. This better informs contamination between an object and the phase-direction."""
+    guard_field_fraction: float = 0.1
+    """The attenuation level of the main lobe to guard down to, between 0 to  """
 
 
 @dataclass(frozen=True)
@@ -1093,6 +1096,14 @@ def tukey_tractor(
             copy_column_data=tukey_tractor_options.copy_column_data,
         )
 
+    # Calculate the guard field region used to derieve the appropriate delay window
+    radial_fov: u.Quantity | None = None
+    if tukey_tractor_options.guard_field:
+        radial_fov = beam_fraction_to_radius(
+            fraction=tukey_tractor_options.guard_field_fraction,
+            field_of_view=open_ms_tables.nominal_fov,
+        )
+
     # Generate the delay for all baselines and time steps
     w_delays_list = get_object_delay_for_ms(
         ms_path=ms_path,
@@ -1100,9 +1111,7 @@ def tukey_tractor(
         object_name=tukey_tractor_options.target_objects,
         reverse_baselines=tukey_tractor_options.reverse_baselines,
         flip_uvw_sign=tukey_tractor_options.flip_uvw_sign,
-        nominal_fov=open_ms_tables.nominal_fov
-        if tukey_tractor_options.guard_field
-        else None,
+        radial_fov=radial_fov,
     )
     assert all(len(w_delays.w_delays.shape) == 2 for w_delays in w_delays_list), (
         "Sanity check failed, incorrect dimensionality returned"

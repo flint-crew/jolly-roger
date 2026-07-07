@@ -39,17 +39,17 @@ class WDelays:
     """Define a guard region around the delay=0 based on a nominal field of view. Will be of shape {baseline, timestep}"""
 
 
-def construct_guard_region(uvws: u.Quantity, nominal_fov: u.Quantity) -> u.Quantity:
+def construct_guard_region(uvws: u.Quantity, radial_fov: u.Quantity) -> u.Quantity:
     """Construct the expected region around delay=0 to protect the field
     data from being contaminated by objects to be nulled. Implements:
 
-    >>> theta / 2 * np.hypot(u, v) / speed_of_light
+    >>> theta * np.hypot(u, v) / speed_of_light
 
-    where theta is the nominal field of view, and factor of 2 converts to radii
+    where theta is the nominal field of view
 
     Args:
         uvws (u.Quantity): The UVW coordinates, in meters, towards the phase direction
-        nominal_fov (u.Quantity): The nominal field of view to protect, in radians
+        radial_fov (u.Quantity): The radial field of view to protect, in radians
 
     Returns:
         u.Quantity: The guard region for (baseline, timestep), matching the oordering of the ``uvws``
@@ -61,12 +61,12 @@ def construct_guard_region(uvws: u.Quantity, nominal_fov: u.Quantity) -> u.Quant
     )
 
     logger.info(
-        f"Constructing guard region around delay=0 using {nominal_fov.to('deg')}"
+        f"Constructing guard region around delay=0 using {radial_fov.to('deg')}"
     )
 
     # Appears as though the np.hyot is returning m2
     uvws_m = uvws.to("m").value
-    fov = (nominal_fov.to("rad").value / 2 * np.hypot(uvws_m[0], uvws_m[1])) * u.m
+    fov = (radial_fov.to("rad").value * np.hypot(uvws_m[0], uvws_m[1])) * u.m
     fov = (fov / speed_of_light).decompose()
 
     assert fov.ndim == 2, f"Unexpected {fov.shape=}"
@@ -86,7 +86,7 @@ def get_object_delay_for_ms(
     | tuple[str | SkyCoord, ...] = "sun",
     reverse_baselines: bool = False,
     flip_uvw_sign: bool = False,
-    nominal_fov: u.Quantity | None = None,
+    radial_fov: u.Quantity | None = None,
 ) -> list[WDelays]:
     """Calculate the delay between the phase-direction in the measuurement and a set of object directions.
     The delay is calculated by computing the UVWs in both directions and examining the difference in the
@@ -98,7 +98,7 @@ def get_object_delay_for_ms(
         object_name (str | SkyCoord | list[str  |  SkyCoord] | tuple[str  |  SkyCoord, ...], optional): The collection of other sky positions to calculate the delays towards. Defaults to "sun".
         reverse_baselines (bool, optional): Whether the MS has antennas recorded as (ant1, ant2) or (ant2, ant1), where ant2 is always larger. Defaults to False.
         flip_uvw_sign (bool, optional): Indicates whether a sign slip needs to be introduced to the UVWs. Defaults to False.
-        nominal_fov (u.Quantity, optional): The size of the angular FWHM (or FoV) of the main lobe that will be guarded in delay space. If None no guard boundaries are attached to the returned ``WDelays``.
+        radial_fov (u.Quantity, optional): The radial angular size of the guard region of the main lobe that will be guarded in delay space. If None no guard boundaries are attached to the returned ``WDelays``.
 
     Returns:
         list[WDelays]: Description of the delay towards the nominated object. A list of objects will always be returned.
@@ -123,9 +123,9 @@ def get_object_delay_for_ms(
     )
 
     guard_region: None | u.Quantity = None
-    if nominal_fov is not None:
+    if radial_fov is not None:
         guard_region = construct_guard_region(
-            uvws=uvws_phase.uvws, nominal_fov=nominal_fov
+            uvws=uvws_phase.uvws, radial_fov=radial_fov
         )
 
     object_w_delays: list[WDelays] = []

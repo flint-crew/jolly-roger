@@ -38,7 +38,7 @@ class OpenMSTables:
     phase_dir: SkyCoord
     """The phase direction appropriate for the data"""
     nominal_fov: u.Quantity
-    """The field of view that should be representative of the MS"""
+    """The FWHM field-of-view at the lowest frequency representative of the MS"""
 
 
 def _get_phase_dir_for_field_id(ms_table: table, field_table: table) -> SkyCoord:
@@ -69,7 +69,40 @@ def _get_phase_dir_for_field_id(ms_table: table, field_table: table) -> SkyCoord
     return SkyCoord(*(sky_pos).squeeze() * u.rad)
 
 
-def _get_nominal_fov(spw_table: table, antenna_table: table) -> u.Quantity:
+def beam_fraction_to_radius(
+    fraction: float,
+    field_of_view: u.Quantity,
+) -> u.Quantity:
+    """Calculate the angular scale of the radius from the center (e.g. pointed direction)
+    out to a elected antennuation level of the Gaussian primary beam
+    response.
+
+    Args:
+        fraction (float): The fraction to calculate the distance to
+        field_of_view (u.Quantity): The FWHM of the field of view
+
+    Returns:
+        u.Quantity: The adius size in radians
+    """
+    if not 0.0 < fraction < 1.0:
+        msg = f"{fraction=} but needs to be between 0 to 1."
+        raise ValueError(msg)
+
+    beam_fwhm_rad = field_of_view.to("rad").value
+    beam_sigma_rad = beam_fwhm_rad / (2 * np.sqrt(2 * np.log(2)))
+    sigma_request = np.sqrt(2 * np.log(1 / fraction))
+    requested_fov_rad = beam_sigma_rad * sigma_request
+
+    logger.info(f"Request attenuation level: {fraction:.2f}")
+    logger.info(f"Requested FoV (radius): {np.rad2deg(requested_fov_rad):.2f} degrees")
+
+    return requested_fov_rad * u.rad
+
+
+def _get_nominal_fov(
+    spw_table: table,
+    antenna_table: table,
+) -> u.Quantity:
     """Calculate the field of view at the lowest frequency. This is a rather
     simple calculation that assumes a single SPW and single dish diameter
 
@@ -78,11 +111,13 @@ def _get_nominal_fov(spw_table: table, antenna_table: table) -> u.Quantity:
         antenna_table (table): The antenna table of the MS
 
     Returns:
-        u.Quantity: The nominal field-of-view
+        u.Quantity: The nominal radial field-of-view
     """
+    # NOTE; This crew member recognises that we could perhaps also convert
+    # the FWHM -> radius to some PB level here. However, this is called by
+    # the open ms table interface, and I would rather not change that entry
+    # point for an optional/opt-in method
 
-    # TODO: We are assuming a single SPW in the data ftable. This assumption
-    # is consistent with how we calculate the uvws. Just noting.
     lowest_freq = np.min(spw_table.getcol("CHAN_FREQ")) * u.Hz
     longest_lambda = (speed_of_light / lowest_freq).decompose()
 
@@ -93,7 +128,7 @@ def _get_nominal_fov(spw_table: table, antenna_table: table) -> u.Quantity:
     dish_diameter = dish_diameter[0] * u.m
 
     fov = (1.02 * longest_lambda / dish_diameter).decompose() * u.rad
-    logger.info(f"Nominal field-of-view is {fov.to('deg')} deg")
+    logger.info(f"Nominal field-of-view (FWHM) is {fov.to('deg'):.3f}")
 
     return fov
 
