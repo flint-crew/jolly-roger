@@ -348,7 +348,7 @@ def get_sun_uv_scales(
         SunScale: The sun scales in distances
     """
 
-    with table(str(ms_path / "SPECTRAL_WINDOW")) as tab:
+    with table(str(ms_path / "SPECTRAL_WINDOW"), ack=False) as tab:
         chan_freqs = tab.getcol("CHAN_FREQ")[0] * u.Hz
 
     chan_lambda_m = np.squeeze((speed_of_light / chan_freqs).to(u.m))
