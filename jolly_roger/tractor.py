@@ -929,9 +929,9 @@ class TukeyTractorOptions(BaseOptions):
     weight_column: str | None = None
     """The name of the WEIGHT-like column. If None when rewrite is True the WEIGHT-like column will be searched for. Defaults to None."""
     guard_field: bool = False
-    """If True derive a region around the delay=0 spectrum that is within the nominal field of view. This better informs contamination between an object and the phase-direction. Fractions closer to 0 correspond to larger fields of view, and hence larger guard regions in delay space around 0 seconds"""
+    """If True derive a region around the delay=0 spectrum to protect the field-of-view/"""
     guard_field_fraction: float = 0.1
-    """The attenuation level of the main lobe to guard down to, between 0 to  """
+    """The attenuation level of the main lobe to guard to, and should be in the range (0, 1). Values closer to zero correspond to a larger field-of-view, and hence a larger guard band in delay space. """
 
 
 @dataclass(frozen=True)
