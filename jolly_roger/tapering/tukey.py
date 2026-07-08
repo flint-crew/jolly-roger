@@ -150,9 +150,6 @@ def get_2d_taper(
     x_local = symmetric_domain_wrap(
         values=x_local, upper_limit=original_x_local_maximum
     )
-    x_local = symmetric_domain_wrap(
-        values=x_local, upper_limit=original_x_local_maximum
-    )
 
     taper = np.ones_like(x_local)
 

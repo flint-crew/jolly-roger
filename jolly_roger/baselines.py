@@ -77,6 +77,9 @@ def beam_fraction_to_radius(
     out to a elected antennuation level of the Gaussian primary beam
     response.
 
+    A lower fraction leds to a larger field of view, and hence a larger guarding band around
+    delay of 0.
+
     Args:
         fraction (float): The fraction to calculate the distance to
         field_of_view (u.Quantity): The FWHM of the field of view
@@ -85,7 +88,7 @@ def beam_fraction_to_radius(
         u.Quantity: The adius size in radians
     """
     if not 0.0 < fraction < 1.0:
-        msg = f"{fraction=} but needs to be between 0 to 1."
+        msg = f"{fraction=} but needs to be in the range (0, 1)."
         raise ValueError(msg)
 
     beam_fwhm_rad = field_of_view.to("rad").value
@@ -192,7 +195,7 @@ class BaselineData:
 
 @dataclass
 class BaselineArrays:
-    data: NDArray[np.complexfloating]
+    data: NDArray[np.complexfloating[Any]]
     flags: NDArray[np.bool_]
     uvws: NDArray[np.floating[Any]]
     time_centroid: NDArray[np.floating[Any]]
