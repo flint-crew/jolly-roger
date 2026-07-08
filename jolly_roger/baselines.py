@@ -12,6 +12,7 @@ from typing import Any, cast
 import astropy.units as u
 import matplotlib.pyplot as plt
 import numpy as np
+from astropy.constants import c as speed_of_light
 from astropy.coordinates import SkyCoord
 from astropy.time import Time
 from casacore.tables import table, taql
@@ -30,10 +31,14 @@ class OpenMSTables:
     """The spectral window table"""
     field_table: table
     """The field table"""
+    antenna_table: table
+    """The antenna table"""
     ms_path: Path
     """The path to the MS used to open tables"""
     phase_dir: SkyCoord
     """The phase direction appropriate for the data"""
+    nominal_fov: u.Quantity
+    """The FWHM field-of-view at the lowest frequency representative of the MS"""
 
 
 def _get_phase_dir_for_field_id(ms_table: table, field_table: table) -> SkyCoord:
@@ -64,6 +69,73 @@ def _get_phase_dir_for_field_id(ms_table: table, field_table: table) -> SkyCoord
     return SkyCoord(*(sky_pos).squeeze() * u.rad)
 
 
+def beam_fraction_to_radius(
+    fraction: float,
+    field_of_view: u.Quantity,
+) -> u.Quantity:
+    """Calculate the angular scale of the radius from the center (e.g. pointed direction)
+    out to a elected antennuation level of the Gaussian primary beam
+    response.
+
+    A lower fraction leds to a larger field of view, and hence a larger guarding band around
+    delay of 0.
+
+    Args:
+        fraction (float): The fraction to calculate the distance to
+        field_of_view (u.Quantity): The FWHM of the field of view
+
+    Returns:
+        u.Quantity: The adius size in radians
+    """
+    if not 0.0 < fraction < 1.0:
+        msg = f"{fraction=} but needs to be in the range (0, 1)."
+        raise ValueError(msg)
+
+    beam_fwhm_rad = field_of_view.to("rad").value
+    beam_sigma_rad = beam_fwhm_rad / (2 * np.sqrt(2 * np.log(2)))
+    sigma_request = np.sqrt(2 * np.log(1 / fraction))
+    requested_fov_rad = beam_sigma_rad * sigma_request
+
+    logger.info(f"Request attenuation level: {fraction:.2f}")
+    logger.info(f"Requested FoV (radius): {np.rad2deg(requested_fov_rad):.2f} degrees")
+
+    return requested_fov_rad * u.rad
+
+
+def _get_nominal_fov(
+    spw_table: table,
+    antenna_table: table,
+) -> u.Quantity:
+    """Calculate the field of view at the lowest frequency. This is a rather
+    simple calculation that assumes a single SPW and single dish diameter
+
+    Args:
+        spw_table (table): The spectral window table of the MS
+        antenna_table (table): The antenna table of the MS
+
+    Returns:
+        u.Quantity: The nominal radial field-of-view
+    """
+    # NOTE; This crew member recognises that we could perhaps also convert
+    # the FWHM -> radius to some PB level here. However, this is called by
+    # the open ms table interface, and I would rather not change that entry
+    # point for an optional/opt-in method
+
+    lowest_freq = np.min(spw_table.getcol("CHAN_FREQ")) * u.Hz
+    longest_lambda = (speed_of_light / lowest_freq).decompose()
+
+    dish_diameter = np.unique(antenna_table.getcol("DISH_DIAMETER"))
+    assert len(dish_diameter) == 1, (
+        f"{len(dish_diameter)} dish sizes found, which is not reasonable"
+    )
+    dish_diameter = dish_diameter[0] * u.m
+
+    fov = (1.02 * longest_lambda / dish_diameter).decompose() * u.rad
+    logger.info(f"Nominal field-of-view (FWHM) is {fov.to('deg'):.3f}")
+
+    return fov
+
+
 def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
     """Open up the set of MS table and sub-tables necessary for tractoring.
 
@@ -77,10 +149,12 @@ def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
     main_table = table(str(ms_path), ack=False, readonly=read_only)
     spw_table = table(str(ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=read_only)
     field_table = table(str(ms_path / "FIELD"), ack=False, readonly=read_only)
+    antenna_table = table(str(ms_path / "ANTENNA"), ack=False, readonly=read_only)
 
     phase_dir = _get_phase_dir_for_field_id(
         ms_table=main_table, field_table=field_table
     )
+    nominal_fov = _get_nominal_fov(spw_table=spw_table, antenna_table=antenna_table)
     # TODO: Get the data without auto-correlations e.g.
     # no_auto_main_table = taql(
     #     "select from $main_table where ANTENNA1 != ANTENNA2",
@@ -90,8 +164,10 @@ def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
         main_table=main_table,
         spw_table=spw_table,
         field_table=field_table,
+        antenna_table=antenna_table,
         ms_path=ms_path,
         phase_dir=phase_dir,
+        nominal_fov=nominal_fov,
     )
 
 
@@ -119,7 +195,7 @@ class BaselineData:
 
 @dataclass
 class BaselineArrays:
-    data: NDArray[np.complexfloating]
+    data: NDArray[np.complexfloating[Any]]
     flags: NDArray[np.bool_]
     uvws: NDArray[np.floating[Any]]
     time_centroid: NDArray[np.floating[Any]]

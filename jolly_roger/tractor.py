@@ -24,6 +24,7 @@ from tqdm.auto import tqdm
 from jolly_roger.baselines import (
     BaselineData,
     OpenMSTables,
+    beam_fraction_to_radius,
     get_baseline_data,
     get_open_ms_tables,
 )
@@ -34,6 +35,7 @@ from jolly_roger.response import (
     calculate_expected_sinc_width,
     get_delay_of_nth_sidelobe,
 )
+from jolly_roger.tapering.tukey import get_2d_taper
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_for_ms
 from jolly_roger.weights import scale_multiple_weights, select_weight_columns
@@ -72,7 +74,7 @@ def tukey_taper(
     # Copy to avoid side-effects
     x_local = x.copy()
 
-    if (outer_width - tukey_width) < 0.0:
+    if np.any((outer_width - tukey_width) < 0.0):
         # If this is true than the two 'transition' regions between 1 and 0 overlap.
         # This should not happen, so we simply will make it so no '1' region. In this extreme
         # the window is just a 1 - cos function
@@ -402,7 +404,7 @@ def write_output_column(
     ant_2 = baseline_data.ant_2
     _ = ant_1, ant_2
     logger.info(f"Writing {output_column=} for baseline {ant_1} {ant_2}")
-    with table(str(ms_path), readonly=False) as tab:
+    with table(str(ms_path), readonly=False, ack=False) as tab:
         colnames = tab.colnames()
         if output_column not in colnames:
             msg = f"Output column {output_column} does not exist in the measurement set. Cannot write data."
@@ -623,11 +625,11 @@ def _tukey_tractor(
     )
 
     # Make taper with all units in seconds
-    taper = tukey_taper(
+    taper = get_2d_taper(
         x=delay_time.delay.to("s").value,
         outer_width=tukey_tractor_options.outer_width_ns * 1e-9,
         tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9,
-        tukey_x_offset=tukey_x_offset_sec,
+        tukey_offset=tukey_x_offset_sec,
     )
 
     # TODO: This pirate reckons that merging the masks together
@@ -637,11 +639,8 @@ def _tukey_tractor(
     # The use of the `tukey_x_offset` changes the
     # shape of the output array. The internals of that
     # function returns a different shape via the broadcasting
-    taper = np.swapaxes(taper[:, :, None], 0, 1)
 
-    # Since we want to dampen the target object we invert the taper.
-    # By default the taper dampers outside the inner region.
-    taper = 1.0 - taper
+    taper = np.swapaxes(taper[:, :, None], 0, 1)
     # taper shape is [chunk_size, no_channels, no_pols]
 
     # apply the flags to ignore the tapering if the object is larger
@@ -662,17 +661,20 @@ def _tukey_tractor(
     # This by computing the taper towards the field and
     # see if there are any components of the two sets of tapers
     # that are not 1 (where 1 is 'no change').
-    field_taper = tukey_taper(
+    field_outer_width = tukey_tractor_options.outer_width_ns * 1e-9
+    if w_delays.guard_region is not None:
+        field_outer_width += w_delays.guard_region[baseline_idx, time_idx].to("s").value
+
+    field_taper = get_2d_taper(
         x=delay_time.delay.to("s").value,
-        outer_width=tukey_tractor_options.outer_width_ns * 1e-9,
+        outer_width=field_outer_width,
         tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9,
-        tukey_x_offset=None,
+        tukey_offset=None,
     )
     # field_taper.shape is [no_channels, ]
     # We need to account for no broadcasting when offset is None
     # as the returned shape is different
-    field_taper = field_taper[None, :, None]
-    field_taper = 1.0 - field_taper
+    field_taper = np.swapaxes(field_taper[:, :, None], 0, 1)
     intersecting_taper = np.any(
         np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
     )
@@ -684,12 +686,10 @@ def _tukey_tractor(
         # The delay spectrum are complex quantities, and we need to compare
         # the flux
         # Make a stokes I type spectrum
-        # logger.info(f"{delay_time.delay_time.shape=}")
         abs_delay_time = np.abs(np.sum(delay_time.delay_time[..., [0, -1]], axis=-1))
-        # output of the field taper is constant over rows, so
-        # some broadcasting is needed to handle the array shapes
+
         _field_taper = np.squeeze(field_taper)
-        field_stats = np.max(abs_delay_time * (1.0 - _field_taper)[None, :], axis=1)
+        field_stats = np.max(abs_delay_time * (1.0 - _field_taper), axis=1)
         object_stats = np.max(abs_delay_time * (1.0 - taper[..., 0]), axis=1)
 
         # Depending on size of chunk this could be expensive
@@ -928,6 +928,10 @@ class TukeyTractorOptions(BaseOptions):
     """Attempt to identify a WEIGHT-like column and rescale to indicate modified data. Defaults to False."""
     weight_column: str | None = None
     """The name of the WEIGHT-like column. If None when rewrite is True the WEIGHT-like column will be searched for. Defaults to None."""
+    guard_field: bool = False
+    """If True derive a region around the delay=0 spectrum to protect the field-of-view/"""
+    guard_field_fraction: float = 0.1
+    """The attenuation level of the main lobe to guard to, and should be in the range (0, 1). Values closer to zero correspond to a larger field-of-view, and hence a larger guard band in delay space. """
 
 
 @dataclass(frozen=True)
@@ -1092,6 +1096,14 @@ def tukey_tractor(
             copy_column_data=tukey_tractor_options.copy_column_data,
         )
 
+    # Calculate the guard field region used to derieve the appropriate delay window
+    radial_fov: u.Quantity | None = None
+    if tukey_tractor_options.guard_field:
+        radial_fov = beam_fraction_to_radius(
+            fraction=tukey_tractor_options.guard_field_fraction,
+            field_of_view=open_ms_tables.nominal_fov,
+        )
+
     # Generate the delay for all baselines and time steps
     w_delays_list = get_object_delay_for_ms(
         ms_path=ms_path,
@@ -1099,6 +1111,7 @@ def tukey_tractor(
         object_name=tukey_tractor_options.target_objects,
         reverse_baselines=tukey_tractor_options.reverse_baselines,
         flip_uvw_sign=tukey_tractor_options.flip_uvw_sign,
+        radial_fov=radial_fov,
     )
     assert all(len(w_delays.w_delays.shape) == 2 for w_delays in w_delays_list), (
         "Sanity check failed, incorrect dimensionality returned"
@@ -1108,7 +1121,7 @@ def tukey_tractor(
         pool: None | ThreadPoolExecutor = None
         if tukey_tractor_options.max_workers > 1:
             logger.info(
-                f"Starting {tukey_tractor_options.max_workers} computer workers. Be mindful of {tukey_tractor_options.chunk_size=}"
+                f"Starting {tukey_tractor_options.max_workers} compute workers. Be mindful of {tukey_tractor_options.chunk_size=}"
             )
             pool = ThreadPoolExecutor(max_workers=tukey_tractor_options.max_workers)
 

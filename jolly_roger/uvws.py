@@ -36,6 +36,46 @@ class WDelays:
     """The mapping between time (MJDs from measurement set) to index"""
     elevation: u.Quantity
     """The elevation of the target object in time order of steps in the MS"""
+    guard_region: u.Quantity | None = None
+    """Define a guard region around the delay=0 based on a nominal field of view. Will be of shape {baseline, timestep}"""
+
+
+def construct_guard_region(uvws: u.Quantity, radial_fov: u.Quantity) -> u.Quantity:
+    """Construct the expected region around delay=0 to protect the field
+    data from being contaminated by objects to be nulled. Implements:
+
+    >>> theta * np.hypot(u, v) / speed_of_light
+
+    where theta is the nominal field of view
+
+    Args:
+        uvws (u.Quantity): The UVW coordinates, in meters, towards the phase direction
+        radial_fov (u.Quantity): The radial field of view to protect, in radians
+
+    Returns:
+        u.Quantity: The guard region for (baseline, timestep), matching the oordering of the ``uvws``
+    """
+
+    assert uvws.ndim == 3, f"Expected a rank 3 array, got {uvws.shape=}"
+    assert uvws.shape[0] == 3, (
+        f"Expected first axies to be (u,v,w), got something else, {uvws.shape=}"
+    )
+
+    logger.info(
+        f"Constructing guard region around delay=0 using {radial_fov.to('deg')}"
+    )
+
+    # Appears as though the np.hyot is returning m2
+    uvws_m = uvws.to("m").value
+    fov = (radial_fov.to("rad").value * np.hypot(uvws_m[0], uvws_m[1])) * u.m
+    fov = (fov / speed_of_light).decompose()
+
+    assert fov.ndim == 2, f"Unexpected {fov.shape=}"
+    assert fov.shape == uvws.shape[1:], (
+        f"Mismatch in expected dimensions {fov.shape=} to {uvws.shape[1:]=}"
+    )
+
+    return fov
 
 
 def get_object_delay_for_ms(
@@ -44,6 +84,7 @@ def get_object_delay_for_ms(
     object_name: str | SkyCoord | Sequence[str | SkyCoord] = "sun",
     reverse_baselines: bool = False,
     flip_uvw_sign: bool = False,
+    radial_fov: u.Quantity | None = None,
 ) -> list[WDelays]:
     """Calculate the delay between the phase-direction in the measuurement and a set of object directions.
     The delay is calculated by computing the UVWs in both directions and examining the difference in the
@@ -55,6 +96,7 @@ def get_object_delay_for_ms(
         object_name (str | SkyCoord | Sequence[str  |  SkyCoord], optional): The collection of other sky positions to calculate the delays towards. Defaults to "sun".
         reverse_baselines (bool, optional): Whether the MS has antennas recorded as (ant1, ant2) or (ant2, ant1), where ant2 is always larger. Defaults to False.
         flip_uvw_sign (bool, optional): Indicates whether a sign slip needs to be introduced to the UVWs. Defaults to False.
+        radial_fov (u.Quantity, optional): The radial angular size of the guard region of the main lobe that will be guarded in delay space. If None no guard boundaries are attached to the returned ``WDelays``.
 
     Returns:
         list[WDelays]: Description of the delay towards the nominated object. A list of objects will always be returned.
@@ -77,6 +119,12 @@ def get_object_delay_for_ms(
     uvws_phase = xyz_to_uvw(
         baselines=baselines, hour_angles=hour_angles_phase, flip_uvw_sign=flip_uvw_sign
     )
+
+    guard_region: None | u.Quantity = None
+    if radial_fov is not None:
+        guard_region = construct_guard_region(
+            uvws=uvws_phase.uvws, radial_fov=radial_fov
+        )
 
     object_w_delays: list[WDelays] = []
 
@@ -104,6 +152,7 @@ def get_object_delay_for_ms(
             b_map=baselines.b_map,
             time_map=hour_angles_phase.time_map,
             elevation=hour_angles_object.elevation,
+            guard_region=guard_region,
         )
         logger.info(f"Have created for {w_delay.object_name}")
         object_w_delays.append(w_delay)
@@ -297,7 +346,7 @@ def get_sun_uv_scales(
         SunScale: The sun scales in distances
     """
 
-    with table(str(ms_path / "SPECTRAL_WINDOW")) as tab:
+    with table(str(ms_path / "SPECTRAL_WINDOW"), ack=False) as tab:
         chan_freqs = tab.getcol("CHAN_FREQ")[0] * u.Hz
 
     chan_lambda_m = np.squeeze((speed_of_light / chan_freqs).to(u.m))
