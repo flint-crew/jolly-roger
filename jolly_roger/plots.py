@@ -233,6 +233,7 @@ def plot_baseline_comparison_data(
                 ):
                     import matplotlib.patheffects as pe  # noqa: PLC0415
 
+                    current_zone = np.mean(wrapped_data.zones[object_slice])
                     ax5.plot(
                         before_baseline_data.time[object_slice],
                         wrapped_data.values[object_slice],
@@ -247,7 +248,7 @@ def plot_baseline_comparison_data(
                             ),  # Add some contrast to help read line stand out
                             pe.Normal(),
                         ],
-                        dashes=(2 * _zone_idx + 1, 2 * _zone_idx + 1),
+                        dashes=(1.2 * current_zone + 1, 1.2 * current_zone + 1),
                     )
 
                 if outer_width_ns is not None:
