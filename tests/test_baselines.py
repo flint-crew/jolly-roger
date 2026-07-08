@@ -22,5 +22,5 @@ def test_beam_fraction_to_radius_out_of_bounds() -> None:
     """Makes sure that a fraction that is not between 0 to 1 is captured"""
 
     for fraction in (-1, -0.5, 0, 1, 1.5, 2):
-        with pytest.raises(ValueError, match="needs to be between"):
+        with pytest.raises(ValueError, match="needs to be in the range"):
             beam_fraction_to_radius(fraction=fraction, field_of_view=1 * u.deg)
