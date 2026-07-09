@@ -693,7 +693,7 @@ def _tukey_tractor(
 
         _field_taper = np.squeeze(field_taper)
         field_stats = np.max(abs_delay_time * (1.0 - _field_taper), axis=1)
-        object_stats = np.max(abs_delay_time * (1.0 - taper), axis=1)
+        object_stats = np.max(abs_delay_time * (1.0 - taper[..., 0]), axis=1)
 
         if tukey_tractor_options.compare_to_field is not None:
             flux_mask = (
