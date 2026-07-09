@@ -682,7 +682,10 @@ def _tukey_tractor(
     # Here we consider what to do if want to compare brightness of the object in delay
     # space is less than that of the field. If the object is not detected we ought to
     # set the tape to 1 so the data are not modified
-    if tukey_tractor_options.compare_to_field:
+    if (
+        tukey_tractor_options.compare_to_field
+        or tukey_tractor_options.object_minimum_flux
+    ):
         # The delay spectrum are complex quantities, and we need to compare
         # the flux
         # Make a stokes I type spectrum
@@ -690,17 +693,23 @@ def _tukey_tractor(
 
         _field_taper = np.squeeze(field_taper)
         field_stats = np.max(abs_delay_time * (1.0 - _field_taper), axis=1)
-        object_stats = np.max(abs_delay_time * (1.0 - taper[..., 0]), axis=1)
+        object_stats = np.max(abs_delay_time * (1.0 - taper), axis=1)
 
         # Depending on size of chunk this could be expensive
         logger.debug("np.sum(_field_taper)=%f", np.sum(_field_taper))
         logger.debug("np.sum(taper[0, :, 0])=%f", np.sum(taper[0, :, 0]))
 
-        flux_mask = object_stats < tukey_tractor_options.compare_to_field * field_stats
+        if tukey_tractor_options.compare_to_field:
+            flux_mask = (
+                object_stats < tukey_tractor_options.compare_to_field * field_stats
+            )
 
-        # For any element where there is not enough flux set the taper so
-        # it does not modify the data
-        taper[flux_mask, :] = 1.0
+            # For any element where there is not enough flux set the taper so
+            # it does not modify the data
+            taper[flux_mask, :] = 1.0
+        if tukey_tractor_options.object_minimum_flux:
+            min_flux_mask = object_stats < tukey_tractor_options.object_minimum_flux
+            taper[min_flux_mask, :] = 1.0
 
     # # Should the data need to be modified in conjunction with the flags
     # taper[
@@ -932,6 +941,8 @@ class TukeyTractorOptions(BaseOptions):
     """If True derive a region around the delay=0 spectrum to protect the field-of-view/"""
     guard_field_fraction: float = 0.1
     """The attenuation level of the main lobe to guard to, and should be in the range (0, 1). Values closer to zero correspond to a larger field-of-view, and hence a larger guard band in delay space. """
+    object_minimum_flux: float | None = None
+    """The minimum absolute flux an object should have (as measured in delay space in Jy) for it to be nulled"""
 
 
 @dataclass(frozen=True)
