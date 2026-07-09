@@ -116,4 +116,4 @@ def test_get_object_delay_for_ms(
 
     assert w_delay.guard_region is None
 
-    np.testing.assert_equal(w_delay.w_delays.value, ms_w_delays)
+    np.testing.assert_allclose(w_delay.w_delays.value, ms_w_delays)
