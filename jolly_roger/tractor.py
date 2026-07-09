@@ -683,8 +683,8 @@ def _tukey_tractor(
     # space is less than that of the field. If the object is not detected we ought to
     # set the tape to 1 so the data are not modified
     if (
-        tukey_tractor_options.compare_to_field
-        or tukey_tractor_options.object_minimum_flux
+        tukey_tractor_options.compare_to_field is not None
+        or tukey_tractor_options.object_minimum_flux is not None
     ):
         # The delay spectrum are complex quantities, and we need to compare
         # the flux
@@ -695,11 +695,7 @@ def _tukey_tractor(
         field_stats = np.max(abs_delay_time * (1.0 - _field_taper), axis=1)
         object_stats = np.max(abs_delay_time * (1.0 - taper), axis=1)
 
-        # Depending on size of chunk this could be expensive
-        logger.debug("np.sum(_field_taper)=%f", np.sum(_field_taper))
-        logger.debug("np.sum(taper[0, :, 0])=%f", np.sum(taper[0, :, 0]))
-
-        if tukey_tractor_options.compare_to_field:
+        if tukey_tractor_options.compare_to_field is not None:
             flux_mask = (
                 object_stats < tukey_tractor_options.compare_to_field * field_stats
             )
@@ -707,7 +703,7 @@ def _tukey_tractor(
             # For any element where there is not enough flux set the taper so
             # it does not modify the data
             taper[flux_mask, :] = 1.0
-        if tukey_tractor_options.object_minimum_flux:
+        if tukey_tractor_options.object_minimum_flux is not None:
             min_flux_mask = object_stats < tukey_tractor_options.object_minimum_flux
             taper[min_flux_mask, :] = 1.0
 
