@@ -70,11 +70,11 @@ def test_hour_angles(
 
     for key, val in hour_angles.time_map.items():
         if val == 0:
-            assert key.value == 5156647267.627391
+            assert key.value == 5156647267.627391  # type: ignore[attr-defined]
         if val == 1:
-            assert key.value == 5156647277.58067
+            assert key.value == 5156647277.58067  # type: ignore[attr-defined]
         if val == 2:
-            assert key.value == 5156647287.533951
+            assert key.value == 5156647287.533951  # type: ignore[attr-defined]
 
 
 def test_get_object_delay_for_ms(
@@ -102,13 +102,13 @@ def test_get_object_delay_for_ms(
     for key, val in w_delay.b_map.items():
         assert ms_b_map[key] == val
 
-    for key, val in w_delay.time_map.items():
+    for key, val in w_delay.time_map.items():  # type: ignore[assignment]
         if val == 0:
-            assert key.value == 5156647267.627391
+            assert key.value == 5156647267.627391  # type: ignore[attr-defined]
         if val == 1:
-            assert key.value == 5156647277.58067
+            assert key.value == 5156647277.58067  # type: ignore[attr-defined]
         if val == 2:
-            assert key.value == 5156647287.533951
+            assert key.value == 5156647287.533951  # type: ignore[attr-defined]
 
     np.testing.assert_allclose(
         w_delay.elevation.deg, np.array([0.47442616, 0.47274064, 0.47106702])

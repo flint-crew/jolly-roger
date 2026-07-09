@@ -57,7 +57,7 @@ def ms_w_delays() -> np.ndarray:
 def ms_b_map() -> dict[Any, Any]:
     resource = files("jolly_roger.data").joinpath("tests", "b_map.pkl")
     with as_file(resource) as path, path.open("rb") as f:
-        return pickle.load(f)
+        return dict(pickle.load(f))
 
 
 @pytest.fixture
