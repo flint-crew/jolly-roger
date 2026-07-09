@@ -65,8 +65,29 @@ def plot_baseline_comparison_data(
     w_delays: WDelays | list[WDelays] | None = None,
     outer_width_ns: float | None = None,
 ) -> Path:
+    """Make a comparison figure showing the before and after the nulling process,
+    including an examination spectral axis and the formed delay spectrum.
+    Each object being nulled also is included as an overlap to highlight the oath
+    that is taken through the delay space.
+
+    Args:
+        before_baseline_data (BaselineData): The baseline data from the before state
+        after_baseline_data (BaselineData): The baseline data from the after state
+        before_delays (DelayTime): Delays formed that correspond to the spectral axis from the before state
+        after_delays (DelayTime): Delays formed that correspond to the spectral axis from the after state
+        output_path (Path): The location that the figure will be saved to
+        w_delays (WDelays | list[WDelays] | None, optional): Delays corresponding to objects that have been nulled. Defaults to None.
+        outer_width_ns (float | None, optional): The taper size. Defaults to None.
+
+    Returns:
+        Path: Path to the saved figure
+    """
     if w_delays is not None:
         w_delays = [w_delays] if isinstance(w_delays, WDelays) else w_delays
+
+        # By construction all the WDelay objects will be from the same array
+        ant_1, ant_2 = before_baseline_data.ant_1, before_baseline_data.ant_2
+        b_idx = w_delays[0].b_map[ant_1, ant_2]
 
     with quantity_support(), time_support():
         before_amp_stokesi = np.abs(
@@ -125,6 +146,10 @@ def plot_baseline_comparison_data(
         ax2.set_axis_off()
         if w_delays:
             ax2.set_axis_on()
+            ax2_zone = ax2.twinx()
+            ax2.axhline(0, lw=4, color="black", ls="-")
+
+            max_zone = 0
             for _object_idx, _w_delays in enumerate(w_delays):
                 plot_elevation = _w_delays.elevation.to("deg")
                 ax2.plot(
@@ -133,7 +158,15 @@ def plot_baseline_comparison_data(
                     label=_w_delays.object_name,
                     color=f"C{_object_idx}",
                 )
-            ax2.axhline(0, lw=4, color="black", ls="-")
+                plot_delay = _w_delays.w_delays[b_idx].to("ns").value
+                plot_zone = calculate_wrapped_data(
+                    values=plot_delay,
+                    upper_limit=np.max(after_delays.delay.to("ns")).value,
+                )
+                ax2_zone.plot(before_baseline_data.time, plot_zone.zones, ls="--")
+                object_max_zone = max(plot_zone.zones)
+                max_zone = object_max_zone if object_max_zone > max_zone else max_zone
+            ax2_zone.set(ylabel="Nyquist Zone", ylim=[0, max_zone + 1])
             ax2.legend()
             ax2.grid()
             ax2.set(
@@ -190,8 +223,6 @@ def plot_baseline_comparison_data(
 
         if w_delays is not None:
             for _object_idx, _w_delays in enumerate(w_delays):
-                ant_1, ant_2 = before_baseline_data.ant_1, before_baseline_data.ant_2
-                b_idx = _w_delays.b_map[ant_1, ant_2]
                 wrapped_data = calculate_wrapped_data(
                     values=_w_delays.w_delays[b_idx].to("ns").value,
                     upper_limit=np.max(after_delays.delay.to("ns")).value,
@@ -202,6 +233,7 @@ def plot_baseline_comparison_data(
                 ):
                     import matplotlib.patheffects as pe  # noqa: PLC0415
 
+                    current_zone = np.mean(wrapped_data.zones[object_slice])
                     ax5.plot(
                         before_baseline_data.time[object_slice],
                         wrapped_data.values[object_slice],
@@ -216,7 +248,7 @@ def plot_baseline_comparison_data(
                             ),  # Add some contrast to help read line stand out
                             pe.Normal(),
                         ],
-                        dashes=(2 * _zone_idx + 1, 2 * _zone_idx + 1),
+                        dashes=(1.2 * current_zone + 1, 1.2 * current_zone + 1),
                     )
 
                 if outer_width_ns is not None:
