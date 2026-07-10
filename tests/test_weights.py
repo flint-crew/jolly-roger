@@ -3,13 +3,61 @@ and modification based on tapered properties"""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+import pytest
+from casacore.tables import table
 
 from jolly_roger.weights import (
+    _get_column_names,
     calculate_scaling_from_taper,
+    find_weight_columns,
     scale_multiple_weights,
     scale_weights,
+    select_weight_columns,
 )
+
+
+def test_select_weight_column(ms_example: Path) -> None:
+    """Handling the logic around overriding the automatic weight column finder"""
+
+    with pytest.raises(ValueError, match="Specified weight_column="):
+        weight_column = select_weight_columns(
+            ms_path=Path(ms_example), weight_column="SPARROW"
+        )
+
+    with table(str(ms_example), ack=False, readonly=False) as tab:
+        tab.renamecol("WEIGHT", "SPARROW")
+
+    weight_column = select_weight_columns(
+        ms_path=Path(ms_example), weight_column="SPARROW"
+    )
+
+    assert isinstance(weight_column, list)
+    assert len(weight_column) == 1
+    assert weight_column[0] == "SPARROW"
+
+
+def test_find_weight_column(ms_example: Path) -> None:
+    """Automatically identify a WEIGHT-like column"""
+
+    weight_columns = find_weight_columns(ms_path=Path(ms_example))
+    assert isinstance(weight_columns, list)
+    assert weight_columns[0] == "WEIGHT"
+    assert len(weight_columns) == 1
+
+
+def test_get_column_names(ms_example: Path) -> None:
+    """Very simple assessment of the helper function"""
+    column_names = _get_column_names(ms_path=Path(ms_example))
+
+    assert len(column_names) == 22
+    # A non-exhaustive list
+    assert all(
+        col in column_names
+        for col in ("UVW", "FLAG", "WEIGHT", "SIGMA", "ANTENNA1", "ANTENNA2")
+    )
 
 
 def test_scale_multiple_weights() -> None:
