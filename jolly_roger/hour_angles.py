@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import astropy.units as u
 import numpy as np
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_sun
 from astropy.time import Time
-from casacore.tables import table
+from numpy.typing import NDArray
 
+from jolly_roger.baselines import OpenMSTables, get_open_ms_tables
 from jolly_roger.logging import logger
 
 
@@ -39,70 +40,24 @@ class PositionHourAngles:
     position"""
 
 
-def _process_position(
-    position: SkyCoord | str | None = None,
-    ms_path: Path | None = None,
-    times: Time | None = None,
-) -> SkyCoord:
-    """Acquire a SkyCoord object towards a specified position. If
-    a known string position is provided this will be looked up and
-    may required the `times` (e.g. for the sun). Otherwise is position
-    is None it will be drawn from the PHASE_DIR in the provided measurement
-    set
+def resolve_position(position: SkyCoord | str, times: Time) -> SkyCoord:
+    """Resolve a named or "sun" position to a SkyCoord, or pass a SkyCoord through.
 
     Args:
-        position (SkyCoord | str | None, optional): The position to be considered. Defaults to None.
-        ms_path (Path | None, optional): The path with the PHASE_DIR to use should `position` be None. Defaults to None.
-        times (Time | None, optional): Times to used if they are required in the lookup. Defaults to None.
-
-    Raises:
-        ValueError: Raised if a string position is provided without a `times`
-        ValueError: Raised is position is None and no ms_path provided
-        ValueError: Raised if no final SkyCoord is constructed
+        position (SkyCoord | str): The position, or a name/"sun" to look up
+        times (Time): Times used when resolving a time-dependent position (the Sun)
 
     Returns:
-        SkyCoord: The position to use
+        SkyCoord: The resolved position
     """
-
     if isinstance(position, str):
-        if times is None:
-            msg = f"{times=}, but needs to be set when position is a name"
-            raise ValueError(msg)
         if position.lower() == "sun":
             logger.info("Getting sky-position of the Sun")
-            position = get_sun(times)
-        else:
-            logger.info(f"Getting sky-position of {position=}")
-            position = SkyCoord.from_name(position)
+            return get_sun(times)
+        logger.info(f"Getting sky-position of {position=}")
+        return SkyCoord.from_name(position)
 
-    if position is None:
-        # Best effort basis here
-        if ms_path is None:
-            msg = f"{position=}, so default position can't be drawn. Provide a ms_path="
-            raise ValueError(msg)
-
-        logger.info("Examining FIELD_ID in data table")
-        with table(str(ms_path), readonly=True, ack=False) as tab:
-            field_id = np.unique(tab.getcol("FIELD_ID"))
-            logger.info(f"Found {len(field_id)} field directions")
-            if field_id > 1:
-                msg = f"More than one field found in data table, {field_id=}"
-                raise ValueError(msg)
-
-            field_id = field_id[0]
-
-        with table(str(ms_path / "FIELD"), readonly=True, ack=False) as tab:
-            logger.info(f"Getting the sky-position from PHASE_DIR of {ms_path=}")
-            field_positions = tab.getcol("PHASE_DIR")[field_id]
-            logger.info(f"Extracted {field_positions=}")
-            position = SkyCoord(*(field_positions * u.rad).squeeze())
-
-    if isinstance(position, SkyCoord):
-        return position
-
-    # Someone sea dog is having a laugh
-    msg = "Something went wrong in the processing of position"
-    raise ValueError(msg)
+    return position
 
 
 def _get_average_location(locations: EarthLocation) -> EarthLocation:
@@ -121,43 +76,52 @@ def _get_average_location(locations: EarthLocation) -> EarthLocation:
     )
 
 
-def get_location_from_ms(ms_path: Path) -> EarthLocation:
-    with table(ms_path.as_posix(), ack=False) as tab:
-        positions = table(tab.getkeyword("ANTENNA")).getcol("POSITION")
+def get_location(positions: NDArray[np.floating[Any]]) -> EarthLocation:
+    """Array-averaged geocentric location from antenna positions.
 
+    Args:
+        positions (NDArray[np.floating[Any]]): Antenna geocentric (X,Y,Z), in m
+
+    Returns:
+        EarthLocation: The averaged array location
+    """
     locations = EarthLocation.from_geocentric(*positions.T, unit=u.m)
-
     return _get_average_location(locations)
 
 
-def make_hour_angles_for_ms(
-    ms_path: Path,
-    position: SkyCoord | str | None = None,
+def get_location_from_tables(open_ms_tables: OpenMSTables) -> EarthLocation:
+    return get_location(open_ms_tables.antenna_table.getcol("POSITION"))
+
+
+def get_location_from_ms(ms_path: Path) -> EarthLocation:
+    with get_open_ms_tables(ms_path) as open_ms_tables:
+        return get_location_from_tables(open_ms_tables)
+
+
+def make_hour_angles(
+    times_mjds: u.Quantity,
+    location: EarthLocation,
+    position: SkyCoord | str,
     whole_day: bool = False,
 ) -> PositionHourAngles:
-    """Calculate hour-angle and time quantities for a given position using time information
-    encoded in a nominated measurement set at a nominated location
+    """Calculate hour-angle and time quantities for a position at a location.
 
     Args:
-        ms_path (Path): Measurement set to usefor time and sky-position information
-        phase_dir (SkyCoord): The phase direction of the measurement set
-        position (SkyCoord | str | None, optional): The sky-direction hour-angles will be calculated towards. Defaults to None.
-        whole_day (bool, optional): Calaculate for a 24 hour persion starting from the first time step. Defaults to False.
+        times_mjds (u.Quantity): The TIME_CENTROID values (all rows), in seconds
+        location (EarthLocation): The array location
+        position (SkyCoord | str): The sky-direction, or a name/"sun" to resolve
+        whole_day (bool, optional): Calculate over a 24 hour period from the first time step. Defaults to False.
 
     Returns:
-        PositionHourAngle: Compute hour angles, normalised times and elevation
+        PositionHourAngles: Computed hour angles, normalised times and elevation
     """
+    logger.info("Extracting timesteps and constructing time mapping")
 
-    logger.info(f"Computing hour angles for {ms_path=}")
-    with table(str(ms_path), ack=False) as tab:
-        logger.info("Extracting timesteps and constructing time mapping")
-        times_mjds = tab.getcol("TIME_CENTROID")[:] * u.s
-
-        # get unique time steps and make sure they are in their first appeared order
-        times_mjds, indices = np.unique(times_mjds, return_index=True)
-        sorted_idx = np.argsort(indices)
-        times_mjds = times_mjds[sorted_idx]
-        time_map = {k: idx for idx, k in enumerate(times_mjds)}
+    # get unique time steps and make sure they are in their first appeared order
+    times_mjds, indices = np.unique(times_mjds, return_index=True)
+    sorted_idx = np.argsort(indices)
+    times_mjds = times_mjds[sorted_idx]
+    time_map = {k: idx for idx, k in enumerate(times_mjds)}
 
     if whole_day:
         logger.info(f"Assuming a full day from {times_mjds} MJD (seconds)")
@@ -170,9 +134,7 @@ def make_hour_angles_for_ms(
 
     times = Time(times_mjds, format="mjd", scale="utc")
 
-    sky_position = _process_position(position=position, times=times, ms_path=ms_path)
-
-    location = get_location_from_ms(ms_path)
+    sky_position = resolve_position(position=position, times=times)
 
     lst = times.sidereal_time("apparent", longitude=location.lon)
     hour_angle = (lst - sky_position.ra).wrap_at(12 * u.hourangle)
@@ -189,3 +151,59 @@ def make_hour_angles_for_ms(
         time=times,
         time_map=time_map,
     )
+
+
+def make_hour_angles_from_tables(
+    open_ms_tables: OpenMSTables,
+    position: SkyCoord | str | None = None,
+    whole_day: bool = False,
+) -> PositionHourAngles:
+    """Compute hour angles from open MS tables.
+
+    If ``position`` is None the phase direction of the MS is used.
+
+    Args:
+        open_ms_tables (OpenMSTables): The open MS tables to read from
+        position (SkyCoord | str | None, optional): The sky-direction. Defaults to None.
+        whole_day (bool, optional): Calculate over a full day. Defaults to False.
+
+    Returns:
+        PositionHourAngles: Computed hour angles, normalised times and elevation
+    """
+    times_mjds = open_ms_tables.main_table.getcol("TIME_CENTROID")[:] * u.s
+    location = get_location_from_tables(open_ms_tables)
+
+    if position is None:
+        position = open_ms_tables.phase_dir
+
+    return make_hour_angles(
+        times_mjds=times_mjds,
+        location=location,
+        position=position,
+        whole_day=whole_day,
+    )
+
+
+def make_hour_angles_for_ms(
+    ms_path: Path,
+    position: SkyCoord | str | None = None,
+    whole_day: bool = False,
+) -> PositionHourAngles:
+    """Calculate hour-angle and time quantities for a given position using time information
+    encoded in a nominated measurement set at a nominated location
+
+    Args:
+        ms_path (Path): Measurement set to usefor time and sky-position information
+        position (SkyCoord | str | None, optional): The sky-direction hour-angles will be calculated towards. Defaults to None.
+        whole_day (bool, optional): Calaculate for a 24 hour persion starting from the first time step. Defaults to False.
+
+    Returns:
+        PositionHourAngle: Compute hour angles, normalised times and elevation
+    """
+    logger.info(f"Computing hour angles for {ms_path=}")
+    with get_open_ms_tables(ms_path) as open_ms_tables:
+        return make_hour_angles_from_tables(
+            open_ms_tables=open_ms_tables,
+            position=position,
+            whole_day=whole_day,
+        )
