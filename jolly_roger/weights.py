@@ -162,7 +162,7 @@ def scale_weights(
         scaled_weights = weights * scale[:, None]
     elif weights.ndim == 3:
         # The shape should be [row, channel, pol], and the scaling will be per-channel
-        scaled_weights = weights * scale[..., None]
+        scaled_weights = weights * scale[:, None, None]
     else:
         msg = f"Can only handle 1/2/3D weights, got {weights.shape=}"
         raise ValueError(msg)
