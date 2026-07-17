@@ -160,8 +160,11 @@ def scale_weights(
     elif weights.ndim == 2:
         # The shape should be [row, channel], and the scaling will be per-channel
         scaled_weights = weights * scale[:, None]
+    elif weights.ndim == 3:
+        # The shape should be [row, channel, pol], and the scaling will be per-channel
+        scaled_weights = weights * scale[..., None]
     else:
-        msg = f"Can only handle 1D or 2D weights, got {weights.shape=}"
+        msg = f"Can only handle 1/2/3D weights, got {weights.shape=}"
         raise ValueError(msg)
 
     assert scaled_weights is not None, "Scaled weights appears unset"
