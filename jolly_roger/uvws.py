@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import astropy.units as u
 import numpy as np
@@ -28,6 +29,45 @@ from jolly_roger.hour_angles import (
     make_hour_angles_from_tables,
 )
 from jolly_roger.logging import logger
+
+
+def ensure_object_name_list(
+    object_name: str | SkyCoord | Sequence[str | SkyCoord],
+) -> list[str | SkyCoord]:
+    """Normalise a single object name/position, or a collection of them, into a list.
+
+    Args:
+        object_name (str | SkyCoord | Sequence[str  |  SkyCoord]): A single object, or a collection of objects
+
+    Returns:
+        list[str | SkyCoord]: The objects as a list
+    """
+    object_name = (
+        [object_name] if isinstance(object_name, str | SkyCoord) else list(object_name)
+    )
+    assert isinstance(object_name, list), (
+        f"Expected type list, got {type(object_name)=}"
+    )
+
+    return object_name
+
+
+def object_name_to_str(object_name: str | SkyCoord) -> str:
+    """Render an object name/position as a display string, for use in
+    ``WDelays``/``WDelayRates`` and anywhere else a plain string is required
+    (plot labels, filenames, log messages).
+
+    Args:
+        object_name (str | SkyCoord): The object name, or its sky position
+
+    Returns:
+        str: The object name, or a sexagesimal rendering of its position
+    """
+    return (
+        object_name
+        if isinstance(object_name, str)
+        else cast(str, object_name.to_string("hmsdms", precision=1))
+    )
 
 
 @dataclass(frozen=True)
@@ -108,10 +148,7 @@ def get_object_delay_from_tables(
     Returns:
         list[WDelays]: Description of the delay towards the nominated object. A list of objects will always be returned.
     """
-    object_name = [object_name] if isinstance(object_name, str) else object_name
-    assert isinstance(object_name, list | tuple), (
-        f"Expected type list | tuple, got {type(object_name)=}"
-    )
+    object_name_list = ensure_object_name_list(object_name)
 
     baselines = get_baselines_from_tables(
         open_ms_tables=open_ms_tables,
@@ -126,7 +163,7 @@ def get_object_delay_from_tables(
             name,
             make_hour_angles_from_tables(open_ms_tables=open_ms_tables, position=name),
         )
-        for name in object_name
+        for name in object_name_list
     ]
 
     return get_object_delay(
@@ -219,7 +256,7 @@ def get_object_delay(
         delay_for_object = (w_diffs / speed_of_light).decompose()
 
         w_delay = WDelays(
-            object_name=object_name,
+            object_name=object_name_to_str(object_name),
             w_delays=delay_for_object,
             b_map=baselines.b_map,
             time_map=hour_angles_phase.time_map,
@@ -252,13 +289,10 @@ class WDelayRates:
 
 def get_object_delayrate_for_baseline(
     baseline_data: BaselineData,
-    object_name: str | list[str] = "sun",
+    object_name: str | SkyCoord | Sequence[str | SkyCoord] = "sun",
     reverse_baselines: bool = False,
 ) -> list[WDelayRates]:
-    object_name = [object_name] if isinstance(object_name, str) else object_name
-    assert isinstance(object_name, list), (
-        f"Expected type list, got {type(object_name)=}"
-    )
+    object_name_list = ensure_object_name_list(object_name)
     assert baseline_data.ms_path is not None, "baseline_data has no ms_path"
     ms_path = baseline_data.ms_path
 
@@ -277,7 +311,7 @@ def get_object_delayrate_for_baseline(
 
     object_w_delay_rates: list[WDelayRates] = []
 
-    for _object_name in object_name:
+    for _object_name in object_name_list:
         hour_angles_object = make_hour_angles_for_ms(
             ms_path=ms_path,
             position=_object_name,  # gets the position from phase direction
@@ -299,7 +333,7 @@ def get_object_delayrate_for_baseline(
         )  # s / s * Hz
 
         w_delay_rate = WDelayRates(
-            object_name=_object_name,
+            object_name=object_name_to_str(_object_name),
             w_delays=delay_for_object,
             w_rates=delay_rate_for_object,
             b_map=baselines.b_map,
