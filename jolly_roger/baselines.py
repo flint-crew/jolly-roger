@@ -40,33 +40,62 @@ class OpenMSTables:
     nominal_fov: u.Quantity
     """The FWHM field-of-view at the lowest frequency representative of the MS"""
 
+    def close(self) -> None:
+        """Close all open tables"""
+        for tab in (
+            self.main_table,
+            self.spw_table,
+            self.field_table,
+            self.antenna_table,
+        ):
+            tab.close()
+
+    def __enter__(self) -> OpenMSTables:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+def get_phase_dir(
+    field_id: NDArray[np.int_],
+    phase_dir: NDArray[np.floating[Any]],
+) -> SkyCoord:
+    """Phase direction for a single-field data set.
+
+    Args:
+        field_id (NDArray[np.int_]): The FIELD_ID column (all rows)
+        phase_dir (NDArray[np.floating[Any]]): The FIELD table PHASE_DIR column
+
+    Raises:
+        ValueError: Raised when more than one FIELD_ID is present
+
+    Returns:
+        SkyCoord: The phase direction of the field
+    """
+    unique_field_id = np.unique(field_id)
+    if len(unique_field_id) > 1:
+        msg = f"Expected a single FIELD_ID, found: {unique_field_id=}"
+        raise ValueError(msg)
+
+    sky_pos = phase_dir[unique_field_id[0]]
+    return SkyCoord(*(sky_pos).squeeze() * u.rad)
+
 
 def _get_phase_dir_for_field_id(ms_table: table, field_table: table) -> SkyCoord:
-    """Examine the FIELD_IDs in the main ms data table to extract the
-    appropriate phase direction from the MS field table. Useful should
-    there be multiple fields recorded in the meta-data table. A strong
-    constrain of a single FIELD_ID is enforced in the main data table.
+    """Read FIELD_ID/PHASE_DIR from open tables and derive the phase direction.
 
     Args:
         ms_table (table): The opened main data table in an MS
         field_table (table): The corresponding opened FIELD table
 
-    Raises:
-        ValueError: Raised when more than one FIELD_ID is found in the data table
-
     Returns:
         SkyCoord: The phase direction of the field
     """
-
-    field_id = np.unique(ms_table.getcol("FIELD_ID"))
-    if len(field_id) > 1:
-        msg = f"Expected a single FIELD_ID, found: {field_id=}"
-        raise ValueError(msg)
-
-    field_id = field_id[0]
-
-    sky_pos = field_table.getcol("PHASE_DIR")[field_id]
-    return SkyCoord(*(sky_pos).squeeze() * u.rad)
+    return get_phase_dir(
+        field_id=ms_table.getcol("FIELD_ID"),
+        phase_dir=field_table.getcol("PHASE_DIR"),
+    )
 
 
 def beam_fraction_to_radius(
@@ -102,16 +131,15 @@ def beam_fraction_to_radius(
     return requested_fov_rad * u.rad
 
 
-def _get_nominal_fov(
-    spw_table: table,
-    antenna_table: table,
+def get_nominal_fov(
+    chan_freq: NDArray[np.floating[Any]],
+    dish_diameter: NDArray[np.floating[Any]],
 ) -> u.Quantity:
-    """Calculate the field of view at the lowest frequency. This is a rather
-    simple calculation that assumes a single SPW and single dish diameter
+    """Field of view at the lowest frequency, assuming a single SPW and dish size.
 
     Args:
-        spw_table (table): The spectral window table of the MS
-        antenna_table (table): The antenna table of the MS
+        chan_freq (NDArray[np.floating[Any]]): The CHAN_FREQ column, in Hz
+        dish_diameter (NDArray[np.floating[Any]]): The DISH_DIAMETER column, in m
 
     Returns:
         u.Quantity: The nominal radial field-of-view
@@ -121,19 +149,37 @@ def _get_nominal_fov(
     # the open ms table interface, and I would rather not change that entry
     # point for an optional/opt-in method
 
-    lowest_freq = np.min(spw_table.getcol("CHAN_FREQ")) * u.Hz
+    lowest_freq = np.min(chan_freq) * u.Hz
     longest_lambda = (speed_of_light / lowest_freq).decompose()
 
-    dish_diameter = np.unique(antenna_table.getcol("DISH_DIAMETER"))
-    assert len(dish_diameter) == 1, (
-        f"{len(dish_diameter)} dish sizes found, which is not reasonable"
+    unique_diameter = np.unique(dish_diameter)
+    assert len(unique_diameter) == 1, (
+        f"{len(unique_diameter)} dish sizes found, which is not reasonable"
     )
-    dish_diameter = dish_diameter[0] * u.m
 
-    fov = (1.02 * longest_lambda / dish_diameter).decompose() * u.rad
+    fov = (1.02 * longest_lambda / (unique_diameter[0] * u.m)).decompose() * u.rad
     logger.info(f"Nominal field-of-view (FWHM) is {fov.to('deg'):.3f}")
 
     return fov
+
+
+def _get_nominal_fov(
+    spw_table: table,
+    antenna_table: table,
+) -> u.Quantity:
+    """Read CHAN_FREQ/DISH_DIAMETER from open tables and derive the nominal FoV.
+
+    Args:
+        spw_table (table): The spectral window table of the MS
+        antenna_table (table): The antenna table of the MS
+
+    Returns:
+        u.Quantity: The nominal radial field-of-view
+    """
+    return get_nominal_fov(
+        chan_freq=spw_table.getcol("CHAN_FREQ"),
+        dish_diameter=antenna_table.getcol("DISH_DIAMETER"),
+    )
 
 
 def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
@@ -175,8 +221,6 @@ def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
 class BaselineData:
     """Container for baseline data and associated metadata."""
 
-    ms_path: Path
-    """MS from which the data was fetched"""
     masked_data: np.ma.MaskedArray
     """The baseline data, masked where flags are set. shape=(time, chan, pol)"""
     freq_chan: u.Quantity
@@ -191,6 +235,8 @@ class BaselineData:
     """The first antenna in the baseline."""
     ant_2: int
     """The second antenna in the baseline."""
+    ms_path: Path | None = None
+    """MS from which the data was fetched, if any"""
 
 
 @dataclass
@@ -225,6 +271,47 @@ def _get_baseline_data(
     )
 
 
+def build_baseline_data(
+    baseline_arrays: BaselineArrays,
+    freq_chan: NDArray[np.floating[Any]],
+    phase_dir: SkyCoord,
+    ant_1: int,
+    ant_2: int,
+    ms_path: Path | None = None,
+) -> BaselineData:
+    """Attach units and masking to raw baseline arrays.
+
+    Args:
+        baseline_arrays (BaselineArrays): The raw columns for a baseline
+        freq_chan (NDArray[np.floating[Any]]): The CHAN_FREQ column, in Hz
+        phase_dir (SkyCoord): The phase direction of the data
+        ant_1 (int): The first antenna of the baseline
+        ant_2 (int): The second antenna of the baseline
+        ms_path (Path | None, optional): The source MS, if any. Defaults to None.
+
+    Returns:
+        BaselineData: The unit-attached baseline data
+    """
+    uvws_phase_center = np.swapaxes(baseline_arrays.uvws * u.m, 0, 1)
+    time = Time(
+        baseline_arrays.time_centroid.squeeze() * u.s,
+        format="mjd",
+        scale="utc",
+    )
+    masked_data = np.ma.masked_array(baseline_arrays.data, mask=baseline_arrays.flags)
+
+    return BaselineData(
+        masked_data=masked_data,
+        freq_chan=freq_chan.squeeze() * u.Hz,
+        phase_center=phase_dir,
+        uvws_phase_center=cast(u.Quantity, uvws_phase_center),
+        time=time,
+        ant_1=ant_1,
+        ant_2=ant_2,
+        ms_path=ms_path,
+    )
+
+
 def get_baseline_data(
     open_ms_tables: OpenMSTables,
     ant_1: int,
@@ -244,38 +331,26 @@ def get_baseline_data(
     """
     logger.info(f"Getting baseline {ant_1} {ant_2}")
 
-    freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ")
-
-    logger.debug(f"Processing {ant_1=} {ant_2=}")
-
-    baseline_data = _get_baseline_data(
+    baseline_arrays = _get_baseline_data(
         ms_tab=open_ms_tables.main_table,
         ant_1=ant_1,
         ant_2=ant_2,
         data_column=data_column,
     )
 
-    freq_chan = freq_chan.squeeze() * u.Hz
-    phase_dir = open_ms_tables.phase_dir
-    uvws_phase_center = np.swapaxes(baseline_data.uvws * u.m, 0, 1)
-    time = Time(
-        baseline_data.time_centroid.squeeze() * u.s,
-        format="mjd",
-        scale="utc",
-    )
-    masked_data = np.ma.masked_array(baseline_data.data, mask=baseline_data.flags)
-
-    logger.info(f"Got data for baseline {ant_1} {ant_2} with shape {masked_data.shape}")
-    return BaselineData(
-        ms_path=open_ms_tables.ms_path,
-        masked_data=masked_data,
-        freq_chan=freq_chan,
-        phase_center=phase_dir,
-        uvws_phase_center=cast(u.Quantity, uvws_phase_center),
-        time=time,
+    baseline_data = build_baseline_data(
+        baseline_arrays=baseline_arrays,
+        freq_chan=open_ms_tables.spw_table.getcol("CHAN_FREQ"),
+        phase_dir=open_ms_tables.phase_dir,
         ant_1=ant_1,
         ant_2=ant_2,
+        ms_path=open_ms_tables.ms_path,
     )
+
+    logger.info(
+        f"Got data for baseline {ant_1} {ant_2} with shape {baseline_data.masked_data.shape}"
+    )
+    return baseline_data
 
 
 @dataclass
@@ -293,8 +368,61 @@ class Baselines:
     """Baselihe indices representing a pair of antenna"""
     b_map: dict[tuple[int, int], int]
     """A mapping between two antennas to their baseline index"""
-    ms_path: Path
-    """The measurement set used to construct some instance of `Baseline`"""
+    ms_path: Path | None = None
+    """The measurement set used to construct some instance of `Baseline`, if any"""
+
+
+def get_baselines(
+    ant_xyz: NDArray[np.floating[Any]],
+    reverse_baselines: bool = False,
+    ms_path: Path | None = None,
+) -> Baselines:
+    """Form the upper-triangle baseline vectors from antenna positions.
+
+    Args:
+        ant_xyz (NDArray[np.floating[Any]]): Antenna (X,Y,Z) positions, in m
+        reverse_baselines (bool, optional): Reverse the baseline ordering. Defaults to False.
+        ms_path (Path | None, optional): The source MS, if any. Defaults to None.
+
+    Returns:
+        Baselines: The corresponding set of baselines formed.
+    """
+    ants_idx = np.arange(len(ant_xyz), dtype=int)
+    b_idx = np.array(list(combinations(list(ants_idx), 2)))
+    if reverse_baselines:
+        b_idx = b_idx[:, ::-1]
+    b_xyz = ant_xyz[b_idx[:, 0]] - ant_xyz[b_idx[:, 1]]
+
+    b_map = {tuple(k): idx for idx, k in enumerate(b_idx)}
+
+    logger.info(f"ants={len(ants_idx)}, baselines={b_idx.shape[0]}")
+    return Baselines(
+        ant_xyz=ant_xyz * u.m,
+        b_xyz=b_xyz * u.m,
+        b_idx=b_idx,
+        b_map=b_map,
+        ms_path=ms_path,
+    )
+
+
+def get_baselines_from_tables(
+    open_ms_tables: OpenMSTables,
+    reverse_baselines: bool = False,
+) -> Baselines:
+    """Form baselines from the ANTENNA positions of open MS tables.
+
+    Args:
+        open_ms_tables (OpenMSTables): The open MS tables to read from
+        reverse_baselines (bool): Reverse the baseline ordering
+
+    Returns:
+        Baselines: The corresponding set of baselines formed.
+    """
+    return get_baselines(
+        ant_xyz=open_ms_tables.antenna_table.getcol("POSITION"),
+        reverse_baselines=reverse_baselines,
+        ms_path=open_ms_tables.ms_path,
+    )
 
 
 def get_baselines_from_ms(
@@ -312,22 +440,12 @@ def get_baselines_from_ms(
     Returns:
         Baselines: The corresponding set of baselines formed.
     """
-
     logger.info(f"Creating baseline instance from {ms_path=}")
-    with table(str(ms_path / "ANTENNA"), ack=False) as tab:
-        ants_idx = np.arange(len(tab), dtype=int)
-        b_idx = np.array(list(combinations(list(ants_idx), 2)))
-        if reverse_baselines:
-            b_idx = b_idx[:, ::-1]
-        xyz = tab.getcol("POSITION")
-        b_xyz = xyz[b_idx[:, 0]] - xyz[b_idx[:, 1]]
-
-    b_map = {tuple(k): idx for idx, k in enumerate(b_idx)}
-
-    logger.info(f"ants={len(ants_idx)}, baselines={b_idx.shape[0]}")
-    return Baselines(
-        ant_xyz=xyz * u.m, b_xyz=b_xyz * u.m, b_idx=b_idx, b_map=b_map, ms_path=ms_path
-    )
+    with get_open_ms_tables(ms_path) as open_ms_tables:
+        return get_baselines_from_tables(
+            open_ms_tables=open_ms_tables,
+            reverse_baselines=reverse_baselines,
+        )
 
 
 @dataclass
@@ -369,6 +487,7 @@ def plot_baselines(baselines: Baselines) -> BaselinePlotPaths:
         BaselinePlotPaths: The output paths of the plots created
     """
 
+    assert baselines.ms_path is not None, "baselines has no ms_path"
     plot_names = make_plot_names(ms_path=baselines.ms_path)
 
     # Make the initial antenna plot

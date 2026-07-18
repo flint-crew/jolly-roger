@@ -187,14 +187,16 @@ def get_object_delayrate_for_baseline(
     assert isinstance(object_name, list), (
         f"Expected type list, got {type(object_name)=}"
     )
+    assert baseline_data.ms_path is not None, "baseline_data has no ms_path"
+    ms_path = baseline_data.ms_path
 
     # Generate the two sets of uvw coordinate objects
     baselines = get_baselines_from_ms(
-        ms_path=baseline_data.ms_path,
+        ms_path=ms_path,
         reverse_baselines=reverse_baselines,
     )
     hour_angles_phase = make_hour_angles_for_ms(
-        ms_path=baseline_data.ms_path,
+        ms_path=ms_path,
         position=None,  # gets the position from phase direction
     )
     uvws_phase = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_phase)
@@ -205,7 +207,7 @@ def get_object_delayrate_for_baseline(
 
     for _object_name in object_name:
         hour_angles_object = make_hour_angles_for_ms(
-            ms_path=baseline_data.ms_path,
+            ms_path=ms_path,
             position=_object_name,  # gets the position from phase direction
         )
         uvws_object = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles_object)
@@ -431,6 +433,7 @@ def uvw_flagger(
     """
     hour_angles = computed_uvws.hour_angles
     baselines = computed_uvws.baselines
+    assert computed_uvws.baselines.ms_path is not None, "baselines has no ms_path"
     ms_path = computed_uvws.baselines.ms_path
 
     sun_scale = get_sun_uv_scales(
