@@ -8,7 +8,22 @@ from typing import Any
 
 import numpy as np
 import pytest
-from astropy.coordinates import EarthLocation
+from astropy.coordinates import EarthLocation, SkyCoord
+
+# Sesame-resolved position of PKSB1934-638, hardcoded so tests don't depend
+# on network access to the CDS name resolver.
+PKSB1934_638 = SkyCoord(ra=294.854277, dec=-63.712673, unit="deg")
+
+
+@pytest.fixture(autouse=True)
+def mock_skycoord_from_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _from_name(name: str, *args: Any, **kwargs: Any) -> SkyCoord:
+        if name == "PKSB1934-638":
+            return PKSB1934_638
+        msg = f"Unexpected name resolution request for {name!r} in tests"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(SkyCoord, "from_name", staticmethod(_from_name))
 
 
 @pytest.fixture
