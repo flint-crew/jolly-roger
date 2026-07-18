@@ -37,7 +37,7 @@ from jolly_roger.response import (
 )
 from jolly_roger.tapering.tukey import get_2d_taper
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
-from jolly_roger.uvws import WDelays, get_object_delay_for_ms
+from jolly_roger.uvws import WDelays, get_object_delay_from_tables
 from jolly_roger.weights import scale_multiple_weights, select_weight_columns
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
 
@@ -234,6 +234,44 @@ def _get_data_chunk_from_main_table(
         lower_row += chunk_size
 
 
+def build_data_chunk(
+    chunk_array: DataChunkArray,
+    freq_chan: u.Quantity,
+    phase_dir: SkyCoord,
+) -> DataChunk:
+    """Attach astropy units/quantities to a raw ``DataChunkArray``.
+
+    Args:
+        chunk_array (DataChunkArray): The raw chunk of rows as read from the MS
+        freq_chan (u.Quantity): The per-channel frequencies of the MS
+        phase_dir (SkyCoord): The phase direction of the MS
+
+    Returns:
+        DataChunk: The chunk with units attached
+    """
+    uvws_phase_center = chunk_array.uvws * u.m
+    time = Time(
+        chunk_array.time_centroid.squeeze() * u.s,
+        format="mjd",
+        scale="utc",
+    )
+    masked_data = np.ma.masked_array(chunk_array.data, mask=chunk_array.flags)
+
+    return DataChunk(
+        masked_data=masked_data,
+        freq_chan=freq_chan,
+        phase_center=phase_dir,
+        uvws_phase_center=uvws_phase_center,
+        time=time,
+        time_mjds=chunk_array.time_centroid,
+        ant_1=chunk_array.ant_1,
+        ant_2=chunk_array.ant_2,
+        row_start=chunk_array.row_start,
+        chunk_size=chunk_array.chunk_size,
+        weights=chunk_array.weights,
+    )
+
+
 def get_data_chunks(
     open_ms_tables: OpenMSTables,
     chunk_size: int,
@@ -255,10 +293,8 @@ def get_data_chunks(
     Yields:
         Generator[DataChunk, None, None]: Representation of the current chunk of rows
     """
-    freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ")
+    freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze() * u.Hz
     phase_dir = open_ms_tables.phase_dir
-
-    freq_chan = freq_chan.squeeze() * u.Hz
 
     for data_chunk_array in _get_data_chunk_from_main_table(
         ms_table=open_ms_tables.main_table,
@@ -266,29 +302,8 @@ def get_data_chunks(
         data_column=data_column,
         weight_columns=weight_columns,
     ):
-        # Transform the native arrays but attach astropy quantities
-        uvws_phase_center = data_chunk_array.uvws * u.m
-        time = Time(
-            data_chunk_array.time_centroid.squeeze() * u.s,
-            format="mjd",
-            scale="utc",
-        )
-        masked_data = np.ma.masked_array(
-            data_chunk_array.data, mask=data_chunk_array.flags
-        )
-
-        yield DataChunk(
-            masked_data=masked_data,
-            freq_chan=freq_chan,
-            phase_center=phase_dir,
-            uvws_phase_center=uvws_phase_center,
-            time=time,
-            time_mjds=data_chunk_array.time_centroid,
-            ant_1=data_chunk_array.ant_1,
-            ant_2=data_chunk_array.ant_2,
-            row_start=data_chunk_array.row_start,
-            chunk_size=data_chunk_array.chunk_size,
-            weights=data_chunk_array.weights,
+        yield build_data_chunk(
+            chunk_array=data_chunk_array, freq_chan=freq_chan, phase_dir=phase_dir
         )
 
 
@@ -562,7 +577,7 @@ class TaperResult:
     """The delay_time taper was constructede against"""
 
 
-def _tukey_tractor(
+def compute_tukey_taper(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays: WDelays,
@@ -729,7 +744,7 @@ def _tukey_tractor(
     )
 
 
-def _apply_taper(
+def apply_taper(
     data_chunk: DataChunk,
     delay_time: DelayTime,
     taper: NDArray[np.float64],
@@ -777,7 +792,7 @@ class TaperedChunkResult:
     """The scaled weights that should be written back to the MS. The key is the column name and the mapped values are the corresponding scaled weights. If None nothing to write back."""
 
 
-def _tukey_multi_tractor(
+def compute_tukey_multi_taper(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays_list: list[WDelays],
@@ -791,7 +806,7 @@ def _tukey_multi_tractor(
     delay_time: DelayTime | None = None
     taper_results = []
     for w_delays in w_delays_list:
-        taper_result = _tukey_tractor(
+        taper_result = compute_tukey_taper(
             data_chunk=data_chunk,
             tukey_tractor_options=tukey_tractor_options,
             w_delays=w_delays,
@@ -813,7 +828,7 @@ def _tukey_multi_tractor(
                 sidelobe_offset = get_delay_of_nth_sidelobe(
                     n=sidelobe, sinc_width=outer_width
                 )
-                taper_result = _tukey_tractor(
+                taper_result = compute_tukey_taper(
                     data_chunk=data_chunk,
                     tukey_tractor_options=tukey_tractor_options,
                     w_delays=w_delays,
@@ -855,7 +870,7 @@ def _tukey_multi_tractor(
         np.sum(update_flag_list, axis=0).astype(bool) if update_flags else None
     )
 
-    tapered_data = _apply_taper(
+    tapered_data = apply_taper(
         data_chunk=data_chunk,
         delay_time=cast(DelayTime, delay_time),
         taper=combined_taper,
@@ -953,6 +968,30 @@ class TukeyTractorResults:
     """The output plots that were created, if any"""
 
 
+def compute_auto_taper_widths(
+    freq_chan: u.Quantity, tukey_tractor_options: TukeyTractorOptions
+) -> TukeyTractorOptions:
+    """Derive the tukey taper widths from the expected size of the sinc
+    function for the given channel frequencies.
+
+    Args:
+        freq_chan (u.Quantity): The per-channel frequencies of the MS
+        tukey_tractor_options (TukeyTractorOptions): Tukey tractor options to inspect
+
+    Returns:
+        TukeyTractorOptions: Duplicate options as input, expect the specification of the taper is overwritten
+    """
+    sinc_width = calculate_expected_sinc_width(freqs=freq_chan)
+    outer_width_ns = sinc_width.to("ns").value
+    logger.info(f"Setting automatic {outer_width_ns=}")
+
+    return tukey_tractor_options.with_options(
+        outer_width_ns=outer_width_ns,
+        tukey_width_ns=0.0,  # type: ignore[arg-type]
+    )
+    # TODO: Removing the type ignore above results in a mypy error in capn_crunch
+
+
 def _set_auto_taper_widths(
     open_ms_tables: OpenMSTables, tukey_tractor_options: TukeyTractorOptions
 ) -> TukeyTractorOptions:
@@ -966,18 +1005,10 @@ def _set_auto_taper_widths(
     Returns:
         TukeyTractorOptions: Duplicate options as input, expect the specification of the taper is overwritten
     """
-
     freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze() * u.Hz
-
-    sinc_width = calculate_expected_sinc_width(freqs=freq_chan)
-    outer_width_ns = sinc_width.to("ns").value
-    logger.info(f"Setting automatic {outer_width_ns=}")
-
-    return tukey_tractor_options.with_options(
-        outer_width_ns=outer_width_ns,
-        tukey_width_ns=0.0,  # type: ignore[arg-type]
+    return compute_auto_taper_widths(
+        freq_chan=freq_chan, tukey_tractor_options=tukey_tractor_options
     )
-    # TODO: Removing the type ignore above results in a mypy error in capn_crunch
 
 
 def write_back_results(
@@ -1111,9 +1142,10 @@ def tukey_tractor(
             field_of_view=open_ms_tables.nominal_fov,
         )
 
-    # Generate the delay for all baselines and time steps
-    w_delays_list = get_object_delay_for_ms(
-        ms_path=ms_path,
+    # Generate the delay for all baselines and time steps. Reuse the already-open
+    # tables so the MS is not opened a second time.
+    w_delays_list = get_object_delay_from_tables(
+        open_ms_tables=open_ms_tables,
         phase_dir=open_ms_tables.phase_dir,
         object_name=tukey_tractor_options.target_objects,
         reverse_baselines=tukey_tractor_options.reverse_baselines,
@@ -1135,7 +1167,7 @@ def tukey_tractor(
         # This could be offloaded to some other function if we end up
         # havig multiple modes
         partial_compute_func = partial(
-            _tukey_multi_tractor,
+            compute_tukey_multi_taper,
             tukey_tractor_options=tukey_tractor_options,
             w_delays_list=w_delays_list,
         )

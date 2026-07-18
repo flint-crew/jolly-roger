@@ -5,21 +5,69 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import astropy.units as u
 import numpy as np
 from astropy.constants import c as speed_of_light
 from astropy.coordinates import SkyCoord
 from casacore.tables import table, taql
+from numpy.typing import NDArray
 from tqdm import tqdm
 
 from jolly_roger.baselines import (
     BaselineData,
     Baselines,
+    OpenMSTables,
     get_baselines_from_ms,
+    get_baselines_from_tables,
+    get_open_ms_tables,
 )
-from jolly_roger.hour_angles import PositionHourAngles, make_hour_angles_for_ms
+from jolly_roger.hour_angles import (
+    PositionHourAngles,
+    make_hour_angles_for_ms,
+    make_hour_angles_from_tables,
+)
 from jolly_roger.logging import logger
+
+
+def ensure_object_name_list(
+    object_name: str | SkyCoord | Sequence[str | SkyCoord],
+) -> list[str | SkyCoord]:
+    """Normalise a single object name/position, or a collection of them, into a list.
+
+    Args:
+        object_name (str | SkyCoord | Sequence[str  |  SkyCoord]): A single object, or a collection of objects
+
+    Returns:
+        list[str | SkyCoord]: The objects as a list
+    """
+    object_name = (
+        [object_name] if isinstance(object_name, str | SkyCoord) else list(object_name)
+    )
+    assert isinstance(object_name, list), (
+        f"Expected type list, got {type(object_name)=}"
+    )
+
+    return object_name
+
+
+def object_name_to_str(object_name: str | SkyCoord) -> str:
+    """Render an object name/position as a display string, for use in
+    ``WDelays``/``WDelayRates`` and anywhere else a plain string is required
+    (plot labels, filenames, log messages).
+
+    Args:
+        object_name (str | SkyCoord): The object name, or its sky position
+
+    Returns:
+        str: The object name, or a sexagesimal rendering of its position
+    """
+    return (
+        object_name
+        if isinstance(object_name, str)
+        else cast(str, object_name.to_string("hmsdms", precision=1))
+    )
 
 
 @dataclass(frozen=True)
@@ -78,6 +126,55 @@ def construct_guard_region(uvws: u.Quantity, radial_fov: u.Quantity) -> u.Quanti
     return fov
 
 
+def get_object_delay_from_tables(
+    open_ms_tables: OpenMSTables,
+    phase_dir: SkyCoord,
+    object_name: str | SkyCoord | Sequence[str | SkyCoord] = "sun",
+    reverse_baselines: bool = False,
+    flip_uvw_sign: bool = False,
+    radial_fov: u.Quantity | None = None,
+) -> list[WDelays]:
+    """Calculate the object delay from already-open MS tables, so a caller
+    that already holds ``open_ms_tables`` need not re-open the MS.
+
+    Args:
+        open_ms_tables (OpenMSTables): Already-open references to the MS tables
+        phase_dir (SkyCoord): The phase direction (this couuls be more broadly considered direction 1)
+        object_name (str | SkyCoord | Sequence[str  |  SkyCoord], optional): The collection of other sky positions to calculate the delays towards. Defaults to "sun".
+        reverse_baselines (bool, optional): Whether the MS has antennas recorded as (ant1, ant2) or (ant2, ant1), where ant2 is always larger. Defaults to False.
+        flip_uvw_sign (bool, optional): Indicates whether a sign slip needs to be introduced to the UVWs. Defaults to False.
+        radial_fov (u.Quantity, optional): The radial angular size of the guard region of the main lobe that will be guarded in delay space. If None no guard boundaries are attached to the returned ``WDelays``.
+
+    Returns:
+        list[WDelays]: Description of the delay towards the nominated object. A list of objects will always be returned.
+    """
+    object_name_list = ensure_object_name_list(object_name)
+
+    baselines = get_baselines_from_tables(
+        open_ms_tables=open_ms_tables,
+        reverse_baselines=reverse_baselines,
+    )
+    hour_angles_phase = make_hour_angles_from_tables(
+        open_ms_tables=open_ms_tables,
+        position=phase_dir,
+    )
+    object_hour_angles = [
+        (
+            name,
+            make_hour_angles_from_tables(open_ms_tables=open_ms_tables, position=name),
+        )
+        for name in object_name_list
+    ]
+
+    return get_object_delay(
+        baselines=baselines,
+        hour_angles_phase=hour_angles_phase,
+        object_hour_angles=object_hour_angles,
+        flip_uvw_sign=flip_uvw_sign,
+        radial_fov=radial_fov,
+    )
+
+
 def get_object_delay_for_ms(
     ms_path: Path,
     phase_dir: SkyCoord,
@@ -101,21 +198,37 @@ def get_object_delay_for_ms(
     Returns:
         list[WDelays]: Description of the delay towards the nominated object. A list of objects will always be returned.
     """
+    with get_open_ms_tables(ms_path) as open_ms_tables:
+        return get_object_delay_from_tables(
+            open_ms_tables=open_ms_tables,
+            phase_dir=phase_dir,
+            object_name=object_name,
+            reverse_baselines=reverse_baselines,
+            flip_uvw_sign=flip_uvw_sign,
+            radial_fov=radial_fov,
+        )
 
-    object_name = [object_name] if isinstance(object_name, str) else object_name
-    assert isinstance(object_name, list | tuple), (
-        f"Expected type list | tuple, got {type(object_name)=}"
-    )
 
+def get_object_delay(
+    baselines: Baselines,
+    hour_angles_phase: PositionHourAngles,
+    object_hour_angles: Sequence[tuple[str | SkyCoord, PositionHourAngles]],
+    flip_uvw_sign: bool = False,
+    radial_fov: u.Quantity | None = None,
+) -> list[WDelays]:
+    """Compute the w-derived delays between the phase direction and each object.
+
+    Args:
+        baselines (Baselines): The baseline vectors
+        hour_angles_phase (PositionHourAngles): Hour angles towards the phase direction
+        object_hour_angles (Sequence[tuple[str | SkyCoord, PositionHourAngles]]): The (name, hour angles) for each object
+        flip_uvw_sign (bool, optional): Flip the sign of the UVWs. Defaults to False.
+        radial_fov (u.Quantity | None, optional): Radial FoV for the guard region. Defaults to None.
+
+    Returns:
+        list[WDelays]: The delay towards each nominated object
+    """
     # Generate the two sets of uvw coordinate objects
-    baselines: Baselines = get_baselines_from_ms(
-        ms_path=ms_path,
-        reverse_baselines=reverse_baselines,
-    )
-    hour_angles_phase = make_hour_angles_for_ms(
-        ms_path=ms_path,
-        position=phase_dir,  # gets the position from phase direction
-    )
     uvws_phase = xyz_to_uvw(
         baselines=baselines, hour_angles=hour_angles_phase, flip_uvw_sign=flip_uvw_sign
     )
@@ -128,11 +241,7 @@ def get_object_delay_for_ms(
 
     object_w_delays: list[WDelays] = []
 
-    for _object_name in object_name:
-        hour_angles_object = make_hour_angles_for_ms(
-            ms_path=ms_path,
-            position=_object_name,  # gets the position from phase direction,
-        )
+    for object_name, hour_angles_object in object_hour_angles:
         uvws_object = xyz_to_uvw(
             baselines=baselines,
             hour_angles=hour_angles_object,
@@ -147,7 +256,7 @@ def get_object_delay_for_ms(
         delay_for_object = (w_diffs / speed_of_light).decompose()
 
         w_delay = WDelays(
-            object_name=_object_name,
+            object_name=object_name_to_str(object_name),
             w_delays=delay_for_object,
             b_map=baselines.b_map,
             time_map=hour_angles_phase.time_map,
@@ -180,13 +289,10 @@ class WDelayRates:
 
 def get_object_delayrate_for_baseline(
     baseline_data: BaselineData,
-    object_name: str | list[str] = "sun",
+    object_name: str | SkyCoord | Sequence[str | SkyCoord] = "sun",
     reverse_baselines: bool = False,
 ) -> list[WDelayRates]:
-    object_name = [object_name] if isinstance(object_name, str) else object_name
-    assert isinstance(object_name, list), (
-        f"Expected type list, got {type(object_name)=}"
-    )
+    object_name_list = ensure_object_name_list(object_name)
     assert baseline_data.ms_path is not None, "baseline_data has no ms_path"
     ms_path = baseline_data.ms_path
 
@@ -205,7 +311,7 @@ def get_object_delayrate_for_baseline(
 
     object_w_delay_rates: list[WDelayRates] = []
 
-    for _object_name in object_name:
+    for _object_name in object_name_list:
         hour_angles_object = make_hour_angles_for_ms(
             ms_path=ms_path,
             position=_object_name,  # gets the position from phase direction
@@ -227,7 +333,7 @@ def get_object_delayrate_for_baseline(
         )  # s / s * Hz
 
         w_delay_rate = WDelayRates(
-            object_name=_object_name,
+            object_name=object_name_to_str(_object_name),
             w_delays=delay_for_object,
             w_rates=delay_rate_for_object,
             b_map=baselines.b_map,
@@ -333,6 +439,39 @@ class SunScale:
     """The minimum angular scale used for baseline flagging"""
 
 
+def compute_sun_uv_scales(
+    chan_freqs: u.Quantity,
+    min_scale: u.Quantity = 0.075 * u.deg,
+) -> SunScale:
+    """Angular scales and the corresponding (u,v)-distances sensitive to them.
+
+    Args:
+        chan_freqs (u.Quantity): The per-channel frequencies
+        min_scale (u.Quantity, optional): The minimum angular scale to project. Defaults to 0.075*u.deg.
+
+    Returns:
+        SunScale: The sun scales in distances
+    """
+    chan_lambda_m = np.squeeze((speed_of_light / chan_freqs).to(u.m))
+
+    sun_min_scale_chan_lambda = chan_lambda_m / min_scale.to(u.rad).value
+
+    return SunScale(
+        min_scale_chan_lambda=sun_min_scale_chan_lambda,
+        chan_lambda=chan_lambda_m,
+        min_scale_deg=min_scale,
+    )
+
+
+def get_sun_uv_scales_from_tables(
+    open_ms_tables: OpenMSTables,
+    min_scale: u.Quantity = 0.075 * u.deg,
+) -> SunScale:
+    """Sun (u,v)-scales from the CHAN_FREQ of open MS tables."""
+    chan_freqs = open_ms_tables.spw_table.getcol("CHAN_FREQ")[0] * u.Hz
+    return compute_sun_uv_scales(chan_freqs=chan_freqs, min_scale=min_scale)
+
+
 def get_sun_uv_scales(
     ms_path: Path,
     min_scale: u.Quantity = 0.075 * u.deg,
@@ -347,19 +486,10 @@ def get_sun_uv_scales(
     Returns:
         SunScale: The sun scales in distances
     """
-
-    with table(str(ms_path / "SPECTRAL_WINDOW"), ack=False) as tab:
-        chan_freqs = tab.getcol("CHAN_FREQ")[0] * u.Hz
-
-    chan_lambda_m = np.squeeze((speed_of_light / chan_freqs).to(u.m))
-
-    sun_min_scale_chan_lambda = chan_lambda_m / min_scale.to(u.rad).value
-
-    return SunScale(
-        min_scale_chan_lambda=sun_min_scale_chan_lambda,
-        chan_lambda=chan_lambda_m,
-        min_scale_deg=min_scale,
-    )
+    with get_open_ms_tables(ms_path) as open_ms_tables:
+        return get_sun_uv_scales_from_tables(
+            open_ms_tables=open_ms_tables, min_scale=min_scale
+        )
 
 
 @dataclass
@@ -408,6 +538,78 @@ def log_summaries(
     logger.info("\n")
 
 
+@dataclass
+class UVWFlagResult:
+    """The per-baseline flag decision from the (u,v,w) and sun scales"""
+
+    flags: dict[tuple[int, int], NDArray[np.bool_]]
+    """Per-baseline (time, chan) flag mask, only for baselines with flags to add"""
+    summary: dict[tuple[int, int], BaselineFlagSummary]
+    """Per-baseline flagging statistics, keyed as ``flags``"""
+
+
+def compute_uvw_flags(
+    computed_uvws: UVWs,
+    sun_scale: SunScale,
+    min_horizon_lim: u.Quantity = -3 * u.deg,
+    max_horizon_lim: u.Quantity = 90 * u.deg,
+) -> UVWFlagResult:
+    """Decide which visibilities to flag from the projected baselines and sun scales.
+
+    The baseline length affected by the Sun is compared against the projected
+    (u,v)-distance; visibilities are flagged where they are presumably sensitive
+    to the Sun and the Sun is within the horizon limits.
+
+    Args:
+        computed_uvws (UVWs): The pre-computed UVWs and associated meta-data
+        sun_scale (SunScale): The sun (u,v)-scales to compare against
+        min_horizon_lim (u.Quantity, optional): The lower horizon limit. Defaults to -3*u.deg.
+        max_horizon_lim (u.Quantity, optional): The upper horizon limit. Defaults to 90*u.deg.
+
+    Returns:
+        UVWFlagResult: The per-baseline flag masks and statistics
+    """
+    baselines = computed_uvws.baselines
+    elevation_curve = computed_uvws.hour_angles.elevation
+
+    flags: dict[tuple[int, int], NDArray[np.bool_]] = {}
+    summary: dict[tuple[int, int], BaselineFlagSummary] = {}
+
+    for ant_1, ant_2 in baselines.b_map:
+        logger.debug(f"Processing {ant_1=} {ant_2=}")
+
+        # Get the UVWs and for the baseline and calculate the uv-distance
+        b_idx = baselines.b_map[(ant_1, ant_2)]
+        uvws_bt = computed_uvws.uvws[:, b_idx]
+        uv_dist = np.sqrt((uvws_bt[0]) ** 2 + (uvws_bt[1]) ** 2).to(u.m).value
+
+        # The max angular scale corresponds to the shortest uv-distance
+        # The min angular scale corresponds to the longest uv-distance
+        flag_uv_dist = (
+            uv_dist[:, None] <= sun_scale.min_scale_chan_lambda.to(u.m).value[None, :]
+        )
+        flag_elevation = (min_horizon_lim < elevation_curve)[:, None] & (
+            elevation_curve <= max_horizon_lim
+        )[:, None]
+
+        all_flags = flag_uv_dist & flag_elevation
+
+        # Only record baselines that actually gain flags
+        if not np.any(all_flags):
+            continue
+
+        summary[(ant_1, ant_2)] = BaselineFlagSummary(
+            uvw_flag_perc=np.sum(flag_uv_dist) / np.prod(flag_uv_dist.shape) * 100.0,
+            elevation_flag_perc=np.sum(flag_elevation)
+            / np.prod(flag_elevation.shape)
+            * 100.0,
+            jolly_flag_perc=np.sum(all_flags) / np.prod(all_flags.shape) * 100.0,
+        )
+        flags[(ant_1, ant_2)] = all_flags
+
+    return UVWFlagResult(flags=flags, summary=summary)
+
+
 def uvw_flagger(
     computed_uvws: UVWs,
     min_horizon_lim: u.Quantity = -3 * u.deg,
@@ -431,74 +633,39 @@ def uvw_flagger(
     Returns:
         Path: The path to the flagged measurement set
     """
-    hour_angles = computed_uvws.hour_angles
     baselines = computed_uvws.baselines
-    assert computed_uvws.baselines.ms_path is not None, "baselines has no ms_path"
-    ms_path = computed_uvws.baselines.ms_path
+    assert baselines.ms_path is not None, "baselines has no ms_path"
+    ms_path = baselines.ms_path
 
-    sun_scale = get_sun_uv_scales(
-        ms_path=ms_path,
-        min_scale=min_sun_scale,
+    sun_scale = get_sun_uv_scales(ms_path=ms_path, min_scale=min_sun_scale)
+
+    logger.info(f"Will be considering {len(baselines.b_map)} baselines")
+
+    result = compute_uvw_flags(
+        computed_uvws=computed_uvws,
+        sun_scale=sun_scale,
+        min_horizon_lim=min_horizon_lim,
+        max_horizon_lim=max_horizon_lim,
     )
 
-    # A list of (ant1, ant2) to baseline index
-    antennas_for_baselines = baselines.b_map.keys()
-    logger.info(f"Will be considering {len(antennas_for_baselines)} baselines")
+    log_summaries(
+        summary=result.summary,
+        min_horizon_lim=min_horizon_lim,
+        max_horizon_lim=max_horizon_lim,
+        min_sun_scale=min_sun_scale,
+        dry_run=dry_run,
+    )
 
-    elevation_curve = hour_angles.elevation
-
-    # Used to capture the baseline and additional flags added
-    summary: dict[tuple[int, int], BaselineFlagSummary] = {}
+    # Do not apply the flags mattteee
+    if dry_run:
+        return ms_path
 
     logger.info(f"Opening {ms_path=}")
     with table(str(ms_path), ack=False, readonly=False) as ms_tab:
-        for ant_1, ant_2 in tqdm(antennas_for_baselines):
-            logger.debug(f"Processing {ant_1=} {ant_2=}")
-
-            # Keeps the ruff from complaining about and unused variable when
-            # it is used in the table access command below
-            _ = ms_tab
-
-            # TODO: It is unclear to TJG whether the time-order needs
-            # to be considered when reading in per-baseline at a time.
-            # initial version operated on a row basis so an explicit map
-            # to the t_idx of computed_uvws.uvws was needed (or useful?)
-
-            # Get the UVWs and for the baseline and calculate the uv-distance
-            b_idx = baselines.b_map[(ant_1, ant_2)]
-            uvws_bt = computed_uvws.uvws[:, b_idx]
-            uv_dist = np.sqrt((uvws_bt[0]) ** 2 + (uvws_bt[1]) ** 2).to(u.m).value
-
-            # The max angular scale corresponds to the shortest uv-distance
-            # The min angular scale corresponds to the longest uv-distance
-            flag_uv_dist = (
-                uv_dist[:, None]
-                <= sun_scale.min_scale_chan_lambda.to(u.m).value[None, :]
-            )
-            flag_elevation = (min_horizon_lim < elevation_curve)[:, None] & (
-                elevation_curve <= max_horizon_lim
-            )[:, None]
-
-            all_flags = flag_uv_dist & flag_elevation
-
-            # Only need to interact with the MS if there are flags to update
-            if not np.any(all_flags):
-                continue
-
-            baseline_summary = BaselineFlagSummary(
-                uvw_flag_perc=np.sum(flag_uv_dist)
-                / np.prod(flag_uv_dist.shape)
-                * 100.0,
-                elevation_flag_perc=np.sum(flag_elevation)
-                / np.prod(flag_elevation.shape)
-                * 100.0,
-                jolly_flag_perc=np.sum(all_flags) / np.prod(all_flags.shape) * 100.0,
-            )
-            summary[(ant_1, ant_2)] = baseline_summary
-
-            # Do not apply the flags mattteee
-            if dry_run:
-                continue
+        for (ant_1, ant_2), all_flags in tqdm(result.flags.items()):
+            # Keeps ruff from complaining about variables that are only
+            # referenced inside the taql string below
+            _ = ms_tab, ant_1, ant_2
 
             with taql(
                 "select from $ms_tab where ANTENNA1 == $ant_1 and ANTENNA2 == $ant_2",
@@ -508,13 +675,5 @@ def uvw_flagger(
 
                 subtab.putcol("FLAG", total_flags)
                 subtab.flush()
-
-    log_summaries(
-        summary=summary,
-        min_horizon_lim=min_horizon_lim,
-        max_horizon_lim=max_horizon_lim,
-        min_sun_scale=min_sun_scale,
-        dry_run=dry_run,
-    )
 
     return ms_path
