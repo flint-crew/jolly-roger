@@ -86,6 +86,58 @@ def construct_guard_region(uvws: u.Quantity, radial_fov: u.Quantity) -> u.Quanti
     return fov
 
 
+def get_object_delay_from_tables(
+    open_ms_tables: OpenMSTables,
+    phase_dir: SkyCoord,
+    object_name: str | SkyCoord | Sequence[str | SkyCoord] = "sun",
+    reverse_baselines: bool = False,
+    flip_uvw_sign: bool = False,
+    radial_fov: u.Quantity | None = None,
+) -> list[WDelays]:
+    """Calculate the object delay from already-open MS tables, so a caller
+    that already holds ``open_ms_tables`` need not re-open the MS.
+
+    Args:
+        open_ms_tables (OpenMSTables): Already-open references to the MS tables
+        phase_dir (SkyCoord): The phase direction (this couuls be more broadly considered direction 1)
+        object_name (str | SkyCoord | Sequence[str  |  SkyCoord], optional): The collection of other sky positions to calculate the delays towards. Defaults to "sun".
+        reverse_baselines (bool, optional): Whether the MS has antennas recorded as (ant1, ant2) or (ant2, ant1), where ant2 is always larger. Defaults to False.
+        flip_uvw_sign (bool, optional): Indicates whether a sign slip needs to be introduced to the UVWs. Defaults to False.
+        radial_fov (u.Quantity, optional): The radial angular size of the guard region of the main lobe that will be guarded in delay space. If None no guard boundaries are attached to the returned ``WDelays``.
+
+    Returns:
+        list[WDelays]: Description of the delay towards the nominated object. A list of objects will always be returned.
+    """
+    object_name = [object_name] if isinstance(object_name, str) else object_name
+    assert isinstance(object_name, list | tuple), (
+        f"Expected type list | tuple, got {type(object_name)=}"
+    )
+
+    baselines = get_baselines_from_tables(
+        open_ms_tables=open_ms_tables,
+        reverse_baselines=reverse_baselines,
+    )
+    hour_angles_phase = make_hour_angles_from_tables(
+        open_ms_tables=open_ms_tables,
+        position=phase_dir,
+    )
+    object_hour_angles = [
+        (
+            name,
+            make_hour_angles_from_tables(open_ms_tables=open_ms_tables, position=name),
+        )
+        for name in object_name
+    ]
+
+    return get_object_delay(
+        baselines=baselines,
+        hour_angles_phase=hour_angles_phase,
+        object_hour_angles=object_hour_angles,
+        flip_uvw_sign=flip_uvw_sign,
+        radial_fov=radial_fov,
+    )
+
+
 def get_object_delay_for_ms(
     ms_path: Path,
     phase_dir: SkyCoord,
@@ -109,39 +161,15 @@ def get_object_delay_for_ms(
     Returns:
         list[WDelays]: Description of the delay towards the nominated object. A list of objects will always be returned.
     """
-
-    object_name = [object_name] if isinstance(object_name, str) else object_name
-    assert isinstance(object_name, list | tuple), (
-        f"Expected type list | tuple, got {type(object_name)=}"
-    )
-
-    # Read once, compute the phase and per-object hour angles from the same handles
     with get_open_ms_tables(ms_path) as open_ms_tables:
-        baselines = get_baselines_from_tables(
+        return get_object_delay_from_tables(
             open_ms_tables=open_ms_tables,
+            phase_dir=phase_dir,
+            object_name=object_name,
             reverse_baselines=reverse_baselines,
+            flip_uvw_sign=flip_uvw_sign,
+            radial_fov=radial_fov,
         )
-        hour_angles_phase = make_hour_angles_from_tables(
-            open_ms_tables=open_ms_tables,
-            position=phase_dir,
-        )
-        object_hour_angles = [
-            (
-                name,
-                make_hour_angles_from_tables(
-                    open_ms_tables=open_ms_tables, position=name
-                ),
-            )
-            for name in object_name
-        ]
-
-    return get_object_delay(
-        baselines=baselines,
-        hour_angles_phase=hour_angles_phase,
-        object_hour_angles=object_hour_angles,
-        flip_uvw_sign=flip_uvw_sign,
-        radial_fov=radial_fov,
-    )
 
 
 def get_object_delay(
