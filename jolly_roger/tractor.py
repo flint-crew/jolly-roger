@@ -660,7 +660,9 @@ def compute_tukey_taper(
 
     if tukey_tractor_options.peak_shift_search:
         # This isolates the spectrum of the source in delay space
-        tapered_response = delay_time * (1.0 - taper)
+        tapered_response = np.abs(
+            np.sum(delay_time.delay_time[..., [0, -1]], axis=-1)
+        ) * (1.0 - taper)
         peak_idx = np.argmax(tapered_response, axis=1)
 
         # and since the taper is smoothly verying and wrapped around the
