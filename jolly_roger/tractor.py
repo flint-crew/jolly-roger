@@ -571,7 +571,7 @@ class TaperResult:
     """The taper to apply. If None nothing to do."""
     update_flags: bool = False
     """Indicates whether flags need to be updated"""
-    flags: NDArray[bool] | None = None
+    flags: NDArray[np.bool_] | None = None
     """The fupdated flags"""
     delay_time: DelayTime | None = None
     """The delay_time taper was constructede against"""
@@ -797,7 +797,7 @@ class TaperedChunkResult:
     """The data to write back"""
     update_flags: bool = False
     """"Indicates whether the flags need to be written back to MS"""
-    flags: NDArray[bool] | None = None
+    flags: NDArray[np.bool_] | None = None
     """The flags to write back"""
     update_weights: bool = False
     """Indicates whether data should be written back to the MS"""
