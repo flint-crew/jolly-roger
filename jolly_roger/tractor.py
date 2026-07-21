@@ -662,14 +662,23 @@ def compute_tukey_taper(
         # This isolates the spectrum of the source in delay space
         tapered_response = np.abs(
             np.sum(delay_time.delay_time[..., [0, -1]], axis=-1)
-        ) * (1.0 - taper)
+        ) * (1.0 - taper[..., 0])
         peak_idx = np.argmax(tapered_response, axis=1)
+
+        # Find the closest idx for the centered taper position
+        object_idx = np.argmin(
+            np.abs(
+                delay_time.delay.to("s").value[:, None]
+                - tukey_x_offset.to("s").value[None, :]
+            ),
+            axis=0,
+        )
 
         # and since the taper is smoothly verying and wrapped around the
         # bounds we can roll it. May not be perfectly accurate at the
         # sub-pixel level as taper is generated on the shifted/rotated
         # coordinatre system, but good enough
-        taper = np.roll(taper, peak_idx, axis=1)
+        taper = np.roll(taper, peak_idx - object_idx, axis=1)
 
     # apply the flags to ignore the tapering if the object is larger
     # than one wrap away
