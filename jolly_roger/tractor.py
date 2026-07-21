@@ -658,6 +658,17 @@ def compute_tukey_taper(
     taper = np.swapaxes(taper[:, :, None], 0, 1)
     # taper shape is [chunk_size, no_channels, no_pols]
 
+    if tukey_tractor_options.peak_shift_search:
+        # This isolates the spectrum of the source in delay space
+        tapered_response = delay_time * (1.0 - taper)
+        peak_idx = np.argmax(tapered_response, axis=1)
+
+        # and since the taper is smoothly verying and wrapped around the
+        # bounds we can roll it. May not be perfectly accurate at the
+        # sub-pixel level as taper is generated on the shifted/rotated
+        # coordinatre system, but good enough
+        taper = np.roll(taper, peak_idx, axis=1)
+
     # apply the flags to ignore the tapering if the object is larger
     # than one wrap away
     # Calculate the offset account of nyquist sampling
@@ -954,6 +965,8 @@ class TukeyTractorOptions(BaseOptions):
     """The attenuation level of the main lobe to guard to, and should be in the range (0, 1). Values closer to zero correspond to a larger field-of-view, and hence a larger guard band in delay space. """
     object_minimum_flux: float | None = None
     """The minimum absolute flux an object should have (as measured in delay space in Jy) for it to be nulled"""
+    peak_shift_search: bool = False
+    """Search around the predicted delay for the peak in the delay spectrum to account for shifts (e.g. ionspheric shift, inaccuracies in prediction). """
 
 
 @dataclass(frozen=True)
