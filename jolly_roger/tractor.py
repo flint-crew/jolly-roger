@@ -673,12 +673,16 @@ def compute_tukey_taper(
             ),
             axis=0,
         )
+        shift_idx = object_idx - peak_idx
+
+        logger.info(f"{shift_idx=}")
+        logger.info(f"{shift_idx.shape=}")
 
         # and since the taper is smoothly verying and wrapped around the
         # bounds we can roll it. May not be perfectly accurate at the
         # sub-pixel level as taper is generated on the shifted/rotated
         # coordinatre system, but good enough
-        taper = np.roll(taper, peak_idx - object_idx, axis=1)
+        taper = np.roll(taper, shift_idx, axis=1)
 
     # apply the flags to ignore the tapering if the object is larger
     # than one wrap away
