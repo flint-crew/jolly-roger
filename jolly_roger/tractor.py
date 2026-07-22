@@ -702,7 +702,7 @@ def compute_tukey_taper(
     taper = np.swapaxes(taper[:, :, None], 0, 1)
     # taper shape is [chunk_size, no_channels, no_pols]
 
-    stokes_i_delay: NDArray[complex[Any]] | None = None
+    stokes_i_delay: NDArray[np.complexfloating[Any]] | None = None
     if tukey_tractor_options.peak_shift_search:
         # This isolates the spectrum of the source in delay space
         inverted_taper = (1.0 - taper)[..., 0]
