@@ -772,15 +772,15 @@ def compute_tukey_taper(
         # The delay spectrum are complex quantities, and we need to compare
         # the flux
         # Make a stokes I type spectrum
-        abs_delay_time = (
-            stokes_i_delay
-            if stokes_i_delay is not None
-            else np.abs(np.sum(delay_time.delay_time[..., [0, -1]], axis=-1))
-        )
+
+        if stokes_i_delay is None:
+            stokes_i_delay = np.abs(
+                np.sum(delay_time.delay_time[..., [0, -1]], axis=-1)
+            )
 
         _field_taper = np.squeeze(field_taper)
-        field_stats = np.max(abs_delay_time * (1.0 - _field_taper), axis=1)
-        object_stats = np.max(abs_delay_time * (1.0 - taper[..., 0]), axis=1)
+        field_stats = np.max(stokes_i_delay * (1.0 - _field_taper), axis=1)
+        object_stats = np.max(stokes_i_delay * (1.0 - taper[..., 0]), axis=1)
 
         if tukey_tractor_options.compare_to_field is not None:
             flux_mask = (
