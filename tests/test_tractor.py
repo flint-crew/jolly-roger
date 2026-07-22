@@ -15,10 +15,40 @@ from numpy import ma
 from jolly_roger.tractor import (
     DataChunk,
     TukeyTractorOptions,
+    apply_roll_for_taper,
     compute_tukey_multi_taper,
+    find_idx_of_closest_delay,
     tukey_tractor,
 )
 from jolly_roger.uvws import WDelays
+
+
+def test_apply_roll_for_taper() -> None:
+    """Ensure that a roll can be made over the delay time
+    axis, where the taper shape is (row, demay_time)"""
+
+    base = np.array(
+        [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20]]
+    )
+    shifts = np.array([0, 1, 2, 3])
+    shifted = np.array(
+        [[1, 2, 3, 4, 5], [10, 6, 7, 8, 9], [14, 15, 11, 12, 13], [18, 19, 20, 16, 17]]
+    )
+
+    rolled = apply_roll_for_taper(taper=base, shifts=shifts)
+    assert np.all(rolled == shifted)
+
+
+def test_find_idx_of_closest_delay() -> None:
+    """Given a delay domain, confirm that the correct index is returned
+    when attempting to find the closest"""
+    x = np.linspace(-100, 100, 200) * u.s
+    object = np.array((-90, 90)) * u.s
+
+    idxs = find_idx_of_closest_delay(x=x, object_delays=object)
+    assert len(idxs) == 2
+    assert idxs[0] == 10
+    assert idxs[1] == 189
 
 
 def test_tractor_run1_with_peak_search(ms_example) -> None:
