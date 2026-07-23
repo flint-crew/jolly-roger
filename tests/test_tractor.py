@@ -65,6 +65,37 @@ def test_find_idx_of_closest_delay() -> None:
     assert idxs[1] == 189
 
 
+def test_tractor_run1_with_peak_search_and_width(ms_example) -> None:
+    """A very simple end-to-end test identifying crashes. This
+    invokes the peak search mode"""
+
+    new_column = "JACKS_DATA"
+
+    tukey_tractor_options = TukeyTractorOptions(
+        auto_size=False,
+        output_column=new_column,
+        peak_shift_search=True,
+        peak_shift_search_width_ns=20,
+        ignore_nyquist_zone=1000,
+        elevation_cut_deg=-100,
+        tukey_width_ns=20,
+        outer_width_ns=30,
+    )
+    with table(str(ms_example), ack=False) as tab:
+        cols = tab.colnames()
+        assert new_column not in cols
+
+    tractor_results = tukey_tractor(
+        ms_path=Path(ms_example),
+        tukey_tractor_options=tukey_tractor_options,
+    )
+
+    assert tractor_results.output_plots is None
+    with table(str(ms_example), ack=False) as tab:
+        cols = tab.colnames()
+        assert new_column in cols
+
+
 def test_tractor_run1_with_peak_search(ms_example) -> None:
     """A very simple end-to-end test identifying crashes. This
     invokes the peak search mode"""

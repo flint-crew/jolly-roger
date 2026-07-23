@@ -721,7 +721,7 @@ def compute_tukey_taper(
             x=delay_time.delay, object_delays=tukey_x_offset_sec * u.s
         )
 
-        if tukey_tractor_options.peak_shift_seach_width_ns is None:
+        if tukey_tractor_options.peak_shift_search_width_ns is None:
             # This isolates the spectrum of the source in delay space
             inverted_taper = (1.0 - taper)[..., 0]
 
@@ -735,8 +735,13 @@ def compute_tukey_taper(
             # around the object. We will construct the window, roll it to
             # expected object position, then roll t he taper
             search_mask = make_search_window(
-                x=delay_time.delay_time,
-                width_ns=tukey_tractor_options.peak_shift_seach_width_ns,
+                x=delay_time.delay,
+                width_ns=tukey_tractor_options.peak_shift_search_width_ns,
+            )
+            # Make the mask match t he shape of the data chunk. This is fine as the search width is
+            # constant across all baselines/dimensions (unlike the guard zone)
+            search_mask = np.broadcast_to(
+                search_mask, (object_idx.size, search_mask.size)
             )
             # Now roll the search window
             search_mask = apply_roll_for_taper(taper=search_mask, shifts=object_idx)
@@ -1051,7 +1056,7 @@ class TukeyTractorOptions(BaseOptions):
     """The minimum absolute flux an object should have (as measured in delay space in Jy) for it to be nulled"""
     peak_shift_search: bool = False
     """Search around the predicted delay for the peak in the delay spectrum to account for shifts (e.g. ionspheric shift, inaccuracies in prediction). """
-    peak_shift_seach_width_ns: float | None = None
+    peak_shift_search_width_ns: float | None = None
     """If provided this will be used to set strong limits to search for a peak around a predicted objects position. If None when peak search is activated, the taper is used in stead."""
 
 
