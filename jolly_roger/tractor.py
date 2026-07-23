@@ -625,7 +625,7 @@ def make_search_window(x: u.Quantity, width_ns: float) -> NDArray[np.bool_]:
     """Little helper to test to make sure that the guard window is
     formed with Trues at center"""
 
-    delay_time_ns = x.to("s").value
+    delay_time_ns = x.to("ns").value
     return np.abs(delay_time_ns) < width_ns
 
 
@@ -746,6 +746,8 @@ def compute_tukey_taper(
             # Now roll the search window
             search_mask = apply_roll_for_taper(taper=search_mask, shifts=object_idx)
             # The mask should not be at the the object predicted position
+            logger.info(f"{search_mask.shape=}")
+            logger.info(f"{search_mask}")
             object_response = search_mask * stokes_i_delay
 
         # Now find the peak response and determine the shift

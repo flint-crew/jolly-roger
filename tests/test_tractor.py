@@ -27,14 +27,14 @@ from jolly_roger.uvws import WDelays
 def test_make_search_window() -> None:
     """Perform a very simple check to ensure that the window function performs
     correctly"""
-    times = (np.arange(200) - 100) * u.s
+    times = (np.arange(200) - 100) * 1e-9 * u.s
     width_ns = 10
 
     mask = make_search_window(x=times, width_ns=width_ns)
-    assert np.sum(mask) == 19
-    assert np.all(~mask[:91])
-    assert np.all(mask[91 : 91 + 19])
-    assert np.all(~mask[91 + 19 :])
+    assert np.sum(mask) == 21
+    assert np.all(~mask[:90])
+    assert np.all(mask[90 : 90 + 21])
+    assert np.all(~mask[90 + 21 :])
 
 
 def test_apply_roll_for_taper() -> None:
