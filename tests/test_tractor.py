@@ -18,9 +18,23 @@ from jolly_roger.tractor import (
     apply_roll_for_taper,
     compute_tukey_multi_taper,
     find_idx_of_closest_delay,
+    make_search_window,
     tukey_tractor,
 )
 from jolly_roger.uvws import WDelays
+
+
+def test_make_search_window() -> None:
+    """Perform a very simple check to ensure that the window function performs
+    correctly"""
+    times = (np.arange(200) - 100) * u.s
+    width_ns = 10
+
+    mask = make_search_window(x=times, width_ns=width_ns)
+    assert np.sum(mask) == 19
+    assert np.all(~mask[:91])
+    assert np.all(mask[91 : 91 + 19])
+    assert np.all(~mask[91 + 19 :])
 
 
 def test_apply_roll_for_taper() -> None:

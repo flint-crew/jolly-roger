@@ -621,6 +621,14 @@ def apply_roll_for_taper(
     return taper[np.arange(no_rows)[:, np.newaxis], shifted_indices]
 
 
+def make_search_window(x: u.Quantity, width_ns: float) -> NDArray[np.bool_]:
+    """Little helper to test to make sure that the guard window is
+    formed with Trues at center"""
+
+    delay_time_ns = x.to("s").value
+    return np.abs(delay_time_ns) < width_ns
+
+
 def compute_tukey_taper(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
@@ -704,24 +712,39 @@ def compute_tukey_taper(
 
     stokes_i_delay: NDArray[np.complexfloating[Any]] | None = None
     if tukey_tractor_options.peak_shift_search:
-        # This isolates the spectrum of the source in delay space
-        inverted_taper = (1.0 - taper)[..., 0]
         # The formed stokes I spectrum code be reused later should
         # comparisons to field or minimum flux cuts are applied
         stokes_i_delay = np.sum(np.abs(delay_time.delay_time[..., [0, 3]]), axis=-1)
-
-        # Here the taper is used to isolate the objects spectrum, and
-        # then we look for the peak. The taper should be reasonably well
-        # constructed to be in approximately the right location
-        object_response = inverted_taper * stokes_i_delay
-        peak_idx = np.argmax(object_response, axis=1)
-
         # We have to get the closest element from the time and not the minimum of
         # the taper as the taper can have a 'top hat' zero region
         object_idx = find_idx_of_closest_delay(
             x=delay_time.delay, object_delays=tukey_x_offset_sec * u.s
         )
 
+        if tukey_tractor_options.peak_shift_seach_width_ns is None:
+            # This isolates the spectrum of the source in delay space
+            inverted_taper = (1.0 - taper)[..., 0]
+
+            # Here the taper is used to isolate the objects spectrum, and
+            # then we look for the peak. The taper should be reasonably well
+            # constructed to be in approximately the right location
+            object_response = inverted_taper * stokes_i_delay
+
+        else:
+            # a strict window has been provided that will be used to search
+            # around the object. We will construct the window, roll it to
+            # expected object position, then roll t he taper
+            search_mask = make_search_window(
+                x=delay_time.delay_time,
+                width_ns=tukey_tractor_options.peak_shift_seach_width_ns,
+            )
+            # Now roll the search window
+            search_mask = apply_roll_for_taper(taper=search_mask, shifts=object_idx)
+            # The mask should not be at the the object predicted position
+            object_response = search_mask * stokes_i_delay
+
+        # Now find the peak response and determine the shift
+        peak_idx = np.argmax(object_response, axis=1)
         shifts = peak_idx - object_idx
 
         taper = apply_roll_for_taper(taper=taper[..., 0], shifts=shifts)[..., None]
@@ -1028,6 +1051,8 @@ class TukeyTractorOptions(BaseOptions):
     """The minimum absolute flux an object should have (as measured in delay space in Jy) for it to be nulled"""
     peak_shift_search: bool = False
     """Search around the predicted delay for the peak in the delay spectrum to account for shifts (e.g. ionspheric shift, inaccuracies in prediction). """
+    peak_shift_seach_width_ns: float | None = None
+    """If provided this will be used to set strong limits to search for a peak around a predicted objects position. If None when peak search is activated, the taper is used in stead."""
 
 
 @dataclass(frozen=True)
