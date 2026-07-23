@@ -743,16 +743,23 @@ def compute_tukey_taper(
             search_mask = np.broadcast_to(
                 search_mask, (object_idx.size, search_mask.size)
             )
+            # Rhw object idx is relative to the 0th element, but
+            # the search mask is orientated around 0-seconds, which could be anywhere
+            zero_idx = find_idx_of_closest_delay(
+                x=delay_time.delay,
+                object_delays=np.zeros_like(tukey_x_offset_sec) * u.s,
+            )
             # Now roll the search window
-            search_mask = apply_roll_for_taper(taper=search_mask, shifts=object_idx)
+            search_mask = apply_roll_for_taper(
+                taper=search_mask, shifts=object_idx - zero_idx
+            )
             # The mask should not be at the the object predicted position
-            logger.info(f"{search_mask.shape=}")
-            logger.info(f"{search_mask}")
             object_response = search_mask * stokes_i_delay
 
         # Now find the peak response and determine the shift
         peak_idx = np.argmax(object_response, axis=1)
         shifts = peak_idx - object_idx
+        logger.info(f"{shifts=}")
 
         taper = apply_roll_for_taper(taper=taper[..., 0], shifts=shifts)[..., None]
 
