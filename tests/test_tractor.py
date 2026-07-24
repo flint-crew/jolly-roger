@@ -15,10 +15,115 @@ from numpy import ma
 from jolly_roger.tractor import (
     DataChunk,
     TukeyTractorOptions,
+    apply_roll_for_taper,
     compute_tukey_multi_taper,
+    find_idx_of_closest_delay,
+    make_search_window,
     tukey_tractor,
 )
 from jolly_roger.uvws import WDelays
+
+
+def test_make_search_window() -> None:
+    """Perform a very simple check to ensure that the window function performs
+    correctly"""
+    times = (np.arange(200) - 100) * 1e-9 * u.s
+    width_ns = 10
+
+    mask = make_search_window(x=times, width_ns=width_ns)
+    assert np.sum(mask) == 21
+    assert np.all(~mask[:90])
+    assert np.all(mask[90 : 90 + 21])
+    assert np.all(~mask[90 + 21 :])
+
+
+def test_apply_roll_for_taper() -> None:
+    """Ensure that a roll can be made over the delay time
+    axis, where the taper shape is (row, demay_time)"""
+
+    base = np.array(
+        [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20]]
+    )
+    shifts = np.array([0, 1, 2, 3])
+    shifted = np.array(
+        [[1, 2, 3, 4, 5], [10, 6, 7, 8, 9], [14, 15, 11, 12, 13], [18, 19, 20, 16, 17]]
+    )
+
+    rolled = apply_roll_for_taper(taper=base, shifts=shifts)
+    assert np.all(rolled == shifted)
+
+
+def test_find_idx_of_closest_delay() -> None:
+    """Given a delay domain, confirm that the correct index is returned
+    when attempting to find the closest"""
+    x = np.linspace(-100, 100, 200) * u.s
+    object = np.array((-90, 90)) * u.s
+
+    idxs = find_idx_of_closest_delay(x=x, object_delays=object)
+    assert len(idxs) == 2
+    assert idxs[0] == 10
+    assert idxs[1] == 189
+
+
+def test_tractor_run1_with_peak_search_and_width(ms_example) -> None:
+    """A very simple end-to-end test identifying crashes. This
+    invokes the peak search mode"""
+
+    new_column = "JACKS_DATA"
+
+    tukey_tractor_options = TukeyTractorOptions(
+        auto_size=False,
+        output_column=new_column,
+        peak_shift_search=True,
+        peak_shift_search_width_ns=20,
+        ignore_nyquist_zone=1000,
+        elevation_cut_deg=-100,
+        tukey_width_ns=20,
+        outer_width_ns=30,
+    )
+    with table(str(ms_example), ack=False) as tab:
+        cols = tab.colnames()
+        assert new_column not in cols
+
+    tractor_results = tukey_tractor(
+        ms_path=Path(ms_example),
+        tukey_tractor_options=tukey_tractor_options,
+    )
+
+    assert tractor_results.output_plots is None
+    with table(str(ms_example), ack=False) as tab:
+        cols = tab.colnames()
+        assert new_column in cols
+
+
+def test_tractor_run1_with_peak_search(ms_example) -> None:
+    """A very simple end-to-end test identifying crashes. This
+    invokes the peak search mode"""
+
+    new_column = "JACKS_DATA"
+
+    tukey_tractor_options = TukeyTractorOptions(
+        auto_size=False,
+        output_column=new_column,
+        peak_shift_search=True,
+        ignore_nyquist_zone=1000,
+        elevation_cut_deg=-100,
+        tukey_width_ns=20,
+        outer_width_ns=30,
+    )
+    with table(str(ms_example), ack=False) as tab:
+        cols = tab.colnames()
+        assert new_column not in cols
+
+    tractor_results = tukey_tractor(
+        ms_path=Path(ms_example),
+        tukey_tractor_options=tukey_tractor_options,
+    )
+
+    assert tractor_results.output_plots is None
+    with table(str(ms_example), ack=False) as tab:
+        cols = tab.colnames()
+        assert new_column in cols
 
 
 def test_tractor_run1(ms_example) -> None:
