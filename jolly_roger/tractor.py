@@ -601,7 +601,7 @@ def apply_roll_for_taper(
 ) -> NDArray[np.floating[Any]]:
     """Roll the delay time of each row by a specified number of elements
 
-    The taper should be of shape (no_rows, no_delay_time). The n'th ``shits``
+    The taper should be of shape (no_rows, no_delay_time). The n'th ``shifts``
     will be used to roll the delay time of the n'th row by that value
 
     Args:
