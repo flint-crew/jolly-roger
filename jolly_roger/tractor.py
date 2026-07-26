@@ -710,6 +710,23 @@ def compute_tukey_taper(
     taper = np.swapaxes(taper[:, :, None], 0, 1)
     # taper shape is [chunk_size, no_channels, no_pols]
 
+    # The field null (delay 0) taper is needed both to gate the peak search
+    # below and to compute the object/field crossing flags further down.
+    field_outer_width = tukey_tractor_options.outer_width_ns * 1e-9
+    if w_delays.guard_region is not None:
+        field_outer_width += w_delays.guard_region[baseline_idx, time_idx].to("s").value
+
+    field_taper = get_2d_taper(
+        x=delay_time.delay.to("s").value,
+        outer_width=field_outer_width,
+        tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9,
+        tukey_offset=None,
+    )
+    # field_taper.shape is [no_channels, ]
+    # We need to account for no broadcasting when offset is None
+    # as the returned shape is different
+    field_taper = np.swapaxes(field_taper[:, :, None], 0, 1)
+
     stokes_i_delay: NDArray[np.complexfloating[Any]] | None = None
     if tukey_tractor_options.peak_shift_search:
         # The formed stokes I spectrum code be reused later should
@@ -756,9 +773,32 @@ def compute_tukey_taper(
             # The mask should not be at the the object predicted position
             object_response = search_mask * stokes_i_delay
 
+        # Exclude the field null at delay 0 so the argmax cannot lock onto the
+        # field where the source is fainter than the field.
+        field_null = (
+            np.abs(delay_time.delay.to("s").value)[None, :]
+            < np.atleast_1d(field_outer_width)[:, None]
+        )
+        object_response = np.where(field_null, 0.0, object_response)
+
         # Now find the peak response and determine the shift
         peak_idx = np.argmax(object_response, axis=1)
-        shifts = peak_idx - object_idx
+
+        # Only move the null off the predicted delay where the in-window peak is
+        # a genuine detection against the field, reusing the compare_to_field
+        # criterion. Without it the null would just lock onto in-window noise.
+        # When compare_to_field is unset the factor defaults to 1.0, i.e. the
+        # peak must out-shine the field to be accepted.
+        field_stats = np.max(stokes_i_delay * (1.0 - field_taper[..., 0]), axis=1)
+        object_peak = np.max(object_response, axis=1)
+        compare_factor = (
+            tukey_tractor_options.compare_to_field
+            if tukey_tractor_options.compare_to_field is not None
+            else 1.0
+        )
+        detected = object_peak >= compare_factor * field_stats
+
+        shifts = np.where(detected, peak_idx - object_idx, 0)
         logger.info(f"{shifts=}")
 
         taper = apply_roll_for_taper(taper=taper[..., 0], shifts=shifts)[..., None]
@@ -780,21 +820,7 @@ def compute_tukey_taper(
     # Compute flags to ignore the objects delay crossing 0, Do
     # This by computing the taper towards the field and
     # see if there are any components of the two sets of tapers
-    # that are not 1 (where 1 is 'no change').
-    field_outer_width = tukey_tractor_options.outer_width_ns * 1e-9
-    if w_delays.guard_region is not None:
-        field_outer_width += w_delays.guard_region[baseline_idx, time_idx].to("s").value
-
-    field_taper = get_2d_taper(
-        x=delay_time.delay.to("s").value,
-        outer_width=field_outer_width,
-        tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9,
-        tukey_offset=None,
-    )
-    # field_taper.shape is [no_channels, ]
-    # We need to account for no broadcasting when offset is None
-    # as the returned shape is different
-    field_taper = np.swapaxes(field_taper[:, :, None], 0, 1)
+    # that are not 1 (where 1 is 'no change'). ``field_taper`` was formed above.
     intersecting_taper = np.any(
         np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
     )
