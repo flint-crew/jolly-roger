@@ -140,30 +140,38 @@ class DataChunkArray:
 class DataChunk:
     """Container for a collection of data and associated metadata.
     Here data are drawn from a series of rows.
+
+    Only ``masked_data``, ``freq_chan``, ``time_mjds``, ``ant_1``, ``ant_2`` and
+    ``chunk_size`` are consumed by the compute path, so the remaining fields
+    carry measurement-set-only bookkeeping and default to sentinels. This lets a
+    caller drive the taper directly from arrays without a measurement set.
     """
 
     masked_data: np.ma.MaskedArray
     """The baseline data, masked where flags are set. shape=(time, chan, pol)"""
     freq_chan: u.Quantity
     """The frequency channels corresponding to the data."""
-    phase_center: SkyCoord
-    """The target sky coordinate for the baseline."""
-    uvws_phase_center: u.Quantity
-    """The UVW coordinates of the phase center of the baseline."""
-    time: Time
-    """The time of the observations."""
     time_mjds: NDArray[np.floating[Any]]
     """The raw time extracted from the measurement set in MJDs"""
     ant_1: NDArray[np.int64]
     """The first antenna in the baseline."""
     ant_2: NDArray[np.int64]
     """The second antenna in the baseline."""
-    row_start: int
-    """Starting row index of the data"""
     chunk_size: int
     """Size of the chunked portion of the data"""
+    phase_center: SkyCoord | None = None
+    """The target sky coordinate for the baseline."""
+    uvws_phase_center: u.Quantity | None = None
+    """The UVW coordinates of the phase center of the baseline."""
+    row_start: int = 0
+    """Starting row index of the data"""
     weights: dict[str, NDArray[np.floating[Any]]] | None = None
     """The weights associated with the data. Key is the column name and the mapped value are the corresponding weights. Only used if reweighting is activated. Defaults to None."""
+
+    @property
+    def time(self) -> Time:
+        """The observation times, derived from the raw MJD seconds."""
+        return Time(self.time_mjds * u.s, format="mjd", scale="utc")
 
 
 def _get_data_chunk_from_main_table(
@@ -250,11 +258,6 @@ def build_data_chunk(
         DataChunk: The chunk with units attached
     """
     uvws_phase_center = chunk_array.uvws * u.m
-    time = Time(
-        chunk_array.time_centroid.squeeze() * u.s,
-        format="mjd",
-        scale="utc",
-    )
     masked_data = np.ma.masked_array(chunk_array.data, mask=chunk_array.flags)
 
     return DataChunk(
@@ -262,7 +265,6 @@ def build_data_chunk(
         freq_chan=freq_chan,
         phase_center=phase_dir,
         uvws_phase_center=uvws_phase_center,
-        time=time,
         time_mjds=chunk_array.time_centroid,
         ant_1=chunk_array.ant_1,
         ant_2=chunk_array.ant_2,
