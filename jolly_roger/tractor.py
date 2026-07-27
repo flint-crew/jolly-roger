@@ -738,6 +738,14 @@ def compute_tukey_taper(
             x=delay_time.delay, object_delays=tukey_x_offset_sec * u.s
         )
 
+        # The search must never look inside the protected field/guard region
+        # around delay 0, otherwise the peak can lock onto the field itself.
+        # This is folded into the search window by construction below.
+        outside_field = ~(
+            np.abs(delay_time.delay.to("s").value)[None, :]
+            < np.atleast_1d(field_outer_width)[:, None]
+        )
+
         if tukey_tractor_options.peak_shift_search_width_ns is None:
             # This isolates the spectrum of the source in delay space
             inverted_taper = (1.0 - taper)[..., 0]
@@ -745,7 +753,7 @@ def compute_tukey_taper(
             # Here the taper is used to isolate the objects spectrum, and
             # then we look for the peak. The taper should be reasonably well
             # constructed to be in approximately the right location
-            object_response = inverted_taper * stokes_i_delay
+            object_response = inverted_taper * outside_field * stokes_i_delay
 
         else:
             # a strict window has been provided that will be used to search
@@ -771,34 +779,24 @@ def compute_tukey_taper(
                 taper=search_mask, shifts=object_idx - zero_idx
             )
             # The mask should not be at the the object predicted position
-            object_response = search_mask * stokes_i_delay
-
-        # Exclude the field null at delay 0 so the argmax cannot lock onto the
-        # field where the source is fainter than the field.
-        field_null = (
-            np.abs(delay_time.delay.to("s").value)[None, :]
-            < np.atleast_1d(field_outer_width)[:, None]
-        )
-        object_response = np.where(field_null, 0.0, object_response)
+            object_response = search_mask * outside_field * stokes_i_delay
 
         # Now find the peak response and determine the shift
         peak_idx = np.argmax(object_response, axis=1)
+        shifts = peak_idx - object_idx
 
-        # Only move the null off the predicted delay where the in-window peak is
-        # a genuine detection against the field, reusing the compare_to_field
-        # criterion. Without it the null would just lock onto in-window noise.
-        # When compare_to_field is unset the factor defaults to 1.0, i.e. the
-        # peak must out-shine the field to be accepted.
-        field_stats = np.max(stokes_i_delay * (1.0 - field_taper[..., 0]), axis=1)
-        object_peak = np.max(object_response, axis=1)
-        compare_factor = (
-            tukey_tractor_options.compare_to_field
-            if tukey_tractor_options.compare_to_field is not None
-            else 1.0
-        )
-        detected = object_peak >= compare_factor * field_stats
+        # Detection against the field is opt-in via compare_to_field: only then
+        # do we refuse to move the null unless the in-window peak out-shines the
+        # field. Without it the peak search is unguarded (but still never looks
+        # inside the field/guard region).
+        if tukey_tractor_options.compare_to_field is not None:
+            field_stats = np.max(stokes_i_delay * (1.0 - field_taper[..., 0]), axis=1)
+            object_peak = np.max(object_response, axis=1)
+            detected = (
+                object_peak >= tukey_tractor_options.compare_to_field * field_stats
+            )
+            shifts = np.where(detected, shifts, 0)
 
-        shifts = np.where(detected, peak_idx - object_idx, 0)
         logger.info(f"{shifts=}")
 
         taper = apply_roll_for_taper(taper=taper[..., 0], shifts=shifts)[..., None]

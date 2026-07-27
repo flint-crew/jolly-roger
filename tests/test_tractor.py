@@ -300,33 +300,10 @@ def _delay_amp(
     return float(np.abs(delay_time.delay_time[:, window, 0]).max())
 
 
-def test_peak_shift_search_tracks_bright_ignores_faint() -> None:
-    """The peak search should null a source that out-shines the field, but fall
-    back to the predicted position (leaving the source alone) when the in-window
-    peak is fainter than the field."""
-    n_time, source_ns = 4, 80.0
-    options = TukeyTractorOptions(
-        outer_width_ns=40.0,
-        tukey_width_ns=10.0,
-        peak_shift_search=True,
-        peak_shift_search_width_ns=120.0,
-    )
-
-    bright, delay_ns = _peak_search_chunk(source_ns=source_ns, source_amp=10.0)
-    result = compute_tukey_multi_taper(
-        bright, options, [_predict_field_wdelays(n_time)]
-    )
-    assert _delay_amp(result.data_chunk, delay_ns, source_ns) < 0.1
-
-    faint, delay_ns = _peak_search_chunk(source_ns=source_ns, source_amp=0.1)
-    result = compute_tukey_multi_taper(faint, options, [_predict_field_wdelays(n_time)])
-    assert _delay_amp(result.data_chunk, delay_ns, source_ns) > 0.05
-
-
-def test_peak_shift_search_excludes_guard_band() -> None:
-    """A bright source sitting inside a protected guard band must not pull the
-    null off the field: with the guard set it is excluded from the search and
-    the shift falls back to the predicted position."""
+def test_peak_shift_search_tracks_bright_source() -> None:
+    """A source that out-shines the field is found in the search window and the
+    null is moved onto it, sparing the field at delay 0. No detection opt-in is
+    required for a genuine shift."""
     n_time, source_ns = 4, 80.0
     options = TukeyTractorOptions(
         outer_width_ns=40.0,
@@ -338,7 +315,47 @@ def test_peak_shift_search_excludes_guard_band() -> None:
     chunk, delay_ns = _peak_search_chunk(source_ns=source_ns, source_amp=10.0)
     result = compute_tukey_multi_taper(chunk, options, [_predict_field_wdelays(n_time)])
     assert _delay_amp(result.data_chunk, delay_ns, source_ns) < 0.1
+    assert _delay_amp(result.data_chunk, delay_ns, 0.0) > 0.5
 
+
+def test_peak_shift_search_compare_to_field_ignores_faint() -> None:
+    """With compare_to_field opted in, a source fainter than the field is not a
+    detection, so the shift falls back to the predicted position: the field is
+    nulled and the faint source is left alone."""
+    n_time, source_ns = 4, 80.0
+    options = TukeyTractorOptions(
+        outer_width_ns=40.0,
+        tukey_width_ns=10.0,
+        peak_shift_search=True,
+        peak_shift_search_width_ns=120.0,
+        compare_to_field=0.2,
+    )
+
+    chunk, delay_ns = _peak_search_chunk(source_ns=source_ns, source_amp=0.1)
+    result = compute_tukey_multi_taper(chunk, options, [_predict_field_wdelays(n_time)])
+    assert _delay_amp(result.data_chunk, delay_ns, source_ns) > 0.05
+    assert _delay_amp(result.data_chunk, delay_ns, 0.0) < 0.1
+
+
+def test_peak_shift_search_excludes_guard_band() -> None:
+    """The search must never look inside the guard band. A bright source that
+    would otherwise be nulled is spared once a guard band covers it, because it
+    is excluded from the search by construction (no detection opt-in involved)."""
+    n_time, source_ns = 4, 60.0
+    options = TukeyTractorOptions(
+        outer_width_ns=40.0,
+        tukey_width_ns=10.0,
+        peak_shift_search=True,
+        peak_shift_search_width_ns=120.0,
+    )
+
+    # No guard: the source sits outside the field null, is found, and is nulled.
+    chunk, delay_ns = _peak_search_chunk(source_ns=source_ns, source_amp=10.0)
+    result = compute_tukey_multi_taper(chunk, options, [_predict_field_wdelays(n_time)])
+    assert _delay_amp(result.data_chunk, delay_ns, source_ns) < 0.1
+
+    # Guard band covering the source: the search cannot see it, so the null is
+    # never pulled onto it and the source survives.
     chunk, delay_ns = _peak_search_chunk(source_ns=source_ns, source_amp=10.0)
     result = compute_tukey_multi_taper(
         chunk, options, [_predict_field_wdelays(n_time, guard_ns=60.0)]
