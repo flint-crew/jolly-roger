@@ -318,10 +318,30 @@ def test_peak_shift_search_tracks_bright_source() -> None:
     assert _delay_amp(result.data_chunk, delay_ns, 0.0) > 0.5
 
 
+def test_peak_shift_search_flags_object_over_field() -> None:
+    """When the object is predicted onto the field at delay 0 the crossing must
+    be flagged, and the field data must be preserved (never nulled in the guard
+    region). This is the default path with no detection opt-in."""
+    n_time = 4
+    options = TukeyTractorOptions(
+        outer_width_ns=40.0,
+        tukey_width_ns=10.0,
+        peak_shift_search=True,
+        peak_shift_search_width_ns=120.0,
+    )
+
+    chunk, delay_ns = _peak_search_chunk(source_ns=0.0, source_amp=0.0)
+    result = compute_tukey_multi_taper(chunk, options, [_predict_field_wdelays(n_time)])
+    assert result.flags is not None
+    assert result.flags[:, :, 0].all()
+    assert _delay_amp(result.data_chunk, delay_ns, 0.0) > 0.5
+
+
 def test_peak_shift_search_compare_to_field_ignores_faint() -> None:
     """With compare_to_field opted in, a source fainter than the field is not a
-    detection, so the shift falls back to the predicted position: the field is
-    nulled and the faint source is left alone."""
+    detection, so the shift falls back to the predicted position over the field:
+    the crossing is flagged, the field is preserved, and the faint source is
+    left alone."""
     n_time, source_ns = 4, 80.0
     options = TukeyTractorOptions(
         outer_width_ns=40.0,
@@ -333,14 +353,17 @@ def test_peak_shift_search_compare_to_field_ignores_faint() -> None:
 
     chunk, delay_ns = _peak_search_chunk(source_ns=source_ns, source_amp=0.1)
     result = compute_tukey_multi_taper(chunk, options, [_predict_field_wdelays(n_time)])
+    assert result.flags is not None
+    assert result.flags[:, :, 0].all()
     assert _delay_amp(result.data_chunk, delay_ns, source_ns) > 0.05
-    assert _delay_amp(result.data_chunk, delay_ns, 0.0) < 0.1
+    assert _delay_amp(result.data_chunk, delay_ns, 0.0) > 0.5
 
 
-def test_peak_shift_search_excludes_guard_band() -> None:
-    """The search must never look inside the guard band. A bright source that
-    would otherwise be nulled is spared once a guard band covers it, because it
-    is excluded from the search by construction (no detection opt-in involved)."""
+def test_peak_shift_search_never_nulls_guard_band() -> None:
+    """The object null is never applied inside the guard region. A bright source
+    outside the field null is nulled normally, but once a guard band covers it
+    the null is clamped away and the source survives (the crossing is flagged
+    instead)."""
     n_time, source_ns = 4, 60.0
     options = TukeyTractorOptions(
         outer_width_ns=40.0,
@@ -354,12 +377,14 @@ def test_peak_shift_search_excludes_guard_band() -> None:
     result = compute_tukey_multi_taper(chunk, options, [_predict_field_wdelays(n_time)])
     assert _delay_amp(result.data_chunk, delay_ns, source_ns) < 0.1
 
-    # Guard band covering the source: the search cannot see it, so the null is
-    # never pulled onto it and the source survives.
+    # Guard band covering the source: the null is clamped out of the guard, so
+    # the source survives and the row is flagged instead.
     chunk, delay_ns = _peak_search_chunk(source_ns=source_ns, source_amp=10.0)
     result = compute_tukey_multi_taper(
         chunk, options, [_predict_field_wdelays(n_time, guard_ns=60.0)]
     )
+    assert result.flags is not None
+    assert result.flags[:, :, 0].all()
     assert _delay_amp(result.data_chunk, delay_ns, source_ns) > 5.0
 
 
