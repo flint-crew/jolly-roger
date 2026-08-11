@@ -9,7 +9,7 @@ author = "Alec Thomson"
 version = release = importlib.metadata.version("jolly_roger")
 
 extensions = [
-    "myst_parser",
+    "myst_nb",
     "sphinx.ext.autodoc",
     "sphinx.ext.intersphinx",
     "sphinx.ext.mathjax",
@@ -19,7 +19,7 @@ extensions = [
     "sphinxarg.ext",
 ]
 
-source_suffix = [".rst", ".md"]
+source_suffix = [".rst", ".md", ".ipynb"]
 exclude_patterns = [
     "_build",
     "**.ipynb_checkpoints",
@@ -52,6 +52,9 @@ html_theme_options: dict[str, Any] = {
 myst_enable_extensions = [
     "colon_fence",
 ]
+
+nb_execution_mode = "auto"
+nb_execution_raise_on_error = True
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),

@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from astropy.time import Time
 from casacore.tables import table
 from numpy import ma
 
@@ -193,7 +192,6 @@ def _make_data_chunk(n_time: int = 8, n_chan: int = 16, n_pol: int = 2) -> DataC
         freq_chan=np.linspace(1.0, 2.0, n_chan) * u.GHz,
         phase_center=SkyCoord(ra=0.0 * u.deg, dec=0.0 * u.deg),
         uvws_phase_center=np.zeros((n_time, 3)) * u.m,
-        time=Time.now(),
         time_mjds=np.arange(n_time, dtype=float),
         ant_1=np.zeros(n_time, dtype=np.int64),
         ant_2=np.ones(n_time, dtype=np.int64),

@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from astropy.time import Time
 from numpy import ma
 
 from jolly_roger.delays import data_to_delay_time, delay_time_to_data
@@ -33,7 +32,6 @@ def make_data_chunk(
         freq_chan=freq_chan,
         phase_center=SkyCoord(ra=0.0 * u.deg, dec=0.0 * u.deg),
         uvws_phase_center=np.zeros((n_time, 3)) * u.m,
-        time=Time.now(),
         time_mjds=np.zeros(n_time),
         ant_1=np.zeros(n_time, dtype=np.int64),
         ant_2=np.ones(n_time, dtype=np.int64),
