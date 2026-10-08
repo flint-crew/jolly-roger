@@ -1224,7 +1224,7 @@ class TukeyTractorOptions(BaseOptions):
     rate_filter: bool = False
     """Filter in delay and delay-rate the timesteps where an object is contaminated in delay but separable in delay-rate. Segments are filtered once the object leaves the contaminated zone."""
     rate_filter_width_hz: float | None = None
-    """The width of the delay-rate notch beyond the object's predicted fringe-rate band, in Hz. If None two rate bins are used."""
+    """The width beyond the object's predicted fringe-rate band over which the delay-rate taper rolls off (1 - cos) from zero to one, in Hz. If None two rate bins are used."""
     rate_filter_guard_hz: float | None = None
     """A fringe-rate around zero to protect, added to the guard derived from the field-of-view (see ``guard_field``). If None one rate bin is used."""
     rate_filter_min_timesteps: int = 8

@@ -34,9 +34,9 @@ class RateFilterSettings:
     outer_width_ns: float
     """The width of the notch beyond the object's delay track, in nanoseconds"""
     tukey_width_ns: float
-    """The width of the transition region of the notch in delay, in nanoseconds"""
+    """The width of the transition region of the notch in delay, in nanoseconds. If zero ``outer_width_ns`` is used, so the taper is never a hard edge."""
     width_hz: float | None = None
-    """The width of the notch beyond the object's fringe-rate band, in Hz. If None two rate bins are used."""
+    """The width beyond the object's fringe-rate band over which the taper rolls off from zero to one, in Hz. If None two rate bins are used."""
     guard_hz: float | None = None
     """A minimum fringe-rate around zero to protect, added to the geometric rate guard. If None one rate bin is used."""
     min_timesteps: int = 8
@@ -384,19 +384,40 @@ def _wrapped_overlap(
     return bool(np.abs(separation) < half_a + half_b)
 
 
+def _transition_width(
+    x: NDArray[np.floating[Any]], requested: float, fallback: float
+) -> float:
+    """The width of a taper's ``1 - cos`` transition. A non-positive ``requested``
+    width uses ``fallback``, and the width is never narrower than two samples of ``x``
+    so the transition is always resolved."""
+    width = requested if requested > 0.0 else fallback
+    return max(width, 2 * float(np.max(np.abs(np.diff(x)))))
+
+
 def _axis_notch(
     x: NDArray[np.floating[Any]], center: float, outer_width: float, tukey_width: float
 ) -> NDArray[np.floating[Any]]:
-    """A one-dimensional notch (zero within ``outer_width`` of ``center``)"""
-    if tukey_width <= 0.0:
-        separation = symmetric_domain_wrap(values=x - center, upper_limit=np.max(x))
-        return np.where(np.abs(separation) < outer_width, 0.0, 1.0)
+    """A one-dimensional notch: zero within ``outer_width - tukey_width`` of ``center``,
+    rising to one at ``outer_width`` with a ``1 - cos`` transition, as the delay taper"""
     return get_2d_taper(
         x=x,
-        outer_width=outer_width,
+        outer_width=max(outer_width, tukey_width),
         tukey_width=tukey_width,
         tukey_offset=np.array([center]),
     )[:, 0]
+
+
+def _axis_protection(
+    x: NDArray[np.floating[Any]], half_width: float, tukey_width: float
+) -> NDArray[np.floating[Any]]:
+    """A one-dimensional window that is one within ``half_width`` of zero, falling to
+    zero at ``half_width + tukey_width`` with a ``1 - cos`` transition"""
+    return (
+        1.0
+        - get_2d_taper(
+            x=x, outer_width=half_width + tukey_width, tukey_width=tukey_width
+        )[:, 0]
+    )
 
 
 def rate_filter_segment(
@@ -449,6 +470,13 @@ def rate_filter_segment(
     tukey_width_s = settings.tukey_width_ns * 1e-9
     width_hz = settings.width_hz if settings.width_hz is not None else 2 * rate_bin_hz
     floor_hz = settings.guard_hz if settings.guard_hz is not None else rate_bin_hz
+    # The widths of the 1 - cos transitions of the taper on each axis
+    delay_transition_s = _transition_width(
+        x=delay_s, requested=tukey_width_s, fallback=outer_width_s
+    )
+    rate_transition_hz = _transition_width(
+        x=rate_hz, requested=width_hz, fallback=width_hz
+    )
 
     b_idx = segment.baseline_idx
     t_idx = np.array(segment.time_idx)
@@ -520,13 +548,13 @@ def rate_filter_segment(
             x=delay_s,
             center=obj.delay_center_s,
             outer_width=obj.delay_half_width_s,
-            tukey_width=min(tukey_width_s, obj.delay_half_width_s),
+            tukey_width=delay_transition_s,
         )
         rate_notch = _axis_notch(
             x=rate_hz,
             center=obj.rate_center_hz,
             outer_width=obj.rate_half_width_hz,
-            tukey_width=width_hz / 2,
+            tukey_width=rate_transition_hz,
         )
         object_notch = 1.0 - (1.0 - rate_notch[:, None]) * (1.0 - delay_notch[None, :])
         notch = np.minimum(notch, object_notch)
@@ -542,11 +570,21 @@ def rate_filter_segment(
     if np.all(notch == 1.0):
         return RateFilterResult(rows=core_rows, success=False, reason="nothing to null")
 
-    # Never modify the field
-    field_region = (np.abs(rate_hz)[:, None] <= field.rate_half_width_hz) & (
-        np.abs(delay_s)[None, :] <= field.delay_half_width_s
+    # Never modify the field. The protection is one across the field and rolls
+    # off smoothly, so the taper has no discontinuity at the field's boundary
+    protection = (
+        _axis_protection(
+            x=rate_hz,
+            half_width=field.rate_half_width_hz,
+            tukey_width=rate_transition_hz,
+        )[:, None]
+        * _axis_protection(
+            x=delay_s,
+            half_width=field.delay_half_width_s,
+            tukey_width=delay_transition_s,
+        )[None, :]
     )
-    notch[field_region] = 1.0
+    notch = 1.0 - (1.0 - notch) * (1.0 - protection)
 
     before = np.abs(delay_rate.delay_rate).mean(axis=-1) if keep_diagnostics else None
     delay_rate.delay_rate = delay_rate.delay_rate * notch[..., None]

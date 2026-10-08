@@ -14,6 +14,8 @@ from jolly_roger.rates import (
     RateFilterSettings,
     RateFilterSummary,
     SegmentAccumulator,
+    _axis_notch,
+    _axis_protection,
     flush_segment_accumulator,
     log_rate_filter_summary,
     rate_filter_segment,
@@ -445,3 +447,66 @@ def test_plot_rate_filter_segment(tmp_path: Path) -> None:
         diagnostics=result.diagnostics, output_path=tmp_path / "segment.png"
     )
     assert output_path.exists()
+
+
+def test_axis_notch_is_a_smooth_taper() -> None:
+    """Zero at the object, one far away, with a 1 - cos transition between"""
+    x = np.linspace(-100.0, 100.0, 201)
+    notch = _axis_notch(x=x, center=20.0, outer_width=30.0, tukey_width=10.0)
+
+    assert notch[x == 20.0] == 0.0
+    assert np.all(notch[np.abs(x - 20.0) < 20.0] == 0.0)
+    assert np.all(notch[np.abs(x - 20.0) > 30.0] == 1.0)
+    transition = (np.abs(x - 20.0) > 20.0) & (np.abs(x - 20.0) < 30.0)
+    assert np.all((notch[transition] > 0.0) & (notch[transition] < 1.0))
+    assert np.max(np.abs(np.diff(notch))) < 0.3
+
+
+def test_axis_protection_is_a_smooth_window() -> None:
+    """One across the field, falling to zero with a 1 - cos transition"""
+    x = np.linspace(-100.0, 100.0, 201)
+    protection = _axis_protection(x=x, half_width=10.0, tukey_width=10.0)
+
+    assert np.all(protection[np.abs(x) <= 10.0] == 1.0)
+    assert np.all(protection[np.abs(x) >= 20.0] == 0.0)
+    transition = (np.abs(x) > 10.0) & (np.abs(x) < 20.0)
+    assert np.all((protection[transition] > 0.0) & (protection[transition] < 1.0))
+    assert np.max(np.abs(np.diff(protection))) < 0.3
+
+
+@pytest.mark.parametrize("tukey_width_ns", [5.0, 0.0])
+def test_rate_filter_taper_has_no_hard_edges(tukey_width_ns: float) -> None:
+    """Applied to white noise the taper is recovered as after/before in delay-rate
+    space. It should have no step from zero to one between neighbouring cells, even
+    without a requested delay transition."""
+    data, _, w_delays = _make_segment_inputs()
+    rng = np.random.default_rng(42)
+    noise = rng.standard_normal(data.shape) + 1j * rng.standard_normal(data.shape)
+    result, _ = _filter(
+        noise,
+        w_delays,
+        np.ones(len(data), dtype=bool),
+        settings=RateFilterSettings(outer_width_ns=10.0, tukey_width_ns=tukey_width_ns),
+        keep_diagnostics=True,
+    )
+    assert result.success
+    assert result.diagnostics is not None
+    taper = result.diagnostics.after / result.diagnostics.before
+
+    assert np.min(taper) < 1e-6
+    assert np.any((taper > 0.05) & (taper < 0.95))
+    assert np.max(np.abs(np.diff(taper, axis=0))) < 0.75
+    assert np.max(np.abs(np.diff(taper, axis=1))) < 0.75
+
+
+def test_rate_filter_preserves_field_without_delay_transition() -> None:
+    data, _, w_delays = _make_segment_inputs(object_amp=0.0)
+    result, _ = _filter(
+        data,
+        w_delays,
+        np.ones(len(data), dtype=bool),
+        settings=RateFilterSettings(outer_width_ns=10.0, tukey_width_ns=0.0),
+    )
+    assert result.success
+    assert result.data is not None
+    np.testing.assert_allclose(result.data, data, atol=1e-10)
