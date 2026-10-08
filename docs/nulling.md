@@ -34,6 +34,8 @@ A timestep contaminated in delay but not in delay-rate is recoverable. For each 
 
 The fringe-rate resolution is set by the length of a segment. `--rate-filter-pad-timesteps N` includes up to `N` clean timesteps either side of a segment when filtering to improve this resolution. Padding timesteps are not modified. `--rate-filter-max-timesteps` limits the number of timesteps collected per baseline (and so memory usage).
 
+With `--auto-size` the delay-rate width is also derived from the expected sinc response, mirroring the delay case. As the width depends on the duration $T$ of each segment, it is set per segment: the taper rolls off over $(N+1)/T$ beyond the object's fringe-rate band, where $N$ is `--nth-sidelobe-null` (one sidelobe if unset). Should this overlap the field, the width is reduced in steps of $1/T$ towards the main lobe ($1/T$) until the object is separable, otherwise the segment remains flagged. As for the delay widths, `--auto-size` overrides `--rate-filter-width-hz`.
+
 By default filtered timesteps remain flagged. Use `--unflag-rate-filtered` to remove the contamination flags of the filtered timesteps.
 
 `--rate-filter-plots` saves a figure of delay vs fringe-rate for each filtered segment (up to `--rate-filter-max-plots`) into a `plots` directory alongside the measurement set. The before and after amplitudes are shown with each object's predicted track, the region nulled for the object (dashed) and the protected field region (white) overlaid.

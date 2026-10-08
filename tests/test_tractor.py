@@ -19,8 +19,10 @@ from jolly_roger.tractor import (
     DataChunk,
     RateFilterWriteBuffer,
     TukeyTractorOptions,
+    _rate_filter_settings,
     add_to_rate_filter_write_buffer,
     apply_roll_for_taper,
+    compute_auto_taper_widths,
     compute_rate_contamination,
     compute_tukey_multi_taper,
     find_idx_of_closest_delay,
@@ -596,3 +598,29 @@ def test_compute_tukey_multi_taper_later_object_below_elevation() -> None:
         )
         assert not result.nothing_to_do
         assert result.update_data
+
+
+def test_compute_auto_taper_widths_overrides_rate_width() -> None:
+    """As for the delay widths, auto sizing overrides a requested delay-rate width"""
+    options = compute_auto_taper_widths(
+        freq_chan=np.linspace(0.8, 1.1, 64) * u.GHz,
+        tukey_tractor_options=TukeyTractorOptions(
+            auto_size=True, rate_filter=True, rate_filter_width_hz=0.01
+        ),
+    )
+    assert options.rate_filter_width_hz is None
+    assert options.tukey_width_ns == 0.0
+
+
+@pytest.mark.parametrize(
+    ("auto_size", "nth_sidelobe_null", "expected_sidelobes"),
+    [(False, None, 1), (True, None, 1), (True, 3, 3)],
+)
+def test_rate_filter_settings_auto(
+    auto_size: bool, nth_sidelobe_null: int | None, expected_sidelobes: int
+) -> None:
+    settings = _rate_filter_settings(
+        TukeyTractorOptions(auto_size=auto_size, nth_sidelobe_null=nth_sidelobe_null)
+    )
+    assert settings.auto_width is auto_size
+    assert settings.auto_sidelobes == expected_sidelobes

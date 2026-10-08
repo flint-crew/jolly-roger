@@ -51,6 +51,36 @@ def calculate_expected_sinc_width(
     return sinc_width
 
 
+def calculate_expected_rate_sinc_width(
+    time_s: NDArray[np.floating[Any]] | u.Quantity,
+) -> u.Quantity:
+    """The expected width of a sinc response in delay-rate (fringe-rate) space given a
+    set of times. This is the delay-rate counterpart of ``calculate_expected_sinc_width``,
+    where the width is set by the span of the times rather than the bandwidth.
+
+    Args:
+        time_s (NDArray[np.floating[Any]] | u.Quantity): The sampled times. If units are not specified seconds are assumed.
+
+    Raises:
+        ValueError: Raised if the times do not span a duration
+
+    Returns:
+        u.Quantity: The expected width of the sinc response, in Hz
+    """
+    if not isinstance(time_s, u.Quantity):
+        time_s = time_s * u.s
+
+    duration = np.max(time_s) - np.min(time_s)
+    if duration <= 0 * u.s:
+        msg = f"Times must span a duration, got {duration=}"
+        raise ValueError(msg)
+
+    sinc_width = (1 / duration).to(u.Hz)
+    logger.debug(f"Calculated expected rate sinc width: {sinc_width=} for {duration=}")
+
+    return sinc_width
+
+
 def get_delay_of_nth_sidelobe(
     n: int, sinc_width: u.Quantity | np.floating[Any]
 ) -> u.Quantity:

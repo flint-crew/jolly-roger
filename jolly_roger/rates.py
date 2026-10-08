@@ -21,6 +21,7 @@ from numpy.typing import NDArray
 
 from jolly_roger.delays import array_to_delay_rate, delay_rate_to_array
 from jolly_roger.logging import logger
+from jolly_roger.response import calculate_expected_rate_sinc_width
 from jolly_roger.tapering.tukey import get_2d_taper
 from jolly_roger.uvws import WDelays, get_w_rates
 from jolly_roger.weights import scale_weights
@@ -45,6 +46,10 @@ class RateFilterSettings:
     """Objects below this elevation are not nulled"""
     ignore_nyquist_zone: int = 2
     """Objects beyond this Nyquist zone in delay are not nulled"""
+    auto_width: bool = False
+    """Size the margin of each segment from its expected sinc response in delay-rate, overriding ``width_hz``. The margin covers ``auto_sidelobes`` sidelobes, reduced towards the main lobe as needed to keep the object separable from the field."""
+    auto_sidelobes: int = 1
+    """The number of delay-rate sidelobes the margin includes when ``auto_width`` is set"""
 
 
 @dataclass
@@ -324,6 +329,8 @@ class ObjectTrack:
     """The predicted fringe-rate of each row at the central frequency, in Hz"""
     notch: RateBox
     """The region nulled for the object"""
+    rate_width_hz: float
+    """The margin beyond the object's fringe-rate band over which the taper rolls off, in Hz"""
 
 
 @dataclass
@@ -420,6 +427,58 @@ def _axis_protection(
     )
 
 
+def _object_box(
+    tau_s: NDArray[np.floating[Any]],
+    rate_extremes_hz: NDArray[np.floating[Any]],
+    outer_width_s: float,
+    width_hz: float,
+) -> RateBox:
+    """The region to null for an object: its delay track and fringe-rate band
+    across a segment, widened by ``outer_width_s`` in delay and ``width_hz`` in rate"""
+    return RateBox(
+        delay_center_s=float(np.max(tau_s) + np.min(tau_s)) / 2,
+        delay_half_width_s=float(np.max(tau_s) - np.min(tau_s)) / 2 + outer_width_s,
+        rate_center_hz=float(np.max(rate_extremes_hz) + np.min(rate_extremes_hz)) / 2,
+        rate_half_width_hz=float(np.max(rate_extremes_hz) - np.min(rate_extremes_hz))
+        / 2
+        + width_hz,
+    )
+
+
+def _boxes_overlap(
+    box_a: RateBox, box_b: RateBox, max_delay_s: float, max_rate_hz: float
+) -> bool:
+    """Whether two regions intersect in both delay and fringe-rate"""
+    return _wrapped_overlap(
+        box_a.delay_center_s,
+        box_a.delay_half_width_s,
+        box_b.delay_center_s,
+        box_b.delay_half_width_s,
+        max_delay_s,
+    ) and _wrapped_overlap(
+        box_a.rate_center_hz,
+        box_a.rate_half_width_hz,
+        box_b.rate_center_hz,
+        box_b.rate_half_width_hz,
+        max_rate_hz,
+    )
+
+
+def _candidate_rate_widths(
+    settings: RateFilterSettings, time_s: NDArray[np.floating[Any]], rate_bin_hz: float
+) -> list[float]:
+    """The margins beyond the object's fringe-rate band to try, widest first. With
+    ``auto_width`` these step from the main lobe plus ``auto_sidelobes`` sidelobes
+    down to the main lobe of the expected sinc response in delay-rate."""
+    if settings.auto_width:
+        sinc_width_hz = calculate_expected_rate_sinc_width(time_s).to(u.Hz).value
+        return [
+            (n + 1) * sinc_width_hz
+            for n in range(max(settings.auto_sidelobes, 0), -1, -1)
+        ]
+    return [settings.width_hz if settings.width_hz is not None else 2 * rate_bin_hz]
+
+
 def rate_filter_segment(
     segment: ContaminatedSegment,
     freq_chan: u.Quantity,
@@ -448,7 +507,7 @@ def rate_filter_segment(
     """
     core = segment.core
     core_rows = segment.core_rows
-    if segment.n_core < settings.min_timesteps:
+    if segment.n_core < settings.min_timesteps or segment.n_rows < 2:
         return RateFilterResult(rows=core_rows, success=False, reason="too short")
 
     time_s = np.array(segment.time_mjds)
@@ -468,14 +527,19 @@ def rate_filter_segment(
     nu_min, nu_max = float(np.min(freq_hz)), float(np.max(freq_hz))
     outer_width_s = settings.outer_width_ns * 1e-9
     tukey_width_s = settings.tukey_width_ns * 1e-9
-    width_hz = settings.width_hz if settings.width_hz is not None else 2 * rate_bin_hz
+    candidate_widths_hz = _candidate_rate_widths(
+        settings=settings, time_s=time_s, rate_bin_hz=rate_bin_hz
+    )
     floor_hz = settings.guard_hz if settings.guard_hz is not None else rate_bin_hz
-    # The widths of the 1 - cos transitions of the taper on each axis
+    # The widths of the 1 - cos transitions of the taper. The field is protected
+    # with the narrowest margin that may be used for an object
     delay_transition_s = _transition_width(
         x=delay_s, requested=tukey_width_s, fallback=outer_width_s
     )
-    rate_transition_hz = _transition_width(
-        x=rate_hz, requested=width_hz, fallback=width_hz
+    field_rate_transition_hz = _transition_width(
+        x=rate_hz,
+        requested=candidate_widths_hz[-1],
+        fallback=candidate_widths_hz[-1],
     )
 
     b_idx = segment.baseline_idx
@@ -517,31 +581,28 @@ def rate_filter_segment(
 
         # The fringe-rate of the object spans the band and its change across the segment
         rate_extremes = np.outer([nu_min, nu_max], [np.min(tau_rate), np.max(tau_rate)])
-        obj = RateBox(
-            delay_center_s=float(np.max(tau_s) + np.min(tau_s)) / 2,
-            delay_half_width_s=float(np.max(tau_s) - np.min(tau_s)) / 2 + outer_width_s,
-            rate_center_hz=float(np.max(rate_extremes) + np.min(rate_extremes)) / 2,
-            rate_half_width_hz=float(np.max(rate_extremes) - np.min(rate_extremes)) / 2
-            + width_hz,
-        )
 
-        delay_overlap = _wrapped_overlap(
-            obj.delay_center_s,
-            obj.delay_half_width_s,
-            field.delay_center_s,
-            field.delay_half_width_s,
-            max_delay_s,
-        )
-        rate_overlap = _wrapped_overlap(
-            obj.rate_center_hz,
-            obj.rate_half_width_hz,
-            field.rate_center_hz,
-            field.rate_half_width_hz,
-            max_rate_hz,
-        )
-        if delay_overlap and rate_overlap:
+        # Use the widest margin that keeps the object separable from the field
+        fitted: tuple[RateBox, float] | None = None
+        for width_hz in candidate_widths_hz:
+            candidate = _object_box(
+                tau_s=tau_s,
+                rate_extremes_hz=rate_extremes,
+                outer_width_s=outer_width_s,
+                width_hz=width_hz,
+            )
+            if not _boxes_overlap(candidate, field, max_delay_s, max_rate_hz):
+                fitted = (candidate, width_hz)
+                break
+        if fitted is None:
             return RateFilterResult(
                 rows=core_rows, success=False, reason="rate-contaminated"
+            )
+        obj, width_hz = fitted
+        if width_hz < candidate_widths_hz[0]:
+            logger.debug(
+                f"Reduced the delay-rate margin of {w_delays.object_name} to {width_hz:.3g} Hz "
+                f"(from {candidate_widths_hz[0]:.3g} Hz) to stay separable from the field"
             )
 
         delay_notch = _axis_notch(
@@ -554,7 +615,9 @@ def rate_filter_segment(
             x=rate_hz,
             center=obj.rate_center_hz,
             outer_width=obj.rate_half_width_hz,
-            tukey_width=rate_transition_hz,
+            tukey_width=_transition_width(
+                x=rate_hz, requested=width_hz, fallback=width_hz
+            ),
         )
         object_notch = 1.0 - (1.0 - rate_notch[:, None]) * (1.0 - delay_notch[None, :])
         notch = np.minimum(notch, object_notch)
@@ -564,6 +627,7 @@ def rate_filter_segment(
                 delay_s=tau_s,
                 rate_hz=nu_mid * tau_rate,
                 notch=obj,
+                rate_width_hz=width_hz,
             )
         )
 
@@ -576,7 +640,7 @@ def rate_filter_segment(
         _axis_protection(
             x=rate_hz,
             half_width=field.rate_half_width_hz,
-            tukey_width=rate_transition_hz,
+            tukey_width=field_rate_transition_hz,
         )[:, None]
         * _axis_protection(
             x=delay_s,

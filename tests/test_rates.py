@@ -510,3 +510,98 @@ def test_rate_filter_preserves_field_without_delay_transition() -> None:
     assert result.success
     assert result.data is not None
     np.testing.assert_allclose(result.data, data, atol=1e-10)
+
+
+def _auto_settings(auto_sidelobes: int = 1) -> RateFilterSettings:
+    return RateFilterSettings(
+        outer_width_ns=10.0,
+        tukey_width_ns=5.0,
+        auto_width=True,
+        auto_sidelobes=auto_sidelobes,
+    )
+
+
+def test_rate_filter_auto_width_long_segment() -> None:
+    """A long segment uses the main lobe and requested sidelobes, (N+1)/T"""
+    data, object_vis, w_delays = _make_segment_inputs(n_time=64)
+    recoverable = np.ones(len(data), dtype=bool)
+    duration_s = (len(data) - 1) * DT_S
+
+    auto, _ = _filter(
+        data, w_delays, recoverable, settings=_auto_settings(), keep_diagnostics=True
+    )
+    default, _ = _filter(data, w_delays, recoverable)
+
+    assert auto.success
+    assert auto.diagnostics is not None
+    (track,) = auto.diagnostics.tracks
+    assert track.rate_width_hz == pytest.approx(2 / duration_s)
+    assert (
+        _suppression_db(auto, object_vis) < _suppression_db(default, object_vis) + 0.5
+    )
+
+
+def test_rate_filter_auto_width_fits_short_segment() -> None:
+    """A fixed (N+1)/T margin overlaps the field on a short segment, but the
+    fitted margin is reduced until the object is separable"""
+    n_time = 24
+    data, object_vis, w_delays = _make_segment_inputs(n_time=n_time)
+    recoverable = np.ones(n_time, dtype=bool)
+    duration_s = (n_time - 1) * DT_S
+
+    fixed, _ = _filter(
+        data,
+        w_delays,
+        recoverable,
+        settings=RateFilterSettings(
+            outer_width_ns=10.0, tukey_width_ns=5.0, width_hz=3 / duration_s
+        ),
+    )
+    assert not fixed.success
+    assert fixed.reason == "rate-contaminated"
+
+    auto, _ = _filter(
+        data,
+        w_delays,
+        recoverable,
+        settings=_auto_settings(auto_sidelobes=2),
+        keep_diagnostics=True,
+    )
+    assert auto.success
+    assert auto.diagnostics is not None
+    (track,) = auto.diagnostics.tracks
+    assert track.rate_width_hz < 3 / duration_s
+    assert track.rate_width_hz >= 1 / duration_s * (1 - 1e-9)
+    assert _suppression_db(auto, object_vis) < -8.0
+
+
+def test_rate_filter_auto_width_rate_contaminated() -> None:
+    """An object without delay-rate can not be separated, even at the main lobe"""
+    data, _, w_delays = _make_segment_inputs(tau_rate=1e-14)
+    result, _ = _filter(
+        data, w_delays, np.ones(len(data), dtype=bool), settings=_auto_settings()
+    )
+    assert not result.success
+    assert result.reason == "rate-contaminated"
+
+
+def test_rate_filter_fixed_width_unchanged() -> None:
+    """Without auto sizing the margin is the requested width, or two rate bins"""
+    data, _, w_delays = _make_segment_inputs(n_time=64)
+    recoverable = np.ones(len(data), dtype=bool)
+    rate_bin_hz = 1 / (len(data) * DT_S)
+
+    default, _ = _filter(data, w_delays, recoverable, keep_diagnostics=True)
+    requested, _ = _filter(
+        data,
+        w_delays,
+        recoverable,
+        settings=RateFilterSettings(
+            outer_width_ns=10.0, tukey_width_ns=5.0, width_hz=0.004
+        ),
+        keep_diagnostics=True,
+    )
+    assert default.diagnostics is not None
+    assert requested.diagnostics is not None
+    assert default.diagnostics.tracks[0].rate_width_hz == pytest.approx(2 * rate_bin_hz)
+    assert requested.diagnostics.tracks[0].rate_width_hz == pytest.approx(0.004)

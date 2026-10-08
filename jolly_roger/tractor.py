@@ -1204,9 +1204,9 @@ class TukeyTractorOptions(BaseOptions):
     compare_to_field: float | None = None
     """Compare the source brightness in delay space to the field. If the source is fainter than the field multiplied by this factor, do not taper. Defaults to None."""
     auto_size: bool = False
-    """Automatically size the outer width of the tukey taper based on the data"""
+    """Automatically size the outer width of the tukey taper based on the data. With rate_filter, the delay-rate width of each segment is also sized from its duration T as (N+1)/T, reduced towards 1/T as needed to keep the object separable from the field. Overrides outer_width_ns, tukey_width_ns and rate_filter_width_hz."""
     nth_sidelobe_null: int | None = None
-    """Null up to the N'th sidelobe. Only used in auto_size mode. Defaults to None."""
+    """Null up to the N'th sidelobe. Only used in auto_size mode. With rate_filter this is also the number of delay-rate sidelobes (N) included, where None includes 1. Defaults to None."""
     reweight: bool = False
     """Attempt to identify a WEIGHT-like column and rescale to indicate modified data. Defaults to False."""
     weight_column: str | None = None
@@ -1224,7 +1224,7 @@ class TukeyTractorOptions(BaseOptions):
     rate_filter: bool = False
     """Filter in delay and delay-rate the timesteps where an object is contaminated in delay but separable in delay-rate. Segments are filtered once the object leaves the contaminated zone."""
     rate_filter_width_hz: float | None = None
-    """The width beyond the object's predicted fringe-rate band over which the delay-rate taper rolls off (1 - cos) from zero to one, in Hz. If None two rate bins are used."""
+    """The width beyond the object's predicted fringe-rate band over which the delay-rate taper rolls off (1 - cos) from zero to one, in Hz. If None two rate bins are used. Overridden by auto_size."""
     rate_filter_guard_hz: float | None = None
     """A fringe-rate around zero to protect, added to the guard derived from the field-of-view (see ``guard_field``). If None one rate bin is used."""
     rate_filter_min_timesteps: int = 8
@@ -1259,6 +1259,10 @@ def compute_auto_taper_widths(
     """Derive the tukey taper widths from the expected size of the sinc
     function for the given channel frequencies.
 
+    The delay-rate width depends on the duration of each segment, so it is not
+    set here. Instead ``rate_filter_width_hz`` is cleared, and each segment is
+    sized from its own expected sinc response in delay-rate.
+
     Args:
         freq_chan (u.Quantity): The per-channel frequencies of the MS
         tukey_tractor_options (TukeyTractorOptions): Tukey tractor options to inspect
@@ -1269,10 +1273,16 @@ def compute_auto_taper_widths(
     sinc_width = calculate_expected_sinc_width(freqs=freq_chan)
     outer_width_ns = sinc_width.to("ns").value
     logger.info(f"Setting automatic {outer_width_ns=}")
+    if tukey_tractor_options.rate_filter:
+        n_sidelobes = tukey_tractor_options.nth_sidelobe_null or 1
+        logger.info(
+            f"Setting automatic delay-rate width per segment: ({n_sidelobes}+1)/T, fitted down to 1/T"
+        )
 
     return tukey_tractor_options.with_options(
         outer_width_ns=outer_width_ns,
         tukey_width_ns=0.0,  # type: ignore[arg-type]
+        rate_filter_width_hz=None,  # type: ignore[arg-type]
     )
     # TODO: Removing the type ignore above results in a mypy error in capn_crunch
 
@@ -1563,6 +1573,8 @@ def _rate_filter_settings(
         min_timesteps=tukey_tractor_options.rate_filter_min_timesteps,
         elevation_cut_deg=tukey_tractor_options.elevation_cut_deg,
         ignore_nyquist_zone=tukey_tractor_options.ignore_nyquist_zone,
+        auto_width=tukey_tractor_options.auto_size,
+        auto_sidelobes=tukey_tractor_options.nth_sidelobe_null or 1,
     )
 
 

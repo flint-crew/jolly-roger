@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import astropy.units as u
 import numpy as np
+import pytest
 
 from jolly_roger.response import (
+    calculate_expected_rate_sinc_width,
     calculate_expected_sinc_width,
     get_delay_of_nth_sidelobe,
 )
@@ -13,6 +15,7 @@ from jolly_roger.response import (
 # Example code used to investigate and create tests
 """
 import numpy as np
+import pytest
 import astropy.units as u
 import matplotlib.pyplot as plt
 
@@ -110,3 +113,20 @@ def test_nth_sidelobe() -> None:
 
     nth_sidelobe_delay = get_delay_of_nth_sidelobe(sinc_width=width, n=0)
     assert nth_sidelobe_delay == (0 * u.s)
+
+
+def test_calculate_expected_rate_sinc_width() -> None:
+    """The delay-rate sinc width is set by the span of the times"""
+    time_s = 5e9 + np.arange(65) * 10.0
+    width = calculate_expected_rate_sinc_width(time_s)
+    assert width.unit == u.Hz
+    assert width.value == pytest.approx(1 / 640.0)
+
+    # Units are respected, and the ordering of times does not matter
+    width_min = calculate_expected_rate_sinc_width((time_s[::-1] / 60.0) * u.min)
+    assert width_min.to(u.Hz).value == pytest.approx(1 / 640.0)
+
+
+def test_calculate_expected_rate_sinc_width_requires_duration() -> None:
+    with pytest.raises(ValueError, match="span a duration"):
+        calculate_expected_rate_sinc_width(np.array([5.0, 5.0]))
