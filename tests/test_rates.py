@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import astropy.units as u
@@ -7,6 +8,7 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
+from jolly_roger.plots import plot_rate_filter_segment
 from jolly_roger.rates import (
     RateFilterResult,
     RateFilterSettings,
@@ -233,6 +235,7 @@ def _filter(
     pad_timesteps: int = 0,
     settings: RateFilterSettings | None = None,
     weights: dict[str, NDArray[np.floating[Any]]] | None = None,
+    keep_diagnostics: bool = False,
 ) -> tuple[RateFilterResult, NDArray[np.bool_]]:
     accumulator = SegmentAccumulator(pad_timesteps=pad_timesteps)
     released = _update(accumulator, recoverable, data=data, weights=weights)
@@ -245,6 +248,7 @@ def _filter(
         w_delays_list=[w_delays],
         settings=settings
         or RateFilterSettings(outer_width_ns=10.0, tukey_width_ns=5.0),
+        keep_diagnostics=keep_diagnostics,
     )
     return result, released[0].core
 
@@ -389,3 +393,48 @@ def test_rate_filter_summary() -> None:
     assert summary.failures["too short"] == 1
     assert summary.rows_not_filtered == 2
     summary.log(doubly_contaminated_rows=3)
+
+
+def test_rate_filter_diagnostics_only_when_requested() -> None:
+    data, _, w_delays = _make_segment_inputs()
+    result, _ = _filter(data, w_delays, np.ones(len(data), dtype=bool))
+    assert result.diagnostics is None
+
+
+def test_rate_filter_diagnostics() -> None:
+    data, _, w_delays = _make_segment_inputs(n_time=48)
+    recoverable = np.zeros(len(data), dtype=bool)
+    recoverable[10:40] = True
+    result, _ = _filter(
+        data, w_delays, recoverable, pad_timesteps=4, keep_diagnostics=True
+    )
+
+    diagnostics = result.diagnostics
+    assert diagnostics is not None
+    assert (diagnostics.ant_1, diagnostics.ant_2) == (0, 1)
+    # The segment starts with its leading padding
+    assert diagnostics.first_row == 6
+    shape = (len(diagnostics.rate_hz), len(diagnostics.delay_s))
+    assert diagnostics.before.shape == shape
+    assert diagnostics.after.shape == shape
+    # The object is nulled so there is less power after
+    assert np.sum(diagnostics.after) < np.sum(diagnostics.before)
+
+    (track,) = diagnostics.tracks
+    assert track.object_name == "sun"
+    assert len(track.delay_s) == len(track.rate_hz) == 38
+    # 2e-11 s/s at the central frequency of 0.95 GHz
+    np.testing.assert_allclose(track.rate_hz, 2e-11 * 0.95e9)
+
+
+def test_plot_rate_filter_segment(tmp_path: Path) -> None:
+    data, _, w_delays = _make_segment_inputs()
+    result, _ = _filter(
+        data, w_delays, np.ones(len(data), dtype=bool), keep_diagnostics=True
+    )
+    assert result.diagnostics is not None
+
+    output_path = plot_rate_filter_segment(
+        diagnostics=result.diagnostics, output_path=tmp_path / "segment.png"
+    )
+    assert output_path.exists()

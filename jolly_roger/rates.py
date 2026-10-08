@@ -288,6 +288,54 @@ class SegmentAccumulator:
         return released
 
 
+@dataclass(frozen=True)
+class RateBox:
+    """A symmetric region in delay and fringe-rate"""
+
+    delay_center_s: float
+    delay_half_width_s: float
+    rate_center_hz: float
+    rate_half_width_hz: float
+
+
+@dataclass
+class ObjectTrack:
+    """The predicted path of an object through delay and fringe-rate across a segment"""
+
+    object_name: str
+    """The name of the object"""
+    delay_s: NDArray[np.floating[Any]]
+    """The predicted delay of each row, in seconds"""
+    rate_hz: NDArray[np.floating[Any]]
+    """The predicted fringe-rate of each row at the central frequency, in Hz"""
+    notch: RateBox
+    """The region nulled for the object"""
+
+
+@dataclass
+class RateFilterDiagnostics:
+    """Quantities describing how a segment was filtered, used for plotting"""
+
+    ant_1: int
+    """The first antenna of the baseline"""
+    ant_2: int
+    """The second antenna of the baseline"""
+    first_row: int
+    """The first row of the segment in the measurement set"""
+    delay_s: NDArray[np.floating[Any]]
+    """The delay axis, in seconds"""
+    rate_hz: NDArray[np.floating[Any]]
+    """The fringe-rate axis, in Hz"""
+    before: NDArray[np.floating[Any]]
+    """The amplitude before filtering, averaged over polarisations. shape=(rate, delay)"""
+    after: NDArray[np.floating[Any]]
+    """The amplitude after filtering, averaged over polarisations. shape=(rate, delay)"""
+    field: RateBox
+    """The region occupied by the field, which is not modified"""
+    tracks: list[ObjectTrack]
+    """The predicted path of each nulled object"""
+
+
 @dataclass
 class RateFilterResult:
     """The outcome of filtering a segment in delay-rate space"""
@@ -306,16 +354,8 @@ class RateFilterResult:
     """The scaled weights of the core rows"""
     nulled_fraction: float = 0.0
     """The fraction of the delay-rate plane that was nulled"""
-
-
-@dataclass(frozen=True)
-class _Box:
-    """A symmetric region in delay and fringe-rate"""
-
-    delay_center_s: float
-    delay_half_width_s: float
-    rate_center_hz: float
-    rate_half_width_hz: float
+    diagnostics: RateFilterDiagnostics | None = None
+    """Description of the filtering for plotting. Only set when requested and the segment was filtered."""
 
 
 def _wrapped_overlap(
@@ -350,6 +390,7 @@ def rate_filter_segment(
     freq_chan: u.Quantity,
     w_delays_list: list[WDelays],
     settings: RateFilterSettings,
+    keep_diagnostics: bool = False,
 ) -> RateFilterResult:
     """Null the objects in ``w_delays_list`` from a segment in delay and
     delay-rate space while protecting the field.
@@ -365,6 +406,7 @@ def rate_filter_segment(
         freq_chan (u.Quantity): The frequency of each channel
         w_delays_list (list[WDelays]): The objects to null
         settings (RateFilterSettings): Parameterisation of the filter
+        keep_diagnostics (bool, optional): Attach the quantities needed to plot the filtering. Defaults to False.
 
     Returns:
         RateFilterResult: The filtered core rows, or the reason they could not be filtered
@@ -409,13 +451,15 @@ def rate_filter_segment(
         if reference.rate_guard_region is not None
         else 0.0
     )
-    field = _Box(
+    field = RateBox(
         delay_center_s=0.0,
         delay_half_width_s=outer_width_s + delay_guard_s,
         rate_center_hz=0.0,
         rate_half_width_hz=nu_max * rate_guard + floor_hz,
     )
 
+    nu_mid = (nu_min + nu_max) / 2
+    tracks: list[ObjectTrack] = []
     notch = np.ones((len(rate_hz), len(delay_s)))
     for w_delays in w_delays_list:
         elevation = w_delays.elevation[t_idx]
@@ -431,7 +475,7 @@ def rate_filter_segment(
 
         # The fringe-rate of the object spans the band and its change across the segment
         rate_extremes = np.outer([nu_min, nu_max], [np.min(tau_rate), np.max(tau_rate)])
-        obj = _Box(
+        obj = RateBox(
             delay_center_s=float(np.max(tau_s) + np.min(tau_s)) / 2,
             delay_half_width_s=float(np.max(tau_s) - np.min(tau_s)) / 2 + outer_width_s,
             rate_center_hz=float(np.max(rate_extremes) + np.min(rate_extremes)) / 2,
@@ -472,6 +516,14 @@ def rate_filter_segment(
         )
         object_notch = 1.0 - (1.0 - rate_notch[:, None]) * (1.0 - delay_notch[None, :])
         notch = np.minimum(notch, object_notch)
+        tracks.append(
+            ObjectTrack(
+                object_name=w_delays.object_name,
+                delay_s=tau_s,
+                rate_hz=nu_mid * tau_rate,
+                notch=obj,
+            )
+        )
 
     if np.all(notch == 1.0):
         return RateFilterResult(rows=core_rows, success=False, reason="nothing to null")
@@ -482,7 +534,21 @@ def rate_filter_segment(
     )
     notch[field_region] = 1.0
 
+    before = np.abs(delay_rate.delay_rate).mean(axis=-1) if keep_diagnostics else None
     delay_rate.delay_rate = delay_rate.delay_rate * notch[..., None]
+    diagnostics: RateFilterDiagnostics | None = None
+    if before is not None:
+        diagnostics = RateFilterDiagnostics(
+            ant_1=segment.ant_1,
+            ant_2=segment.ant_2,
+            first_row=int(segment.rows[0]),
+            delay_s=delay_s,
+            rate_hz=rate_hz,
+            before=before,
+            after=np.abs(delay_rate.delay_rate).mean(axis=-1),
+            field=field,
+            tracks=tracks,
+        )
     filtered = delay_rate_to_array(delay_rate)[core]
 
     original_mask = np.array(segment.mask)[core]
@@ -506,6 +572,7 @@ def rate_filter_segment(
         flags=flags,
         weights=scaled_weights,
         nulled_fraction=1.0 - mean_notch,
+        diagnostics=diagnostics,
     )
 
 

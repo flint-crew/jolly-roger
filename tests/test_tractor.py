@@ -380,6 +380,8 @@ def test_tractor_rate_filter(
         rate_filter_min_timesteps=2,
         rate_filter_pad_timesteps=pad,
         unflag_rate_filtered=unflag,
+        rate_filter_plots=True,
+        rate_filter_max_plots=2,
         chunk_size=100,
     )
     with caplog.at_level("INFO"):
@@ -401,6 +403,10 @@ def test_tractor_rate_filter(
 
     with table(str(ms_example), ack=False) as tab:
         assert new_column in tab.colnames()
+
+    # Plots are only made of filtered segments, up to the maximum
+    plots = list((Path(ms_example).parent / "plots").glob("*_rate_filter_*.png"))
+    assert len(plots) <= 2
 
 
 @pytest.mark.parametrize("unflag", [False, True])

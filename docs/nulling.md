@@ -36,6 +36,8 @@ The fringe-rate resolution is set by the length of a segment. `--rate-filter-pad
 
 By default filtered timesteps remain flagged. Use `--unflag-rate-filtered` to remove the contamination flags of the filtered timesteps.
 
+`--rate-filter-plots` saves a figure of delay vs fringe-rate for each filtered segment (up to `--rate-filter-max-plots`) into a `plots` directory alongside the measurement set. The before and after amplitudes are shown with each object's predicted track, the region nulled for the object (dashed) and the protected field region (white) overlaid.
+
 ### Baseline ak01 to ak06
 ![Example 1](images/baseline_data_0_5_multi_comparison.png)
 

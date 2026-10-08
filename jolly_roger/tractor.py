@@ -30,9 +30,10 @@ from jolly_roger.baselines import (
 )
 from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
 from jolly_roger.logging import logger
-from jolly_roger.plots import plot_baseline_comparison_data
+from jolly_roger.plots import plot_baseline_comparison_data, plot_rate_filter_segment
 from jolly_roger.rates import (
     ContaminatedSegment,
+    RateFilterDiagnostics,
     RateFilterResult,
     RateFilterSettings,
     RateFilterSummary,
@@ -1233,6 +1234,10 @@ class TukeyTractorOptions(BaseOptions):
     """The number of clean timesteps either side of a contaminated segment to include when delay-rate filtering. These are not modified. A value of 0 disables padding."""
     unflag_rate_filtered: bool = False
     """Remove the contamination flags of rows that were delay-rate filtered"""
+    rate_filter_plots: bool = False
+    """Plot the delay vs delay-rate of each segment that is delay-rate filtered"""
+    rate_filter_max_plots: int = 20
+    """The maximum number of delay-rate filtered segments to plot"""
 
 
 @dataclass(frozen=True)
@@ -1422,6 +1427,26 @@ def write_rate_filtered_segment(
                 subtab.putcol(weight_column_name, scaled_weights)
 
 
+def make_rate_filter_plot_path(
+    ms_path: Path, diagnostics: RateFilterDiagnostics
+) -> Path:
+    """The output path of a delay-rate filtered segment's plot, placed alongside other plots
+
+    Args:
+        ms_path (Path): The measurement set being processed
+        diagnostics (RateFilterDiagnostics): The filtered segment
+
+    Returns:
+        Path: Location to save the plot to
+    """
+    output_dir = ms_path.parent / "plots"
+    output_dir.mkdir(exist_ok=True, parents=True)
+    return (
+        output_dir
+        / f"{ms_path.name}_rate_filter_{diagnostics.ant_1}_{diagnostics.ant_2}_row{diagnostics.first_row}.png"
+    )
+
+
 def _rate_filter_settings(
     tukey_tractor_options: TukeyTractorOptions,
 ) -> RateFilterSettings:
@@ -1548,15 +1573,33 @@ def tukey_tractor(
         rate_filter_settings = _rate_filter_settings(tukey_tractor_options)
         freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze() * u.Hz
 
+        rate_filter_plot_paths: list[Path] = []
+
         def _filter_and_write(segments: Sequence[ContaminatedSegment]) -> None:
             for segment in segments:
+                keep_diagnostics = (
+                    tukey_tractor_options.rate_filter_plots
+                    and len(rate_filter_plot_paths)
+                    < tukey_tractor_options.rate_filter_max_plots
+                )
                 rate_filter_result = rate_filter_segment(
                     segment=segment,
                     freq_chan=freq_chan,
                     w_delays_list=w_delays_list,
                     settings=rate_filter_settings,
+                    keep_diagnostics=keep_diagnostics,
                 )
                 rate_filter_summary.record(rate_filter_result)
+                if rate_filter_result.diagnostics is not None:
+                    rate_filter_plot_paths.append(
+                        plot_rate_filter_segment(
+                            diagnostics=rate_filter_result.diagnostics,
+                            output_path=make_rate_filter_plot_path(
+                                ms_path=open_ms_tables.ms_path,
+                                diagnostics=rate_filter_result.diagnostics,
+                            ),
+                        )
+                    )
                 write_rate_filtered_segment(
                     open_ms_tables=open_ms_tables,
                     rate_filter_result=rate_filter_result,
@@ -1622,6 +1665,10 @@ def tukey_tractor(
                 rate_filter_summary.log(
                     doubly_contaminated_rows=accumulator.doubly_contaminated_rows
                 )
+                if rate_filter_plot_paths:
+                    logger.info(
+                        f"Made {len(rate_filter_plot_paths)} delay-rate filter plots in {rate_filter_plot_paths[0].parent}"
+                    )
 
         stop = time()
         runtime_s = stop - start

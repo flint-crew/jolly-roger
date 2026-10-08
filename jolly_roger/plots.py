@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,6 +16,8 @@ from astropy.visualization import (
     quantity_support,
     time_support,
 )
+from matplotlib.colors import LogNorm
+from matplotlib.patches import Rectangle
 
 from jolly_roger.baselines import BaselineData
 from jolly_roger.logging import logger
@@ -24,6 +26,7 @@ from jolly_roger.wrap import calculate_wrapped_data, iterate_over_zones
 
 if TYPE_CHECKING:
     from jolly_roger.delays import DelayTime
+    from jolly_roger.rates import RateBox, RateFilterDiagnostics
 
 
 def plot_baseline_data(
@@ -315,3 +318,92 @@ def plot_baseline_comparison_data(
         fig.savefig(output_path)
 
         return output_path
+
+
+def _add_rate_box(ax: plt.Axes, box: RateBox, **kwargs: Any) -> None:
+    """Draw a delay (ns) and fringe-rate (mHz) box. Wrapping is not drawn."""
+    ax.add_patch(
+        Rectangle(
+            (
+                (box.delay_center_s - box.delay_half_width_s) * 1e9,
+                (box.rate_center_hz - box.rate_half_width_hz) * 1e3,
+            ),
+            2 * box.delay_half_width_s * 1e9,
+            2 * box.rate_half_width_hz * 1e3,
+            fill=False,
+            **kwargs,
+        )
+    )
+
+
+def plot_rate_filter_segment(
+    diagnostics: RateFilterDiagnostics,
+    output_path: Path,
+) -> Path:
+    """Plot the delay vs delay-rate amplitude of a segment before and after
+    delay-rate filtering, with the predicted track of each object, the region
+    nulled for each object, and the protected field region overlaid.
+
+    Args:
+        diagnostics (RateFilterDiagnostics): Description of the filtered segment
+        output_path (Path): The location that the figure will be saved to
+
+    Returns:
+        Path: The location of the saved figure
+    """
+    delay_ns = diagnostics.delay_s * 1e9
+    rate_mhz = diagnostics.rate_hz * 1e3
+
+    # Shared colour scale so the before and after are comparable
+    positive = diagnostics.before[diagnostics.before > 0]
+    vmin, vmax = (
+        (np.percentile(positive, 5), np.max(positive)) if positive.size else (1e-6, 1.0)
+    )
+    norm = LogNorm(vmin=vmin, vmax=vmax)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
+    for ax, amplitude, title in zip(
+        axes, (diagnostics.before, diagnostics.after), ("Before", "After"), strict=True
+    ):
+        im = ax.pcolormesh(
+            delay_ns,
+            rate_mhz,
+            np.where(amplitude > 0, amplitude, np.nan),
+            norm=norm,
+            shading="nearest",
+        )
+        _add_rate_box(
+            ax, diagnostics.field, edgecolor="white", linewidth=1.5, label="Field"
+        )
+        for object_idx, track in enumerate(diagnostics.tracks):
+            color = f"C{object_idx + 1}"
+            ax.plot(
+                track.delay_s * 1e9,
+                track.rate_hz * 1e3,
+                color=color,
+                marker=".",
+                markersize=3,
+                linewidth=1,
+                label=track.object_name,
+            )
+            _add_rate_box(
+                ax, track.notch, edgecolor=color, linestyle="--", linewidth=1.5
+            )
+        ax.set(
+            xlabel="Delay / ns",
+            title=title,
+            xlim=(delay_ns.min(), delay_ns.max()),
+            ylim=(rate_mhz.min(), rate_mhz.max()),
+        )
+    axes[0].set_ylabel("Fringe-rate / mHz")
+    axes[0].legend(loc="upper right", fontsize="small")
+    fig.colorbar(im, ax=axes, label="Amplitude")
+    fig.suptitle(
+        f"Ant {diagnostics.ant_1} - Ant {diagnostics.ant_2}, segment from row {diagnostics.first_row}"
+    )
+
+    fig.savefig(output_path)
+    plt.close(fig)
+    logger.debug(f"Saved {output_path=}")
+
+    return output_path
