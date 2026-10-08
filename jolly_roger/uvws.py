@@ -11,7 +11,8 @@ from typing import Any, cast
 import astropy.units as u
 import numpy as np
 from astropy.constants import c as speed_of_light
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import GCRS, ICRS, EarthLocation, SkyCoord
+from astropy.time import Time
 from casacore.tables import table, taql
 from numpy.typing import NDArray
 from tqdm import tqdm
@@ -524,65 +525,87 @@ class UVWs:
     """The set of antenna baselines used for form the UVWs"""
 
 
+def gcrs_antenna_positions(
+    ant_xyz: u.Quantity | NDArray[np.floating[Any]], times: Time
+) -> NDArray[np.floating[Any]]:
+    """Rotate Earth-fixed (ITRF) antenna positions into the GCRS for each time. The GCRS
+    axes are aligned with the ICRS (J2000), and the rotation accounts for precession,
+    nutation, Earth rotation (UT1) and polar motion.
+
+    Args:
+        ant_xyz (u.Quantity | NDArray[np.floating[Any]]): Antenna ITRF (X,Y,Z) positions, in m, shape (ant, 3)
+        times (Time): The times to evaluate the positions at
+
+    Returns:
+        NDArray[np.floating[Any]]: The GCRS antenna positions, in m. Shape is (3, ant, time)
+    """
+    ant_xyz_m = u.Quantity(ant_xyz, u.m).value
+    antennas = EarthLocation.from_geocentric(*ant_xyz_m.T, unit=u.m)
+    positions, _ = antennas[:, None].get_gcrs_posvel(np.atleast_1d(times)[None, :])
+    return positions.xyz.to(u.m).value
+
+
+def _icrs_aligned_ra_dec(
+    position: SkyCoord,
+) -> tuple[NDArray[np.floating[Any]], NDArray[np.floating[Any]]]:
+    """The right ascension and declination, in radians, of a direction in a frame whose
+    axes are aligned with the ICRS. Geocentric (GCRS) positions, such as the Sun's, are
+    used as they are. All other positions are transformed to the ICRS."""
+    if not isinstance(position.frame, GCRS):
+        position = position.transform_to(ICRS())
+    return np.asarray(position.ra.rad), np.asarray(position.dec.rad)
+
+
 def xyz_to_uvw(
     baselines: Baselines,
     hour_angles: PositionHourAngles,
     flip_uvw_sign: bool = False,
 ) -> UVWs:
-    """Generate the UVWs for a given set of baseline vectors towards a position
-    across a series of hour angles.
+    """Generate the UVWs for a given set of baselines towards a position across
+    a series of times.
+
+    The antenna positions are rotated into the GCRS at each time, and the
+    baselines are projected onto the (u,v,w) axes of the direction in the ICRS
+    (J2000) frame. This matches how the UVW column of a measurement set is
+    defined (e.g. ASKAP), and includes precession, nutation, Earth rotation and
+    polar motion. Aberration is not applied.
 
     Args:
         baselines (Baselines): The set of baselines vectors to use
-        hour_angles (PositionHourAngles): The hour angles and position to generate UVWs for
+        hour_angles (PositionHourAngles): The times and position to generate UVWs for
         flip_uvw_sign (bool, optional): Flip the UVWs (required for LOFAR). Defaults to False.
 
     Returns:
         UVWs: The generated set of UVWs
     """
-    b_xyz = baselines.b_xyz
+    positions = gcrs_antenna_positions(
+        ant_xyz=baselines.ant_xyz, times=hour_angles.time
+    )
 
-    # Convert HA to geocentric hour angle (at Greenwich meridian)
-    # This is why we subtract the location's longitude
-    ha = hour_angles.hour_angle - hour_angles.location.lon
+    # Baselines follow the convention of ``baselines.b_xyz``: ant[b_idx[:, 0]] - ant[b_idx[:, 1]]
+    # b_gcrs shape: (3, baseline, time)
+    b_gcrs = positions[:, baselines.b_idx[:, 0]] - positions[:, baselines.b_idx[:, 1]]
 
-    declination = hour_angles.position.dec
-
-    # This is necessary for broadcastung in the matrix to work.
-    # Should the position be a solar object like the sun its position
-    # will change throughout the observation. but it will have
-    # been created consistently with the hour angles. If it is fixed
-    # then the use of the numpy ones like will ensure the same shape.
-    declination = (np.ones(len(ha)) * declination).decompose()
-
-    # Precompute the repeated terms
-    sin_ha = np.sin(ha)
-    sin_dec = np.sin(declination)
-    cos_ha = np.cos(ha)
-    cos_dec = np.cos(declination)
-    zeros = np.zeros_like(sin_ha)
-
-    # Conversion from baseline vectors to UVW
+    ra, dec = _icrs_aligned_ra_dec(hour_angles.position)
+    # The direction may move (e.g. the Sun), in which case there is a basis per time
+    ra, dec = np.broadcast_arrays(ra, dec)
+    sin_ra, cos_ra = np.sin(ra), np.cos(ra)
+    sin_dec, cos_dec = np.sin(dec), np.cos(dec)
+    zeros = np.zeros_like(ra)
+    # mat shape: (3 uvw, 3 xyz) or (3 uvw, 3 xyz, time)
     mat = np.array(
         [
-            [sin_ha, cos_ha, zeros],
-            [-sin_dec * cos_ha, sin_dec * sin_ha, cos_dec],
-            [
-                cos_dec * cos_ha,
-                -cos_dec * sin_ha,
-                sin_dec,
-            ],
+            [-sin_ra, cos_ra, zeros],
+            [-sin_dec * cos_ra, -sin_dec * sin_ra, cos_dec],
+            [cos_dec * cos_ra, cos_dec * sin_ra, sin_dec],
         ]
     )
 
-    # Every time this confuses me and I need the first mate to look over.
-    # b_xyz shape: (baselines, 3) where coord is XYZ
-    # mat shape: (3, 3, timesteps)
-    # uvw shape: (3, baseline, timesteps) where coord is UVW
-    uvw = np.einsum("ijk,lj->ilk", mat, b_xyz, optimize=True)  # codespell:ignore ilk
-    # i,j,k -> (3, 3, time)
-    # l,j -> (baseline, 3)
-    # i,l,k -> (3, baseline, time)
+    if mat.ndim == 2:
+        uvw = np.einsum("ij,jbt->ibt", mat, b_gcrs, optimize=True)
+    else:
+        uvw = np.einsum("ijt,jbt->ibt", mat, b_gcrs, optimize=True)
+    uvw = uvw * u.m
 
     logger.debug(f"{uvw.shape=}")
 
