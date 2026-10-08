@@ -28,9 +28,18 @@ from jolly_roger.baselines import (
     get_baseline_data,
     get_open_ms_tables,
 )
-from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
+from jolly_roger.delays import (
+    DelayTime,
+    data_to_delay_rate,
+    data_to_delay_time,
+    delay_time_to_data,
+)
 from jolly_roger.logging import logger
-from jolly_roger.plots import plot_baseline_comparison_data, plot_rate_filter_segment
+from jolly_roger.plots import (
+    plot_baseline_comparison_data,
+    plot_baseline_delay_rate_comparison,
+    plot_rate_filter_segment,
+)
 from jolly_roger.rates import (
     ContaminatedSegment,
     RateFilterDiagnostics,
@@ -461,6 +470,7 @@ def make_plot_results(
     reverse_baselines: bool = False,
     outer_width_ns: float | None = None,
     max_baselines: int = 10,
+    delay_rate: bool = False,
 ) -> list[Path]:
     """Create plots useful for diagnostics
 
@@ -473,6 +483,7 @@ def make_plot_results(
         reverse_baselines (bool, optional): Needed in some circumstances should antenna ordering in MS be different. Defaults to False.
         outer_width_ns (float | None, optional): Size, in nanoseconds, of the tukey taper. Defaults to None.
         max_baselines (int, optional): The maximum number of baseline plots to create. Defaults to 10.
+        delay_rate (bool, optional): Also create, for each baseline, a version of the comparison in delay and delay-rate. Defaults to False.
 
     Returns:
         list[Path]: Collection of paths to use
@@ -528,8 +539,7 @@ def make_plot_results(
         else:
             name_components.append("none")
 
-        name_components.append("comparison.png")
-        output_path = output_dir / f"{'_'.join(name_components)}"
+        output_path = output_dir / f"{'_'.join([*name_components, 'comparison.png'])}"
 
         logger.info("Creating figure")
         # TODO: the baseline data and delay times could be put into a single
@@ -545,6 +555,25 @@ def make_plot_results(
         )
         logger.info(f"Have written {output_path=}")
         output_paths.append(plot_path)
+
+        if delay_rate:
+            delay_rate_output_path = (
+                output_dir
+                / f"{'_'.join([*name_components, 'delay_rate_comparison.png'])}"
+            )
+            plot_path = plot_baseline_delay_rate_comparison(
+                before_baseline_data=before_baseline_data,
+                after_baseline_data=after_baseline_data,
+                before_delay_rate=data_to_delay_rate(
+                    baseline_data=before_baseline_data
+                ),
+                after_delay_rate=data_to_delay_rate(baseline_data=after_baseline_data),
+                output_path=delay_rate_output_path,
+                w_delays=w_delays,
+                outer_width_ns=outer_width_ns,
+            )
+            logger.info(f"Have written {delay_rate_output_path=}")
+            output_paths.append(plot_path)
 
     return output_paths
 
@@ -1936,6 +1965,7 @@ def tukey_tractor(
             reverse_baselines=tukey_tractor_options.reverse_baselines,
             outer_width_ns=tukey_tractor_options.outer_width_ns,
             max_baselines=tukey_tractor_options.number_of_plots,
+            delay_rate=tukey_tractor_options.rate_filter,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")

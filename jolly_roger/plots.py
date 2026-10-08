@@ -21,11 +21,11 @@ from matplotlib.patches import Rectangle
 
 from jolly_roger.baselines import BaselineData
 from jolly_roger.logging import logger
-from jolly_roger.uvws import WDelays
+from jolly_roger.uvws import WDelays, get_w_rates
 from jolly_roger.wrap import calculate_wrapped_data, iterate_over_zones
 
 if TYPE_CHECKING:
-    from jolly_roger.delays import DelayTime
+    from jolly_roger.delays import DelayRate, DelayTime
     from jolly_roger.rates import RateBox, RateFilterDiagnostics
 
 
@@ -57,6 +57,122 @@ def plot_baseline_data(
             / f"baseline_data_{baseline_data.ant_1}_{baseline_data.ant_2}{suffix}.png"
         )
         fig.savefig(output_path)
+
+
+def _plot_dynamic_spectra_row(
+    fig: plt.Figure,
+    axes: tuple[plt.Axes, plt.Axes, plt.Axes],
+    before_baseline_data: BaselineData,
+    after_baseline_data: BaselineData,
+    w_delays: list[WDelays] | None,
+    b_idx: int | None,
+    max_delay_ns: float,
+) -> None:
+    """Draw the before and after dynamic spectra (time vs frequency) and, between
+    them, the elevation and Nyquist zone of each object. Must be called within
+    ``quantity_support`` and ``time_support``.
+
+    Args:
+        fig (plt.Figure): The figure the axes belong to
+        axes (tuple[plt.Axes, plt.Axes, plt.Axes]): The before, object and after axes
+        before_baseline_data (BaselineData): The baseline data from the before state
+        after_baseline_data (BaselineData): The baseline data from the after state
+        w_delays (list[WDelays] | None): Delays corresponding to objects that have been nulled
+        b_idx (int | None): The index of the baseline into the ``w_delays``
+        max_delay_ns (float): The largest delay of the delay spectrum, in ns, used to compute Nyquist zones
+    """
+    ax1, ax2, ax3 = axes
+    before_amp_stokesi = np.abs(
+        (
+            before_baseline_data.masked_data[..., 0]
+            + before_baseline_data.masked_data[..., -1]
+        )
+        / 2
+    )
+    after_amp_stokesi = np.abs(
+        (
+            after_baseline_data.masked_data[..., 0]
+            + after_baseline_data.masked_data[..., -1]
+        )
+        / 2
+    )
+
+    # We may end up flagging all the data. If the after data is completely flagged, fall back
+    # to the before data. If, however, all that is also flagged (e.g. sun is too close across
+    # all timesteps and hence all timesteps are flagged) we no normalise.
+    norm = None
+    norm_plot_data = (
+        after_amp_stokesi if not after_amp_stokesi.mask.all() else before_amp_stokesi
+    )
+    if not norm_plot_data.mask.all():
+        norm = ImageNormalize(
+            norm_plot_data,
+            interval=ZScaleInterval(),
+            stretch=SqrtStretch(),
+        )
+
+    else:
+        logger.warning("No valid data found. No attempt to normalise data.")
+
+    cmap = plt.cm.viridis
+
+    im = ax1.pcolormesh(
+        before_baseline_data.time,
+        before_baseline_data.freq_chan,
+        before_amp_stokesi.T,
+        norm=norm,
+        cmap=cmap,
+    )
+    ax1.set(
+        ylabel=f"Frequency / {before_baseline_data.freq_chan.unit:latex_inline}",
+        title="Before",
+    )
+
+    ax2.set_axis_off()
+    if w_delays:
+        assert b_idx is not None, "A baseline index is needed to plot objects"
+        ax2.set_axis_on()
+        ax2_zone = ax2.twinx()
+        ax2.axhline(0, lw=4, color="black", ls="-")
+
+        max_zone = 0
+        for _object_idx, _w_delays in enumerate(w_delays):
+            plot_elevation = _w_delays.elevation.to("deg")
+            ax2.plot(
+                before_baseline_data.time,
+                plot_elevation,
+                label=_w_delays.object_name,
+                color=f"C{_object_idx}",
+            )
+            plot_delay = _w_delays.w_delays[b_idx].to("ns").value
+            plot_zone = calculate_wrapped_data(
+                values=plot_delay,
+                upper_limit=max_delay_ns,
+            )
+            ax2_zone.plot(before_baseline_data.time, plot_zone.zones, ls="--")
+            object_max_zone = max(plot_zone.zones)
+            max_zone = object_max_zone if object_max_zone > max_zone else max_zone
+        ax2_zone.set(ylabel="Nyquist Zone", ylim=[0, max_zone + 1])
+        ax2.legend()
+        ax2.grid()
+        ax2.set(
+            ylabel=f"Elevation / {plot_elevation.unit:latex_inline}",
+            ylim=[-90.0, 90.0],
+        )
+
+    ax3.pcolormesh(
+        after_baseline_data.time,
+        after_baseline_data.freq_chan,
+        after_amp_stokesi.T,
+        norm=norm,
+        cmap=cmap,
+    )
+    ax3.set(
+        ylabel=f"Frequency / {after_baseline_data.freq_chan.unit:latex_inline}",
+        title="After",
+    )
+    for ax in (ax1, ax3):
+        fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
 
 def plot_baseline_comparison_data(
@@ -93,40 +209,6 @@ def plot_baseline_comparison_data(
         b_idx = w_delays[0].b_map[ant_1, ant_2]
 
     with quantity_support(), time_support():
-        before_amp_stokesi = np.abs(
-            (
-                before_baseline_data.masked_data[..., 0]
-                + before_baseline_data.masked_data[..., -1]
-            )
-            / 2
-        )
-        after_amp_stokesi = np.abs(
-            (
-                after_baseline_data.masked_data[..., 0]
-                + after_baseline_data.masked_data[..., -1]
-            )
-            / 2
-        )
-
-        # We may end up flagging all the data. If the after data is completely flagged, fall back
-        # to the before data. If, however, all that is also flagged (e.g. sun is too close across
-        # all timesteps and hence all timesteps are flagged) we no normalise.
-        norm = None
-        norm_plot_data = (
-            after_amp_stokesi
-            if not after_amp_stokesi.mask.all()
-            else before_amp_stokesi
-        )
-        if not norm_plot_data.mask.all():
-            norm = ImageNormalize(
-                norm_plot_data,
-                interval=ZScaleInterval(),
-                stretch=SqrtStretch(),
-            )
-
-        else:
-            logger.warning("No valid data found. No attempt to normalise data.")
-
         cmap = plt.cm.viridis
 
         # The elevation curve (ax2) has different units to ax1/3
@@ -134,62 +216,15 @@ def plot_baseline_comparison_data(
         fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(
             2, 3, figsize=(18, 10), sharex=True, sharey=False
         )
-        im = ax1.pcolormesh(
-            before_baseline_data.time,
-            before_baseline_data.freq_chan,
-            before_amp_stokesi.T,
-            norm=norm,
-            cmap=cmap,
+        _plot_dynamic_spectra_row(
+            fig=fig,
+            axes=(ax1, ax2, ax3),
+            before_baseline_data=before_baseline_data,
+            after_baseline_data=after_baseline_data,
+            w_delays=w_delays,
+            b_idx=b_idx if w_delays is not None else None,
+            max_delay_ns=float(np.max(after_delays.delay.to("ns")).value),
         )
-        ax1.set(
-            ylabel=f"Frequency / {before_baseline_data.freq_chan.unit:latex_inline}",
-            title="Before",
-        )
-
-        ax2.set_axis_off()
-        if w_delays:
-            ax2.set_axis_on()
-            ax2_zone = ax2.twinx()
-            ax2.axhline(0, lw=4, color="black", ls="-")
-
-            max_zone = 0
-            for _object_idx, _w_delays in enumerate(w_delays):
-                plot_elevation = _w_delays.elevation.to("deg")
-                ax2.plot(
-                    before_baseline_data.time,
-                    plot_elevation,
-                    label=_w_delays.object_name,
-                    color=f"C{_object_idx}",
-                )
-                plot_delay = _w_delays.w_delays[b_idx].to("ns").value
-                plot_zone = calculate_wrapped_data(
-                    values=plot_delay,
-                    upper_limit=np.max(after_delays.delay.to("ns")).value,
-                )
-                ax2_zone.plot(before_baseline_data.time, plot_zone.zones, ls="--")
-                object_max_zone = max(plot_zone.zones)
-                max_zone = object_max_zone if object_max_zone > max_zone else max_zone
-            ax2_zone.set(ylabel="Nyquist Zone", ylim=[0, max_zone + 1])
-            ax2.legend()
-            ax2.grid()
-            ax2.set(
-                ylabel=f"Elevation / {plot_elevation.unit:latex_inline}",
-                ylim=[-90.0, 90.0],
-            )
-
-        ax3.pcolormesh(
-            after_baseline_data.time,
-            after_baseline_data.freq_chan,
-            after_amp_stokesi.T,
-            norm=norm,
-            cmap=cmap,
-        )
-        ax3.set(
-            ylabel=f"Frequency / {after_baseline_data.freq_chan.unit:latex_inline}",
-            title="After",
-        )
-        for ax in (ax1, ax3):
-            fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
         # TODO: Move these delay calculations outside of the plotting function
         # And here we calculate the delay information
@@ -318,6 +353,173 @@ def plot_baseline_comparison_data(
         fig.savefig(output_path)
 
         return output_path
+
+
+def plot_baseline_delay_rate_comparison(
+    before_baseline_data: BaselineData,
+    after_baseline_data: BaselineData,
+    before_delay_rate: DelayRate,
+    after_delay_rate: DelayRate,
+    output_path: Path,
+    w_delays: WDelays | list[WDelays] | None = None,
+    outer_width_ns: float | None = None,
+) -> Path:
+    """Make a comparison figure of a baseline before and after the nulling process,
+    in delay and delay-rate across the whole observation. The top row matches
+    ``plot_baseline_comparison_data``. The bottom row replaces delay vs time with
+    delay vs delay-rate, where an object moving through delay separates from the
+    field. The path of each object, and the region occupied by the field, are
+    shown between the before and after panels.
+
+    Args:
+        before_baseline_data (BaselineData): The baseline data from the before state
+        after_baseline_data (BaselineData): The baseline data from the after state
+        before_delay_rate (DelayRate): The delay-rate transform of the before state
+        after_delay_rate (DelayRate): The delay-rate transform of the after state
+        output_path (Path): The location that the figure will be saved to
+        w_delays (WDelays | list[WDelays] | None, optional): Delays corresponding to objects that have been nulled. Defaults to None.
+        outer_width_ns (float | None, optional): The taper size. Defaults to None.
+
+    Returns:
+        Path: Path to the saved figure
+    """
+    b_idx: int | None = None
+    if w_delays is not None:
+        w_delays = [w_delays] if isinstance(w_delays, WDelays) else w_delays
+        b_idx = w_delays[0].b_map[
+            before_baseline_data.ant_1, before_baseline_data.ant_2
+        ]
+
+    delay_ns = before_delay_rate.delay.to("ns").value
+    rate_mhz = before_delay_rate.rate.to("mHz").value
+    freq_hz = before_baseline_data.freq_chan.to("Hz").value
+    nu_mid, nu_max = (
+        float(np.mean([freq_hz.min(), freq_hz.max()])),
+        float(freq_hz.max()),
+    )
+
+    with quantity_support(), time_support():
+        cmap = plt.cm.viridis
+        fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(
+            2, 3, figsize=(18, 10), sharex=False, sharey=False
+        )
+        # Only the top row shares a (time) axis
+        ax2.sharex(ax1)
+        ax3.sharex(ax1)
+        _plot_dynamic_spectra_row(
+            fig=fig,
+            axes=(ax1, ax2, ax3),
+            before_baseline_data=before_baseline_data,
+            after_baseline_data=after_baseline_data,
+            w_delays=w_delays,
+            b_idx=b_idx,
+            max_delay_ns=float(np.max(delay_ns)),
+        )
+
+    before_rate_i = np.abs(
+        (before_delay_rate.delay_rate[..., 0] + before_delay_rate.delay_rate[..., -1])
+        / 2
+    )
+    after_rate_i = np.abs(
+        (after_delay_rate.delay_rate[..., 0] + after_delay_rate.delay_rate[..., -1]) / 2
+    )
+    rate_norm = ImageNormalize(
+        before_rate_i, interval=MinMaxInterval(), stretch=LogStretch()
+    )
+    for ax, amplitude, title in (
+        (ax4, before_rate_i, "Before"),
+        (ax6, after_rate_i, "After"),
+    ):
+        im = ax.pcolormesh(
+            delay_ns, rate_mhz, amplitude, norm=rate_norm, cmap=cmap, shading="nearest"
+        )
+        ax.set(xlabel="Delay / ns", ylabel="Fringe-rate / mHz", title=title)
+        fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
+
+    # The path each object takes through delay and delay-rate, at the central frequency
+    if w_delays is not None and b_idx is not None:
+        import matplotlib.patheffects as pe  # noqa: PLC0415
+
+        for _object_idx, _w_delays in enumerate(w_delays):
+            wrapped_data = calculate_wrapped_data(
+                values=_w_delays.w_delays[b_idx].to("ns").value,
+                upper_limit=float(np.max(delay_ns)),
+            )
+            object_rate_mhz = nu_mid * get_w_rates(_w_delays)[b_idx].value * 1e3
+            for _zone_idx, object_slice in enumerate(
+                iterate_over_zones(zones=wrapped_data)
+            ):
+                current_zone = np.mean(wrapped_data.zones[object_slice])
+                ax5.plot(
+                    wrapped_data.values[object_slice],
+                    object_rate_mhz[object_slice],
+                    color=f"C{_object_idx}",
+                    label=f"Path of {_w_delays.object_name}"
+                    if _zone_idx == 0
+                    else None,
+                    lw=3,
+                    path_effects=[
+                        pe.Stroke(linewidth=4, foreground="k"),
+                        pe.Normal(),
+                    ],
+                    dashes=(1.2 * current_zone + 1, 1.2 * current_zone + 1),
+                )
+
+    # The region occupied by the field
+    delay_guard_ns = outer_width_ns or 0.0
+    rate_guard_mhz = 0.0
+    if w_delays is not None and b_idx is not None:
+        if w_delays[0].guard_region is not None:
+            delay_guard_ns += float(
+                np.max(w_delays[0].guard_region[b_idx].to("ns").value)
+            )
+        if w_delays[0].rate_guard_region is not None:
+            rate_guard_mhz = (
+                nu_max * float(np.max(w_delays[0].rate_guard_region[b_idx].value)) * 1e3
+            )
+    ax5.plot(0, 0, marker="o", color="black", ls="none", label="Field")
+    if rate_guard_mhz > 0:
+        ax5.add_patch(
+            Rectangle(
+                (-delay_guard_ns, -rate_guard_mhz),
+                2 * delay_guard_ns,
+                2 * rate_guard_mhz,
+                alpha=0.3,
+                color="grey",
+                label="Guard Region",
+            )
+        )
+    else:
+        # Without a guard in delay-rate the field region is only extended in delay
+        ax5.axhline(0, ls="-", c="black", lw=1)
+        if delay_guard_ns > 0:
+            ax5.plot(
+                [-delay_guard_ns, delay_guard_ns],
+                [0, 0],
+                lw=8,
+                alpha=0.3,
+                color="grey",
+                solid_capstyle="butt",
+                label="Guard Region",
+            )
+
+    ax5.legend(loc="upper right")
+    ax5.grid()
+    ax5.set(
+        xlim=[np.min(delay_ns), np.max(delay_ns)],
+        ylim=[np.min(rate_mhz), np.max(rate_mhz)],
+        xlabel="Delay / ns",
+        ylabel="Fringe-rate / mHz",
+    )
+
+    fig.suptitle(
+        f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2} (delay-rate)"
+    )
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+
+    return output_path
 
 
 def _add_rate_box(ax: plt.Axes, box: RateBox, **kwargs: Any) -> None:

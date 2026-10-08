@@ -725,3 +725,27 @@ def test_rate_filter_plots_deferred(
     assert all(path.parent == tmp_path / "plots" for path in plot_paths)
     # The kept diagnostics are released once plotted
     assert processor.diagnostics == []
+
+
+@pytest.mark.parametrize("rate_filter", [False, True])
+def test_tractor_make_plots_delay_rate(ms_example, rate_filter: bool) -> None:
+    """With delay-rate filtering each plotted baseline also has a delay-rate figure"""
+    tractor_results = tukey_tractor(
+        ms_path=Path(ms_example),
+        tukey_tractor_options=TukeyTractorOptions(
+            outer_width_ns=4.0,
+            tukey_width_ns=2.0,
+            output_column="JACKS_DATA",
+            make_plots=True,
+            number_of_plots=2,
+            rate_filter=rate_filter,
+        ),
+    )
+
+    assert tractor_results.output_plots is not None
+    names = [path.name for path in tractor_results.output_plots]
+    assert all(path.exists() for path in tractor_results.output_plots)
+    comparison = [name for name in names if name.endswith("_comparison.png")]
+    delay_rate = [name for name in names if name.endswith("_delay_rate_comparison.png")]
+    assert len(comparison) - len(delay_rate) == 2
+    assert len(delay_rate) == (2 if rate_filter else 0)
