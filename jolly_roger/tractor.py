@@ -555,19 +555,12 @@ def _get_baseline_time_indicies(
     # or ignore them during iterations. Certainly the former is the better
     # approach.
 
-    # Again, note the auto-correlations are ignored!!! Here be pirates mate
-    baseline_idx = np.array(
-        [
-            w_delays.b_map[(int(ant_1), int(ant_2))] if ant_1 != ant_2 else 0
-            for ant_1, ant_2 in zip(data_chunk.ant_1, data_chunk.ant_2, strict=False)
-        ]
+    # Again, note the auto-correlations are mapped to baseline 0!!! Here be pirates mate
+    return w_delays.get_indices(
+        ant_1=data_chunk.ant_1,
+        ant_2=data_chunk.ant_2,
+        time_mjds=data_chunk.time_mjds,
     )
-
-    time_idx = np.array(
-        [w_delays.time_map[time * u.s] for time in data_chunk.time_mjds]
-    )
-
-    return baseline_idx, time_idx
 
 
 @dataclass
@@ -1060,7 +1053,10 @@ def compute_tukey_multi_taper(
             w_delays=w_delays,
             delay_time=delay_time,
         )
-        delay_time = taper_result.delay_time
+        # An object that is skipped (e.g. below the elevation cut) has no
+        # delay_time, and should not discard the one formed for an earlier object
+        if taper_result.delay_time is not None:
+            delay_time = taper_result.delay_time
         taper_results.append(taper_result)
 
         if (
@@ -1083,7 +1079,8 @@ def compute_tukey_multi_taper(
                     delay_time=delay_time,
                     sidelobe_offset=sidelobe_offset * sign,
                 )
-                delay_time = taper_result.delay_time
+                if taper_result.delay_time is not None:
+                    delay_time = taper_result.delay_time
                 taper_results.append(taper_result)
 
     # Note that applying the taper replaces (rather than modifies) the masked
@@ -1427,6 +1424,101 @@ def write_rate_filtered_segment(
                 subtab.putcol(weight_column_name, scaled_weights)
 
 
+def merge_rate_filter_results(
+    rate_filter_results: Sequence[RateFilterResult],
+) -> RateFilterResult:
+    """Combine filtered segments into a single result whose rows are sorted.
+    Writing few, large, ordered selections is far faster than many small
+    selections, particularly for tiled columns.
+
+    Args:
+        rate_filter_results (Sequence[RateFilterResult]): Successfully filtered segments
+
+    Returns:
+        RateFilterResult: The combined segments, sorted by row
+    """
+    assert len(rate_filter_results) > 0, "Expected at least one result to merge"
+    assert all(result.success for result in rate_filter_results), (
+        "Only filtered segments may be merged"
+    )
+
+    rows = np.concatenate([result.rows for result in rate_filter_results])
+    order = np.argsort(rows, kind="stable")
+
+    def _merge(arrays: Sequence[NDArray[Any]]) -> NDArray[Any]:
+        return np.concatenate(arrays)[order]
+
+    data = [result.data for result in rate_filter_results if result.data is not None]
+    assert len(data) == len(rate_filter_results), "Filtered data expected"
+    flags = [result.flags for result in rate_filter_results if result.flags is not None]
+    weights = [
+        result.weights for result in rate_filter_results if result.weights is not None
+    ]
+
+    return RateFilterResult(
+        rows=rows[order],
+        success=True,
+        data=_merge(data),
+        flags=_merge(flags) if len(flags) == len(rate_filter_results) else None,
+        weights={k: _merge([w[k] for w in weights]) for k in weights[0]}
+        if len(weights) == len(rate_filter_results)
+        else None,
+    )
+
+
+class RateFilterWriteBuffer:
+    """Collect delay-rate filtered segments and write them to the measurement set
+    in large, row-ordered batches"""
+
+    def __init__(
+        self,
+        open_ms_tables: OpenMSTables,
+        tukey_tractor_options: TukeyTractorOptions,
+        max_rows: int,
+    ) -> None:
+        """
+        Args:
+            open_ms_tables (OpenMSTables): The set of open handlers to the relevant measurement sets
+            tukey_tractor_options (TukeyTractorOptions): Options relevant to the data selection
+            max_rows (int): The number of buffered rows that triggers a write
+        """
+        self.open_ms_tables = open_ms_tables
+        self.tukey_tractor_options = tukey_tractor_options
+        self.max_rows = max_rows
+        self._results: list[RateFilterResult] = []
+        self._n_rows = 0
+
+    def add(self, rate_filter_result: RateFilterResult) -> None:
+        """Buffer a filtered segment, writing the buffer once it is full. Segments
+        that were not filtered are ignored."""
+        if not rate_filter_result.success:
+            logger.debug(
+                f"Segment of {len(rate_filter_result.rows)} rows not filtered: {rate_filter_result.reason}"
+            )
+            return
+
+        self._results.append(rate_filter_result)
+        self._n_rows += len(rate_filter_result.rows)
+        if self._n_rows >= self.max_rows:
+            self.flush()
+
+    def flush(self) -> None:
+        """Write all buffered segments to the measurement set"""
+        if not self._results:
+            return
+
+        logger.debug(
+            f"Writing {len(self._results)} delay-rate filtered segments ({self._n_rows} rows)"
+        )
+        write_rate_filtered_segment(
+            open_ms_tables=self.open_ms_tables,
+            rate_filter_result=merge_rate_filter_results(self._results),
+            tukey_tractor_options=self.tukey_tractor_options,
+        )
+        self._results = []
+        self._n_rows = 0
+
+
 def make_rate_filter_plot_path(
     ms_path: Path, diagnostics: RateFilterDiagnostics
 ) -> Path:
@@ -1509,9 +1601,16 @@ def tukey_tractor(
             open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
         )
 
-    weight_columns: Sequence[str] | None = select_weight_columns(
-        ms_path=ms_path, weight_column=tukey_tractor_options.weight_column
-    )
+    # Weights are only read, scaled and written back when reweighting is requested
+    weight_columns: Sequence[str] | None = None
+    if tukey_tractor_options.reweight:
+        weight_columns = select_weight_columns(
+            ms_path=ms_path, weight_column=tukey_tractor_options.weight_column
+        )
+    elif tukey_tractor_options.weight_column is not None:
+        logger.warning(
+            f"{tukey_tractor_options.weight_column=} is set but reweight is False. Weights will not be modified."
+        )
 
     write_back_required: bool = True
     if not tukey_tractor_options.dry_run:
@@ -1574,6 +1673,14 @@ def tukey_tractor(
         freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze() * u.Hz
 
         rate_filter_plot_paths: list[Path] = []
+        # Rows of a released segment are all in chunks that have already been
+        # written, so deferring the segment writes can not be overwritten later
+        rate_filter_write_buffer = RateFilterWriteBuffer(
+            open_ms_tables=open_ms_tables,
+            tukey_tractor_options=tukey_tractor_options,
+            max_rows=tukey_tractor_options.chunk_size
+            * tukey_tractor_options.max_workers,
+        )
 
         def _filter_and_write(segments: Sequence[ContaminatedSegment]) -> None:
             for segment in segments:
@@ -1600,11 +1707,7 @@ def tukey_tractor(
                             ),
                         )
                     )
-                write_rate_filtered_segment(
-                    open_ms_tables=open_ms_tables,
-                    rate_filter_result=rate_filter_result,
-                    tukey_tractor_options=tukey_tractor_options,
-                )
+                rate_filter_write_buffer.add(rate_filter_result)
 
         logger.info(f"Incremental data flushes {write_back_required=}")
         start = time()
@@ -1662,6 +1765,7 @@ def tukey_tractor(
 
             if accumulator is not None:
                 _filter_and_write(accumulator.flush_all())
+                rate_filter_write_buffer.flush()
                 rate_filter_summary.log(
                     doubly_contaminated_rows=accumulator.doubly_contaminated_rows
                 )

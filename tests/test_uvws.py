@@ -6,6 +6,7 @@ from pathlib import Path
 
 import astropy.units as u
 import numpy as np
+import pytest
 from astropy.coordinates import EarthLocation, SkyCoord
 from astropy.time import Time
 from casacore.tables import table
@@ -215,3 +216,67 @@ def test_get_object_delay_attaches_rates(ms_example: Path) -> None:
     assert with_guard.rate_guard_region is not None
     assert with_guard.rate_guard_region.shape == with_guard.w_delays.shape
     assert np.all(with_guard.rate_guard_region.value >= 0)
+
+
+def test_get_indices_matches_dict_lookup(ms_example: Path) -> None:
+    """The vectorised lookup agrees with per-row lookups of the maps"""
+    with table(str(ms_example / "FIELD"), ack=False) as tab:
+        phase_dir = tab.getcol("PHASE_DIR")[0, 0]
+    (w_delays,) = get_object_delay_for_ms(
+        ms_path=ms_example, phase_dir=SkyCoord(*phase_dir, unit="rad")
+    )
+    with table(str(ms_example), ack=False) as tab:
+        ant_1 = tab.getcol("ANTENNA1")
+        ant_2 = tab.getcol("ANTENNA2")
+        time_mjds = tab.getcol("TIME_CENTROID")
+
+    baseline_idx, time_idx = w_delays.get_indices(
+        ant_1=ant_1, ant_2=ant_2, time_mjds=time_mjds
+    )
+
+    expected_baseline_idx = [
+        w_delays.b_map[(int(a1), int(a2))] if a1 != a2 else 0
+        for a1, a2 in zip(ant_1, ant_2, strict=True)
+    ]
+    expected_time_idx = [w_delays.time_map[t * u.s] for t in time_mjds]
+    np.testing.assert_array_equal(baseline_idx, expected_baseline_idx)
+    np.testing.assert_array_equal(time_idx, expected_time_idx)
+
+
+def _indexed_w_delays() -> WDelays:
+    # Times deliberately out of order, as the time map is in 'first seen' order
+    times = np.array([30.0, 10.0, 20.0])
+    return WDelays(
+        object_name="sun",
+        w_delays=np.zeros((2, 3)) * u.s,
+        b_map={(0, 1): 0, (0, 2): 1},
+        time_map={t * u.s: idx for idx, t in enumerate(times)},
+        elevation=np.zeros(3) * u.deg,
+    )
+
+
+def test_get_indices() -> None:
+    w_delays = _indexed_w_delays()
+    baseline_idx, time_idx = w_delays.get_indices(
+        ant_1=np.array([0, 0, 1]),
+        ant_2=np.array([2, 1, 1]),
+        time_mjds=np.array([10.0, 30.0, 20.0]),
+    )
+    np.testing.assert_array_equal(baseline_idx, [1, 0, 0])
+    np.testing.assert_array_equal(time_idx, [1, 0, 2])
+
+
+@pytest.mark.parametrize(
+    ("ant_1", "ant_2", "time_mjds"),
+    [
+        ([1], [2], [10.0]),  # unknown baseline
+        ([0], [5], [10.0]),  # antenna beyond the map
+        ([0], [1], [15.0]),  # unknown time
+        ([0], [1], [40.0]),  # time beyond the map
+    ],
+)
+def test_get_indices_unknown(ant_1, ant_2, time_mjds) -> None:
+    with pytest.raises(KeyError):
+        _indexed_w_delays().get_indices(
+            ant_1=np.array(ant_1), ant_2=np.array(ant_2), time_mjds=np.array(time_mjds)
+        )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Any, cast
 
@@ -90,6 +91,76 @@ class WDelays:
     """The time derivative of the w-derived delay (a dimensionless delay-rate). Multiplied by frequency this is the fringe-rate. Shape is [baseline, time]. If None it is derived from ``w_delays`` via ``get_w_rates``"""
     rate_guard_region: u.Quantity | None = None
     """Define a guard region around delay-rate=0 based on a nominal field of view, as a dimensionless delay-rate. Will be of shape {baseline, timestep}"""
+
+    # The lookups below are cached on the instance. ``cached_property`` writes to the
+    # instance ``__dict__`` directly, so is compatible with the frozen dataclass.
+    @cached_property
+    def _time_lookup(self) -> tuple[NDArray[np.floating[Any]], NDArray[np.int_]]:
+        """The ``time_map`` times in seconds, sorted, and their mapped index"""
+        ordered = sorted(self.time_map.items(), key=lambda item: item[1])
+        indices = np.array([idx for _, idx in ordered], dtype=int)
+        time_s = _time_map_to_seconds(self.time_map)
+        order = np.argsort(time_s, kind="stable")
+        return time_s[order], indices[order]
+
+    @cached_property
+    def _baseline_lookup(self) -> NDArray[np.int_]:
+        """Dense (ANTENNA1, ANTENNA2) to baseline index array. -1 marks an unknown baseline."""
+        n_ant = 1 + max((max(key) for key in self.b_map), default=0)
+        lookup = np.full((n_ant, n_ant), -1, dtype=int)
+        for (ant_1, ant_2), idx in self.b_map.items():
+            lookup[ant_1, ant_2] = idx
+        return lookup
+
+    def get_indices(
+        self,
+        ant_1: NDArray[np.int_],
+        ant_2: NDArray[np.int_],
+        time_mjds: NDArray[np.floating[Any]],
+    ) -> tuple[NDArray[np.int_], NDArray[np.int_]]:
+        """Map rows of a measurement set into the (baseline, time) axes of the delays.
+
+        Auto-correlations are not described by the delays, and are mapped to baseline 0.
+
+        Args:
+            ant_1 (NDArray[np.int_]): The first antenna of each row
+            ant_2 (NDArray[np.int_]): The second antenna of each row
+            time_mjds (NDArray[np.floating[Any]]): The time of each row, MJD in seconds
+
+        Raises:
+            KeyError: Raised if a baseline or time is not described by the delays
+
+        Returns:
+            tuple[NDArray[np.int_], NDArray[np.int_]]: The baseline and time index of each row
+        """
+        ant_1 = np.asarray(ant_1, dtype=int)
+        ant_2 = np.asarray(ant_2, dtype=int)
+        time_mjds = np.asarray(time_mjds, dtype=float)
+
+        lookup = self._baseline_lookup
+        n_ant = lookup.shape[0]
+        auto = ant_1 == ant_2
+        in_range = (ant_1 >= 0) & (ant_1 < n_ant) & (ant_2 >= 0) & (ant_2 < n_ant)
+        baseline_idx = np.zeros(len(ant_1), dtype=int)
+        known = ~auto & in_range
+        baseline_idx[known] = lookup[ant_1[known], ant_2[known]]
+        missing = ~auto & (~in_range | (baseline_idx < 0))
+        if np.any(missing):
+            first = int(np.argmax(missing))
+            msg = f"Baseline {(int(ant_1[first]), int(ant_2[first]))} not in b_map"
+            raise KeyError(msg)
+
+        sorted_time_s, sorted_indices = self._time_lookup
+        position = np.clip(
+            np.searchsorted(sorted_time_s, time_mjds), 0, len(sorted_time_s) - 1
+        )
+        matched = sorted_time_s[position] == time_mjds
+        if not np.all(matched):
+            first = int(np.argmin(matched))
+            msg = f"Time {time_mjds[first]} not in time_map"
+            raise KeyError(msg)
+
+        return baseline_idx, sorted_indices[position]
 
 
 def _time_map_to_seconds(time_map: dict[Any, int]) -> NDArray[np.floating[Any]]:
