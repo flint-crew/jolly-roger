@@ -15,8 +15,12 @@ from jolly_roger.hour_angles import PositionHourAngles, make_hour_angles_for_ms
 from jolly_roger.uvws import (
     SunScale,
     UVWs,
+    WDelays,
     compute_sun_uv_scales,
     compute_uvw_flags,
+    construct_rate_guard_region,
+    get_object_delay_for_ms,
+    get_w_rates,
     uvw_flagger,
     xyz_to_uvw,
 )
@@ -131,3 +135,83 @@ def test_uvw_flagger_applies_flags(ms_example: Path) -> None:
     with table(str(ms_example), ack=False) as tab:
         after = tab.getcol("FLAG").sum()
     assert after >= before
+
+
+def test_construct_rate_guard_region() -> None:
+    """For a uv-track moving at a constant speed the guard is theta * speed / c"""
+    n_baseline, n_time = 2, 10
+    time_s = np.arange(n_time) * 10.0
+    speed_m_s = np.array([1.0, 3.0])
+    uvws = np.zeros((3, n_baseline, n_time))
+    uvws[0] = speed_m_s[:, None] * time_s[None, :] * 0.6
+    uvws[1] = speed_m_s[:, None] * time_s[None, :] * 0.8
+
+    radial_fov = 1.0 * u.deg
+    guard = construct_rate_guard_region(
+        uvws=uvws * u.m, time_s=time_s, radial_fov=radial_fov
+    )
+
+    assert guard.shape == (n_baseline, n_time)
+    expected = np.deg2rad(1.0) * speed_m_s / 299792458.0
+    np.testing.assert_allclose(guard.value, np.repeat(expected[:, None], n_time, 1))
+
+    double = construct_rate_guard_region(
+        uvws=uvws * u.m, time_s=time_s, radial_fov=2 * radial_fov
+    )
+    np.testing.assert_allclose(double.value, 2 * guard.value)
+
+
+def test_get_w_rates_derived_from_delays() -> None:
+    """Without attached rates they are derived from the delays and time map"""
+    time_s = 5e9 + np.arange(5) * 10.0
+    w_delays = WDelays(
+        object_name="sun",
+        w_delays=(2e-11 * (time_s - time_s[0]) * u.s)[None, :],
+        b_map={(0, 1): 0},
+        time_map={t * u.s: idx for idx, t in enumerate(time_s)},
+        elevation=np.full(5, 45.0) * u.deg,
+    )
+    np.testing.assert_allclose(get_w_rates(w_delays).value, 2e-11)
+
+    attached = WDelays(
+        object_name="sun",
+        w_delays=w_delays.w_delays,
+        b_map=w_delays.b_map,
+        time_map=w_delays.time_map,
+        elevation=w_delays.elevation,
+        w_rates=np.full((1, 5), 7.0) * u.dimensionless_unscaled,
+    )
+    np.testing.assert_allclose(get_w_rates(attached).value, 7.0)
+
+
+def test_get_object_delay_attaches_rates(ms_example: Path) -> None:
+    with table(str(ms_example / "FIELD"), ack=False) as tab:
+        phase_dir = tab.getcol("PHASE_DIR")[0, 0]
+    phase = SkyCoord(*phase_dir, unit="rad")
+
+    (without_guard,) = get_object_delay_for_ms(
+        ms_path=ms_example, phase_dir=phase, object_name="sun"
+    )
+    assert without_guard.w_rates is not None
+    assert without_guard.w_rates.shape == without_guard.w_delays.shape
+    assert without_guard.rate_guard_region is None
+    # Rates should be consistent with the delays
+    np.testing.assert_allclose(
+        without_guard.w_rates.value,
+        get_w_rates(
+            WDelays(
+                object_name="sun",
+                w_delays=without_guard.w_delays,
+                b_map=without_guard.b_map,
+                time_map=without_guard.time_map,
+                elevation=without_guard.elevation,
+            )
+        ).value,
+    )
+
+    (with_guard,) = get_object_delay_for_ms(
+        ms_path=ms_example, phase_dir=phase, object_name="sun", radial_fov=1 * u.deg
+    )
+    assert with_guard.rate_guard_region is not None
+    assert with_guard.rate_guard_region.shape == with_guard.w_delays.shape
+    assert np.all(with_guard.rate_guard_region.value >= 0)

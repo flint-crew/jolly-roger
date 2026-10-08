@@ -21,6 +21,21 @@ The red dashed lines in the lower panel represents the delay of the Sun as deriv
 
 Should the source cross over a delay of 0 then that timestep will be flagged, as the intermixed components can not be separated, and nulling would have an adverse effect of the direction being observed.
 
+## Delay-rate filtering in the contaminated zone
+
+Flagging the timesteps where the object crosses the field in delay can remove a considerable amount of data, particularly on short baselines. As the field is phase-tracked it sits near a fringe-rate of zero, while the object generally does not. With `--rate-filter` these timesteps are instead filtered in two dimensions, delay and delay-rate.
+
+Two contamination zones are considered:
+
+- **delay**: the object's delay is within the field's delay guard (the timesteps that are flagged as described above), and
+- **delay-rate**: the object's delay-rate is within the field's delay-rate guard. With `--guard-field` this guard is derived from the nominal field-of-view radius $\theta$ as $\theta \lvert d(u,v)/dt \rvert / c$, mirroring the delay guard of $\theta \lvert (u,v) \rvert / c$. `--rate-filter-guard-hz` adds an absolute fringe-rate to protect.
+
+A timestep contaminated in delay but not in delay-rate is recoverable. For each baseline, recoverable timesteps are collected as the object enters the delay contaminated zone. Once the object leaves (or enters the delay-rate contaminated zone) the collected segment is transformed to delay-rate space, a notch spanning the object's predicted delay track and fringe-rate band is applied, and the result is written back to the output column. The region around (delay, rate) = (0, 0) occupied by the field is never modified. Segments where the object's notch would intersect the field, or that are shorter than `--rate-filter-min-timesteps`, are left tapered and flagged.
+
+The fringe-rate resolution is set by the length of a segment. `--rate-filter-pad-timesteps N` includes up to `N` clean timesteps either side of a segment when filtering to improve this resolution. Padding timesteps are not modified. `--rate-filter-max-timesteps` limits the number of timesteps collected per baseline (and so memory usage).
+
+By default filtered timesteps remain flagged. Use `--unflag-rate-filtered` to remove the contamination flags of the filtered timesteps.
+
 ### Baseline ak01 to ak06
 ![Example 1](images/baseline_data_0_5_multi_comparison.png)
 

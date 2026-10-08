@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import astropy.units as u
 import numpy as np
@@ -86,6 +86,89 @@ class WDelays:
     """The elevation of the target object in time order of steps in the MS"""
     guard_region: u.Quantity | None = None
     """Define a guard region around the delay=0 based on a nominal field of view. Will be of shape {baseline, timestep}"""
+    w_rates: u.Quantity | None = None
+    """The time derivative of the w-derived delay (a dimensionless delay-rate). Multiplied by frequency this is the fringe-rate. Shape is [baseline, time]. If None it is derived from ``w_delays`` via ``get_w_rates``"""
+    rate_guard_region: u.Quantity | None = None
+    """Define a guard region around delay-rate=0 based on a nominal field of view, as a dimensionless delay-rate. Will be of shape {baseline, timestep}"""
+
+
+def _time_map_to_seconds(time_map: dict[Any, int]) -> NDArray[np.floating[Any]]:
+    """Order the keys of a time map by their index, returned in seconds"""
+    ordered = sorted(time_map.items(), key=lambda item: item[1])
+    return np.array(
+        [
+            key.to_value(u.s) if isinstance(key, u.Quantity) else float(key)
+            for key, _ in ordered
+        ]
+    )
+
+
+def _gradient_in_time(
+    values: NDArray[np.floating[Any]], time_s: NDArray[np.floating[Any]]
+) -> NDArray[np.floating[Any]]:
+    """Derivative along the last (time) axis. Fewer than two timesteps have no rate."""
+    if len(time_s) < 2:
+        return np.zeros_like(values)
+    return np.gradient(values, time_s, axis=-1)
+
+
+def get_w_rates(w_delays: WDelays) -> u.Quantity:
+    """Return the delay-rate of the object described by ``w_delays``. Should
+    ``w_rates`` not be attached it is derived from ``w_delays`` and the ``time_map``.
+
+    Args:
+        w_delays (WDelays): The object delays
+
+    Returns:
+        u.Quantity: The dimensionless delay-rate, of shape [baseline, time]
+    """
+    if w_delays.w_rates is not None:
+        return w_delays.w_rates
+
+    time_s = _time_map_to_seconds(w_delays.time_map)
+    rates = _gradient_in_time(w_delays.w_delays.to(u.s).value, time_s)
+    return rates * u.dimensionless_unscaled
+
+
+def construct_rate_guard_region(
+    uvws: u.Quantity, time_s: NDArray[np.floating[Any]], radial_fov: u.Quantity
+) -> u.Quantity:
+    """Construct the expected region around delay-rate=0 occupied by the field. This
+    is the delay-rate counterpart to ``construct_guard_region``. Implements:
+
+    >>> theta * np.hypot(du/dt, dv/dt) / speed_of_light
+
+    which bounds the delay-rate of a source offset by ``theta`` from the phase
+    direction. Multiply by frequency to obtain the fringe-rate.
+
+    Args:
+        uvws (u.Quantity): The UVW coordinates, in meters, towards the phase direction
+        time_s (NDArray[np.floating[Any]]): The time of each timestep, in seconds
+        radial_fov (u.Quantity): The radial field of view to protect, in radians
+
+    Returns:
+        u.Quantity: The dimensionless rate guard region for (baseline, timestep), matching the ordering of the ``uvws``
+    """
+    assert uvws.ndim == 3, f"Expected a rank 3 array, got {uvws.shape=}"
+    assert uvws.shape[0] == 3, (
+        f"Expected first axies to be (u,v,w), got something else, {uvws.shape=}"
+    )
+    assert uvws.shape[-1] == len(time_s), (
+        f"Mismatch between {uvws.shape=} and {len(time_s)=}"
+    )
+
+    logger.info(
+        f"Constructing guard region around delay-rate=0 using {radial_fov.to('deg')}"
+    )
+
+    uv_rates_m_s = _gradient_in_time(uvws.to("m").value[:2], np.asarray(time_s))
+    rate_guard = (
+        radial_fov.to("rad").value
+        * np.hypot(uv_rates_m_s[0], uv_rates_m_s[1])
+        / speed_of_light.to("m/s").value
+    )
+
+    return rate_guard * u.dimensionless_unscaled
 
 
 def construct_guard_region(uvws: u.Quantity, radial_fov: u.Quantity) -> u.Quantity:
@@ -233,10 +316,16 @@ def get_object_delay(
         baselines=baselines, hour_angles=hour_angles_phase, flip_uvw_sign=flip_uvw_sign
     )
 
+    time_s = u.Quantity(hour_angles_phase.time_mjds, u.s).value
+
     guard_region: None | u.Quantity = None
+    rate_guard_region: None | u.Quantity = None
     if radial_fov is not None:
         guard_region = construct_guard_region(
             uvws=uvws_phase.uvws, radial_fov=radial_fov
+        )
+        rate_guard_region = construct_rate_guard_region(
+            uvws=uvws_phase.uvws, time_s=time_s, radial_fov=radial_fov
         )
 
     object_w_delays: list[WDelays] = []
@@ -254,6 +343,10 @@ def get_object_delay(
         w_diffs = uvws_object.uvws[2] - uvws_phase.uvws[2]
 
         delay_for_object = (w_diffs / speed_of_light).decompose()
+        rate_for_object = (
+            _gradient_in_time(delay_for_object.to(u.s).value, time_s)
+            * u.dimensionless_unscaled
+        )
 
         w_delay = WDelays(
             object_name=object_name_to_str(object_name),
@@ -262,6 +355,8 @@ def get_object_delay(
             time_map=hour_angles_phase.time_map,
             elevation=hour_angles_object.elevation,
             guard_region=guard_region,
+            w_rates=rate_for_object,
+            rate_guard_region=rate_guard_region,
         )
         logger.info(f"Have created for {w_delay.object_name}")
         object_w_delays.append(w_delay)

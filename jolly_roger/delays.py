@@ -76,6 +76,67 @@ class DelayRate:
     """The delay rate values corresponding to the delay rate data."""
 
 
+def array_to_delay_rate(
+    masked_data: np.ma.MaskedArray,
+    freq_chan: u.Quantity,
+    time_s: NDArray[np.floating],
+) -> DelayRate:
+    """Convert a (time, chan, pol) set of visibilities to delay-rate space.
+    Masked elements are zero-filled before the transform. Time samples are
+    assumed to be regularly spaced.
+
+    Args:
+        masked_data (np.ma.MaskedArray): The visibilities, shape=(time, chan, pol)
+        freq_chan (u.Quantity): The frequency of each channel
+        time_s (NDArray[np.floating]): The time of each timestep, in seconds
+
+    Returns:
+        DelayRate: The delay-rate data, shape=(rate, delay, pol)
+    """
+    delay_rate = np.fft.fftshift(
+        np.fft.fft2(
+            np.ma.filled(masked_data, 0 + 0j),
+            norm="forward",
+            axes=(1, 0),
+        ),
+        axes=(1, 0),
+    )
+    delay = np.fft.fftshift(
+        np.fft.fftfreq(
+            n=len(freq_chan),
+            d=np.diff(freq_chan).mean(),
+        ).decompose()
+    )
+    rate = np.fft.fftshift(
+        np.fft.fftfreq(
+            n=len(time_s),
+            d=np.diff(np.asarray(time_s)).mean() * u.s,
+        ).decompose()
+    )
+
+    return DelayRate(
+        delay_rate=delay_rate,
+        delay=cast(u.Quantity, delay),
+        rate=cast(u.Quantity, rate),
+    )
+
+
+def delay_rate_to_array(delay_rate: DelayRate) -> NDArray[np.complexfloating]:
+    """Invert ``array_to_delay_rate``, returning (time, chan, pol) visibilities.
+
+    Args:
+        delay_rate (DelayRate): The delay-rate data, shape=(rate, delay, pol)
+
+    Returns:
+        NDArray[np.complexfloating]: The visibilities, shape=(time, chan, pol)
+    """
+    return np.fft.ifft2(
+        np.fft.ifftshift(delay_rate.delay_rate, axes=(1, 0)),
+        norm="forward",
+        axes=(1, 0),
+    )
+
+
 def data_to_delay_rate(
     baseline_data: BaselineData,
 ) -> DelayRate:
@@ -90,29 +151,8 @@ def data_to_delay_rate(
         raise TypeError(msg)
 
     logger.info("Converting freq-time to delay-rate")
-    delay_rate = np.fft.fftshift(
-        np.fft.fft2(
-            baseline_data.masked_data.filled(0 + 0j),
-            norm="forward",
-            axes=(1, 0),
-        ),
-        axes=(1, 0),
-    )
-    delay = np.fft.fftshift(
-        np.fft.fftfreq(
-            n=len(baseline_data.freq_chan),
-            d=np.diff(baseline_data.freq_chan).mean(),
-        ).decompose()
-    )
-    rate = np.fft.fftshift(
-        np.fft.fftfreq(
-            n=len(baseline_data.time),
-            d=np.diff(baseline_data.time.mjd * u.day).mean(),
-        ).decompose()
-    )
-
-    return DelayRate(
-        delay_rate=delay_rate,
-        delay=cast(u.Quantity, delay),
-        rate=cast(u.Quantity, rate),
+    return array_to_delay_rate(
+        masked_data=baseline_data.masked_data,
+        freq_chan=baseline_data.freq_chan,
+        time_s=(baseline_data.time.mjd * u.day).to(u.s).value,
     )
