@@ -19,10 +19,12 @@ from jolly_roger.tractor import (
     DataChunk,
     RateFilterWriteBuffer,
     TukeyTractorOptions,
+    add_to_rate_filter_write_buffer,
     apply_roll_for_taper,
     compute_rate_contamination,
     compute_tukey_multi_taper,
     find_idx_of_closest_delay,
+    flush_rate_filter_write_buffer,
     make_search_window,
     merge_rate_filter_results,
     tukey_tractor,
@@ -525,21 +527,23 @@ def test_rate_filter_write_buffer() -> None:
         max_rows=4,
     )
 
-    buffer.add(_segment_result([8, 9], 1.0))
-    buffer.add(RateFilterResult(rows=np.array([0, 1, 2, 3]), success=False))
+    add_to_rate_filter_write_buffer(buffer, _segment_result([8, 9], 1.0))
+    add_to_rate_filter_write_buffer(
+        buffer, RateFilterResult(rows=np.array([0, 1, 2, 3]), success=False)
+    )
     assert main_table.writes == []
 
     # Reaching max_rows writes all buffered segments as one sorted selection
-    buffer.add(_segment_result([3, 4], 1.0))
+    add_to_rate_filter_write_buffer(buffer, _segment_result([3, 4], 1.0))
     assert main_table.writes == [([3, 4, 8, 9], "OUT"), ([3, 4, 8, 9], "WEIGHT")]
 
-    buffer.add(_segment_result([6], 1.0))
-    buffer.flush()
+    add_to_rate_filter_write_buffer(buffer, _segment_result([6], 1.0))
+    flush_rate_filter_write_buffer(buffer)
     assert main_table.writes[-2:] == [([6], "OUT"), ([6], "WEIGHT")]
 
     # Nothing left to write
     n_writes = len(main_table.writes)
-    buffer.flush()
+    flush_rate_filter_write_buffer(buffer)
     assert len(main_table.writes) == n_writes
 
 

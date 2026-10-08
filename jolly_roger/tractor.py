@@ -3,7 +3,7 @@ from __future__ import annotations
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from collections.abc import Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from itertools import combinations
 from pathlib import Path
@@ -38,7 +38,11 @@ from jolly_roger.rates import (
     RateFilterSettings,
     RateFilterSummary,
     SegmentAccumulator,
+    flush_segment_accumulator,
+    log_rate_filter_summary,
     rate_filter_segment,
+    record_rate_filter_result,
+    update_segment_accumulator,
 )
 from jolly_roger.response import (
     calculate_expected_sinc_width,
@@ -1375,7 +1379,8 @@ def accumulate_rate_filter_rows(
     assert data_chunk is not None, "Data chunk expected"
 
     original = payload.original_masked_data
-    return accumulator.update(
+    return update_segment_accumulator(
+        accumulator=accumulator,
         row_numbers=data_chunk.row_start + np.arange(len(data_chunk.ant_1)),
         ant_1=data_chunk.ant_1,
         ant_2=data_chunk.ant_2,
@@ -1466,57 +1471,64 @@ def merge_rate_filter_results(
     )
 
 
+@dataclass
 class RateFilterWriteBuffer:
-    """Collect delay-rate filtered segments and write them to the measurement set
-    in large, row-ordered batches"""
+    """Delay-rate filtered segments waiting to be written to the measurement set in
+    large, row-ordered batches. Segments are added with ``add_to_rate_filter_write_buffer``."""
 
-    def __init__(
-        self,
-        open_ms_tables: OpenMSTables,
-        tukey_tractor_options: TukeyTractorOptions,
-        max_rows: int,
-    ) -> None:
-        """
-        Args:
-            open_ms_tables (OpenMSTables): The set of open handlers to the relevant measurement sets
-            tukey_tractor_options (TukeyTractorOptions): Options relevant to the data selection
-            max_rows (int): The number of buffered rows that triggers a write
-        """
-        self.open_ms_tables = open_ms_tables
-        self.tukey_tractor_options = tukey_tractor_options
-        self.max_rows = max_rows
-        self._results: list[RateFilterResult] = []
-        self._n_rows = 0
+    open_ms_tables: OpenMSTables
+    """The set of open handlers to the relevant measurement sets"""
+    tukey_tractor_options: TukeyTractorOptions
+    """Options relevant to the data selection"""
+    max_rows: int
+    """The number of buffered rows that triggers a write"""
+    results: list[RateFilterResult] = field(default_factory=list)
+    """The buffered, successfully filtered, segments"""
+    n_rows: int = 0
+    """The number of buffered rows"""
 
-    def add(self, rate_filter_result: RateFilterResult) -> None:
-        """Buffer a filtered segment, writing the buffer once it is full. Segments
-        that were not filtered are ignored."""
-        if not rate_filter_result.success:
-            logger.debug(
-                f"Segment of {len(rate_filter_result.rows)} rows not filtered: {rate_filter_result.reason}"
-            )
-            return
 
-        self._results.append(rate_filter_result)
-        self._n_rows += len(rate_filter_result.rows)
-        if self._n_rows >= self.max_rows:
-            self.flush()
+def flush_rate_filter_write_buffer(write_buffer: RateFilterWriteBuffer) -> None:
+    """Write all buffered segments to the measurement set
 
-    def flush(self) -> None:
-        """Write all buffered segments to the measurement set"""
-        if not self._results:
-            return
+    Args:
+        write_buffer (RateFilterWriteBuffer): The buffered segments, emptied in place
+    """
+    if not write_buffer.results:
+        return
 
+    logger.debug(
+        f"Writing {len(write_buffer.results)} delay-rate filtered segments ({write_buffer.n_rows} rows)"
+    )
+    write_rate_filtered_segment(
+        open_ms_tables=write_buffer.open_ms_tables,
+        rate_filter_result=merge_rate_filter_results(write_buffer.results),
+        tukey_tractor_options=write_buffer.tukey_tractor_options,
+    )
+    write_buffer.results = []
+    write_buffer.n_rows = 0
+
+
+def add_to_rate_filter_write_buffer(
+    write_buffer: RateFilterWriteBuffer, rate_filter_result: RateFilterResult
+) -> None:
+    """Buffer a filtered segment, writing the buffer once it is full. Segments
+    that were not filtered are ignored.
+
+    Args:
+        write_buffer (RateFilterWriteBuffer): The buffered segments, updated in place
+        rate_filter_result (RateFilterResult): The outcome of filtering a segment
+    """
+    if not rate_filter_result.success:
         logger.debug(
-            f"Writing {len(self._results)} delay-rate filtered segments ({self._n_rows} rows)"
+            f"Segment of {len(rate_filter_result.rows)} rows not filtered: {rate_filter_result.reason}"
         )
-        write_rate_filtered_segment(
-            open_ms_tables=self.open_ms_tables,
-            rate_filter_result=merge_rate_filter_results(self._results),
-            tukey_tractor_options=self.tukey_tractor_options,
-        )
-        self._results = []
-        self._n_rows = 0
+        return
+
+    write_buffer.results.append(rate_filter_result)
+    write_buffer.n_rows += len(rate_filter_result.rows)
+    if write_buffer.n_rows >= write_buffer.max_rows:
+        flush_rate_filter_write_buffer(write_buffer)
 
 
 def make_rate_filter_plot_path(
@@ -1552,6 +1564,147 @@ def _rate_filter_settings(
         elevation_cut_deg=tukey_tractor_options.elevation_cut_deg,
         ignore_nyquist_zone=tukey_tractor_options.ignore_nyquist_zone,
     )
+
+
+@dataclass
+class RateFilterProcessor:
+    """State to delay-rate filter the contaminated rows of a measurement set as it
+    is processed chunk by chunk. Rows are collected per-baseline, and each segment
+    is filtered, optionally plotted, and written back once it is released."""
+
+    open_ms_tables: OpenMSTables
+    """The set of open handlers to the measurement set being processed"""
+    tukey_tractor_options: TukeyTractorOptions
+    """Options describing the rate filter"""
+    w_delays_list: list[WDelays]
+    """The objects to null"""
+    settings: RateFilterSettings
+    """The subset of options needed to filter a segment"""
+    freq_chan: u.Quantity
+    """The frequency of each channel"""
+    accumulator: SegmentAccumulator
+    """Per-baseline collection of contaminated rows"""
+    write_buffer: RateFilterWriteBuffer
+    """Filtered segments waiting to be written back"""
+    summary: RateFilterSummary = field(default_factory=RateFilterSummary)
+    """Tally of the filtering outcomes"""
+    plot_paths: list[Path] = field(default_factory=list)
+    """The plots of filtered segments made so far"""
+
+
+def make_rate_filter_processor(
+    open_ms_tables: OpenMSTables,
+    tukey_tractor_options: TukeyTractorOptions,
+    w_delays_list: list[WDelays],
+) -> RateFilterProcessor:
+    """Set up the delay-rate filtering of a measurement set
+
+    Args:
+        open_ms_tables (OpenMSTables): The set of open handlers to the measurement set being processed
+        tukey_tractor_options (TukeyTractorOptions): Options describing the rate filter
+        w_delays_list (list[WDelays]): The objects to null
+
+    Returns:
+        RateFilterProcessor: State used by ``process_rate_filter_chunk`` and ``finish_rate_filter``
+    """
+    return RateFilterProcessor(
+        open_ms_tables=open_ms_tables,
+        tukey_tractor_options=tukey_tractor_options,
+        w_delays_list=w_delays_list,
+        settings=_rate_filter_settings(tukey_tractor_options),
+        freq_chan=open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze() * u.Hz,
+        accumulator=SegmentAccumulator(
+            max_timesteps=tukey_tractor_options.rate_filter_max_timesteps,
+            pad_timesteps=tukey_tractor_options.rate_filter_pad_timesteps,
+        ),
+        # Rows of a released segment are all in chunks that have already been
+        # written, so deferring the segment writes can not be overwritten later
+        write_buffer=RateFilterWriteBuffer(
+            open_ms_tables=open_ms_tables,
+            tukey_tractor_options=tukey_tractor_options,
+            max_rows=tukey_tractor_options.chunk_size
+            * tukey_tractor_options.max_workers,
+        ),
+    )
+
+
+def _rate_filter_plot_wanted(rate_filter_processor: RateFilterProcessor) -> bool:
+    """Whether the next filtered segment should be plotted"""
+    options = rate_filter_processor.tukey_tractor_options
+    return (
+        options.rate_filter_plots
+        and len(rate_filter_processor.plot_paths) < options.rate_filter_max_plots
+    )
+
+
+def _filter_rate_segments(
+    rate_filter_processor: RateFilterProcessor,
+    segments: Sequence[ContaminatedSegment],
+) -> None:
+    """Filter, optionally plot, and buffer the writing of released segments"""
+    for segment in segments:
+        rate_filter_result = rate_filter_segment(
+            segment=segment,
+            freq_chan=rate_filter_processor.freq_chan,
+            w_delays_list=rate_filter_processor.w_delays_list,
+            settings=rate_filter_processor.settings,
+            keep_diagnostics=_rate_filter_plot_wanted(rate_filter_processor),
+        )
+        record_rate_filter_result(rate_filter_processor.summary, rate_filter_result)
+        if rate_filter_result.diagnostics is not None:
+            rate_filter_processor.plot_paths.append(
+                plot_rate_filter_segment(
+                    diagnostics=rate_filter_result.diagnostics,
+                    output_path=make_rate_filter_plot_path(
+                        ms_path=rate_filter_processor.open_ms_tables.ms_path,
+                        diagnostics=rate_filter_result.diagnostics,
+                    ),
+                )
+            )
+        add_to_rate_filter_write_buffer(
+            rate_filter_processor.write_buffer, rate_filter_result
+        )
+
+
+def process_rate_filter_chunk(
+    rate_filter_processor: RateFilterProcessor,
+    taper_chunk_result: TaperedChunkResult,
+) -> None:
+    """Collect the rows of a chunk, and filter any segments that are released.
+    Must be called in row order, after the chunk is written back.
+
+    Args:
+        rate_filter_processor (RateFilterProcessor): The delay-rate filtering state
+        taper_chunk_result (TaperedChunkResult): The processed chunk, with its rate filter payload
+    """
+    _filter_rate_segments(
+        rate_filter_processor=rate_filter_processor,
+        segments=accumulate_rate_filter_rows(
+            accumulator=rate_filter_processor.accumulator,
+            taper_chunk_result=taper_chunk_result,
+        ),
+    )
+
+
+def finish_rate_filter(rate_filter_processor: RateFilterProcessor) -> None:
+    """Filter the remaining segments, write everything back and log a summary
+
+    Args:
+        rate_filter_processor (RateFilterProcessor): The delay-rate filtering state
+    """
+    _filter_rate_segments(
+        rate_filter_processor=rate_filter_processor,
+        segments=flush_segment_accumulator(rate_filter_processor.accumulator),
+    )
+    flush_rate_filter_write_buffer(rate_filter_processor.write_buffer)
+    log_rate_filter_summary(
+        rate_filter_processor.summary,
+        doubly_contaminated_rows=rate_filter_processor.accumulator.doubly_contaminated_rows,
+    )
+    if rate_filter_processor.plot_paths:
+        logger.info(
+            f"Made {len(rate_filter_processor.plot_paths)} delay-rate filter plots in {rate_filter_processor.plot_paths[0].parent}"
+        )
 
 
 def tukey_tractor(
@@ -1662,52 +1815,13 @@ def tukey_tractor(
             w_delays_list=w_delays_list,
         )
 
-        accumulator: SegmentAccumulator | None = None
-        rate_filter_summary = RateFilterSummary()
+        rate_filter_processor: RateFilterProcessor | None = None
         if tukey_tractor_options.rate_filter:
-            accumulator = SegmentAccumulator(
-                max_timesteps=tukey_tractor_options.rate_filter_max_timesteps,
-                pad_timesteps=tukey_tractor_options.rate_filter_pad_timesteps,
+            rate_filter_processor = make_rate_filter_processor(
+                open_ms_tables=open_ms_tables,
+                tukey_tractor_options=tukey_tractor_options,
+                w_delays_list=w_delays_list,
             )
-        rate_filter_settings = _rate_filter_settings(tukey_tractor_options)
-        freq_chan = open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze() * u.Hz
-
-        rate_filter_plot_paths: list[Path] = []
-        # Rows of a released segment are all in chunks that have already been
-        # written, so deferring the segment writes can not be overwritten later
-        rate_filter_write_buffer = RateFilterWriteBuffer(
-            open_ms_tables=open_ms_tables,
-            tukey_tractor_options=tukey_tractor_options,
-            max_rows=tukey_tractor_options.chunk_size
-            * tukey_tractor_options.max_workers,
-        )
-
-        def _filter_and_write(segments: Sequence[ContaminatedSegment]) -> None:
-            for segment in segments:
-                keep_diagnostics = (
-                    tukey_tractor_options.rate_filter_plots
-                    and len(rate_filter_plot_paths)
-                    < tukey_tractor_options.rate_filter_max_plots
-                )
-                rate_filter_result = rate_filter_segment(
-                    segment=segment,
-                    freq_chan=freq_chan,
-                    w_delays_list=w_delays_list,
-                    settings=rate_filter_settings,
-                    keep_diagnostics=keep_diagnostics,
-                )
-                rate_filter_summary.record(rate_filter_result)
-                if rate_filter_result.diagnostics is not None:
-                    rate_filter_plot_paths.append(
-                        plot_rate_filter_segment(
-                            diagnostics=rate_filter_result.diagnostics,
-                            output_path=make_rate_filter_plot_path(
-                                ms_path=open_ms_tables.ms_path,
-                                diagnostics=rate_filter_result.diagnostics,
-                            ),
-                        )
-                    )
-                rate_filter_write_buffer.add(rate_filter_result)
 
         logger.info(f"Incremental data flushes {write_back_required=}")
         start = time()
@@ -1755,24 +1869,14 @@ def tukey_tractor(
                     )
 
                     # Segments overwrite rows already written above
-                    if accumulator is not None:
-                        _filter_and_write(
-                            accumulate_rate_filter_rows(
-                                accumulator=accumulator,
-                                taper_chunk_result=taper_chunk_result,
-                            )
+                    if rate_filter_processor is not None:
+                        process_rate_filter_chunk(
+                            rate_filter_processor=rate_filter_processor,
+                            taper_chunk_result=taper_chunk_result,
                         )
 
-            if accumulator is not None:
-                _filter_and_write(accumulator.flush_all())
-                rate_filter_write_buffer.flush()
-                rate_filter_summary.log(
-                    doubly_contaminated_rows=accumulator.doubly_contaminated_rows
-                )
-                if rate_filter_plot_paths:
-                    logger.info(
-                        f"Made {len(rate_filter_plot_paths)} delay-rate filter plots in {rate_filter_plot_paths[0].parent}"
-                    )
+            if rate_filter_processor is not None:
+                finish_rate_filter(rate_filter_processor=rate_filter_processor)
 
         stop = time()
         runtime_s = stop - start

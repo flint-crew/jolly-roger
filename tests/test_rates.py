@@ -14,7 +14,11 @@ from jolly_roger.rates import (
     RateFilterSettings,
     RateFilterSummary,
     SegmentAccumulator,
+    flush_segment_accumulator,
+    log_rate_filter_summary,
     rate_filter_segment,
+    record_rate_filter_result,
+    update_segment_accumulator,
 )
 from jolly_roger.uvws import WDelays
 
@@ -46,7 +50,8 @@ def _update(
     if data is None:
         data = np.ones((n_rows, 4, 2), dtype=complex)
 
-    return accumulator.update(
+    return update_segment_accumulator(
+        accumulator=accumulator,
         row_numbers=row_start + np.arange(n_rows),
         ant_1=np.zeros(n_rows, dtype=int),
         ant_2=ant_2,
@@ -73,7 +78,7 @@ def test_accumulator_releases_on_exit() -> None:
     assert len(released) == 1
     assert released[0].rows == [2, 3, 4]
     assert released[0].n_core == 3
-    assert accumulator.flush_all() == []
+    assert flush_segment_accumulator(accumulator) == []
 
 
 def test_accumulator_releases_across_chunks() -> None:
@@ -94,7 +99,7 @@ def test_accumulator_tracks_baselines_independently() -> None:
     ant_2 = np.tile([1, 2], 4)
     time_idx = np.repeat(np.arange(4), 2)
     released = _update(accumulator, recoverable, time_idx=time_idx, ant_2=ant_2)
-    released += accumulator.flush_all()
+    released += flush_segment_accumulator(accumulator)
 
     by_baseline = {(seg.ant_1, seg.ant_2): seg.rows for seg in released}
     assert by_baseline[(0, 1)] == [0, 2, 4]
@@ -114,7 +119,7 @@ def test_accumulator_releases_on_doubly_contaminated() -> None:
 def test_accumulator_releases_on_time_gap() -> None:
     accumulator = SegmentAccumulator()
     released = _update(accumulator, _bools("1111"), time_idx=np.array([0, 1, 3, 4]))
-    released += accumulator.flush_all()
+    released += flush_segment_accumulator(accumulator)
 
     assert [seg.rows for seg in released] == [[0, 1], [2, 3]]
 
@@ -122,7 +127,7 @@ def test_accumulator_releases_on_time_gap() -> None:
 def test_accumulator_releases_on_max_timesteps() -> None:
     accumulator = SegmentAccumulator(max_timesteps=3)
     released = _update(accumulator, _bools("1111111"))
-    released += accumulator.flush_all()
+    released += flush_segment_accumulator(accumulator)
 
     assert [seg.rows for seg in released] == [[0, 1, 2], [3, 4, 5], [6]]
 
@@ -131,9 +136,9 @@ def test_accumulator_flush_all() -> None:
     accumulator = SegmentAccumulator()
     assert _update(accumulator, _bools("0011")) == []
 
-    released = accumulator.flush_all()
+    released = flush_segment_accumulator(accumulator)
     assert [seg.rows for seg in released] == [[2, 3]]
-    assert accumulator.flush_all() == []
+    assert flush_segment_accumulator(accumulator) == []
 
 
 def test_accumulator_copies_rows() -> None:
@@ -145,7 +150,7 @@ def test_accumulator_copies_rows() -> None:
     data[:] = 0
     weights["WEIGHT"][:] = 0
 
-    (segment,) = accumulator.flush_all()
+    (segment,) = flush_segment_accumulator(accumulator)
     assert np.all(np.array(segment.data) == 1)
     assert segment.weights is not None
     assert np.all(np.array(segment.weights["WEIGHT"]) == 1)
@@ -166,7 +171,7 @@ def test_accumulator_padding_shared_between_segments() -> None:
     """Clean rows between two segments trail the first and lead the second"""
     accumulator = SegmentAccumulator(pad_timesteps=2)
     released = _update(accumulator, _bools("110110"))
-    released += accumulator.flush_all()
+    released += flush_segment_accumulator(accumulator)
 
     assert [seg.rows for seg in released] == [[0, 1, 2], [2, 3, 4, 5]]
     assert [seg.core_rows.tolist() for seg in released] == [[0, 1], [3, 4]]
@@ -187,7 +192,7 @@ def test_accumulator_padding_cut_by_doubly_contaminated() -> None:
 def test_accumulator_padding_cut_by_time_gap() -> None:
     accumulator = SegmentAccumulator(pad_timesteps=2)
     released = _update(accumulator, _bools("00110"), time_idx=np.array([0, 1, 3, 4, 5]))
-    released += accumulator.flush_all()
+    released += flush_segment_accumulator(accumulator)
 
     assert [seg.rows for seg in released] == [[2, 3, 4]]
 
@@ -196,7 +201,7 @@ def test_accumulator_partial_trail_flushed() -> None:
     accumulator = SegmentAccumulator(pad_timesteps=3)
     assert _update(accumulator, _bools("0110")) == []
 
-    (segment,) = accumulator.flush_all()
+    (segment,) = flush_segment_accumulator(accumulator)
     assert segment.rows == [0, 1, 2, 3]
     assert segment.core_rows.tolist() == [1, 2]
 
@@ -239,7 +244,7 @@ def _filter(
 ) -> tuple[RateFilterResult, NDArray[np.bool_]]:
     accumulator = SegmentAccumulator(pad_timesteps=pad_timesteps)
     released = _update(accumulator, recoverable, data=data, weights=weights)
-    released += accumulator.flush_all()
+    released += flush_segment_accumulator(accumulator)
     assert len(released) == 1
 
     result = rate_filter_segment(
@@ -383,16 +388,18 @@ def test_rate_filter_padding_resolves_short_segment(pad_timesteps: int) -> None:
 
 def test_rate_filter_summary() -> None:
     summary = RateFilterSummary()
-    summary.record(RateFilterResult(rows=np.arange(4), success=True))
-    summary.record(
-        RateFilterResult(rows=np.arange(2), success=False, reason="too short")
+    record_rate_filter_result(
+        summary, RateFilterResult(rows=np.arange(4), success=True)
+    )
+    record_rate_filter_result(
+        summary, RateFilterResult(rows=np.arange(2), success=False, reason="too short")
     )
 
     assert summary.segments_filtered == 1
     assert summary.rows_filtered == 4
     assert summary.failures["too short"] == 1
     assert summary.rows_not_filtered == 2
-    summary.log(doubly_contaminated_rows=3)
+    log_rate_filter_summary(summary, doubly_contaminated_rows=3)
 
 
 def test_rate_filter_diagnostics_only_when_requested() -> None:
