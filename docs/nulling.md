@@ -36,9 +36,9 @@ The fringe-rate resolution is set by the length of a segment. `--rate-filter-pad
 
 With `--auto-size` the delay-rate width is also derived from the expected sinc response, mirroring the delay case. As the width depends on the duration $T$ of each segment, it is set per segment: the taper rolls off over $(N+1)/T$ beyond the object's fringe-rate band, where $N$ is `--nth-sidelobe-null` (one sidelobe if unset). Should this overlap the field, the width is reduced in steps of $1/T$ towards the main lobe ($1/T$) until the object is separable, otherwise the segment remains flagged. As for the delay widths, `--auto-size` overrides `--rate-filter-width-hz`.
 
-By default filtered timesteps remain flagged. Use `--unflag-rate-filtered` to remove the contamination flags of the filtered timesteps.
+The timesteps of a filtered segment have their contamination flags removed, so the recovered data are used downstream. Only flags present in the measurement set beforehand (and any non-finite values) remain. Timesteps of segments that are not filtered remain flagged.
 
-`--rate-filter-plots` saves a figure of delay vs fringe-rate for each filtered segment (up to `--rate-filter-max-plots`) into a `plots` directory alongside the measurement set. The before and after amplitudes are shown with each object's predicted track, the region nulled for the object (dashed) and the protected field region (white) overlaid.
+`--rate-filter-plots` saves a figure of delay vs fringe-rate for each filtered segment (up to `--rate-filter-max-plots`) into a `plots` directory alongside the measurement set. As with `--make-plots`, the figures are made once processing has finished, so they do not slow the filtering. The before and after amplitudes are shown with each object's predicted track, the region nulled for the object (dashed) and the protected field region (white) overlaid.
 
 ### Baseline ak01 to ak06
 ![Example 1](images/baseline_data_0_5_multi_comparison.png)

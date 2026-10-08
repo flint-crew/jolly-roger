@@ -1233,8 +1233,6 @@ class TukeyTractorOptions(BaseOptions):
     """The maximum number of contaminated timesteps collected for a baseline before it is delay-rate filtered. Limits memory usage. If None there is no limit."""
     rate_filter_pad_timesteps: int = 0
     """The number of clean timesteps either side of a contaminated segment to include when delay-rate filtering. These are not modified. A value of 0 disables padding."""
-    unflag_rate_filtered: bool = False
-    """Remove the contamination flags of rows that were delay-rate filtered"""
     rate_filter_plots: bool = False
     """Plot the delay vs delay-rate of each segment that is delay-rate filtered"""
     rate_filter_max_plots: int = 20
@@ -1251,6 +1249,8 @@ class TukeyTractorResults:
     """The name of the column that has the modified/tapered visibilities"""
     output_plots: list[Path] | None = None
     """The output plots that were created, if any"""
+    rate_filter_plots: list[Path] | None = None
+    """The delay-rate filter plots that were created, if any"""
 
 
 def compute_auto_taper_widths(
@@ -1426,10 +1426,9 @@ def write_rate_filtered_segment(
     assert rate_filter_result.data is not None, "Filtered data expected"
     with open_ms_tables.main_table.selectrows(rate_filter_result.rows) as subtab:
         subtab.putcol(tukey_tractor_options.output_column, rate_filter_result.data)
-        if (
-            tukey_tractor_options.unflag_rate_filtered
-            and rate_filter_result.flags is not None
-        ):
+        # The rows were flagged as contaminated when their chunk was written. Now
+        # that they have been filtered only their original flags are restored
+        if rate_filter_result.flags is not None:
             subtab.putcol("FLAG", rate_filter_result.flags)
         if rate_filter_result.weights is not None:
             for (
@@ -1600,8 +1599,8 @@ class RateFilterProcessor:
     """Filtered segments waiting to be written back"""
     summary: RateFilterSummary = field(default_factory=RateFilterSummary)
     """Tally of the filtering outcomes"""
-    plot_paths: list[Path] = field(default_factory=list)
-    """The plots of filtered segments made so far"""
+    diagnostics: list[RateFilterDiagnostics] = field(default_factory=list)
+    """Filtered segments kept to be plotted once processing has finished"""
 
 
 def make_rate_filter_processor(
@@ -1645,7 +1644,7 @@ def _rate_filter_plot_wanted(rate_filter_processor: RateFilterProcessor) -> bool
     options = rate_filter_processor.tukey_tractor_options
     return (
         options.rate_filter_plots
-        and len(rate_filter_processor.plot_paths) < options.rate_filter_max_plots
+        and len(rate_filter_processor.diagnostics) < options.rate_filter_max_plots
     )
 
 
@@ -1653,7 +1652,7 @@ def _filter_rate_segments(
     rate_filter_processor: RateFilterProcessor,
     segments: Sequence[ContaminatedSegment],
 ) -> None:
-    """Filter, optionally plot, and buffer the writing of released segments"""
+    """Filter, keep for plotting, and buffer the writing of released segments"""
     for segment in segments:
         rate_filter_result = rate_filter_segment(
             segment=segment,
@@ -1663,16 +1662,9 @@ def _filter_rate_segments(
             keep_diagnostics=_rate_filter_plot_wanted(rate_filter_processor),
         )
         record_rate_filter_result(rate_filter_processor.summary, rate_filter_result)
+        # Plotting is slow, so is deferred until processing has finished
         if rate_filter_result.diagnostics is not None:
-            rate_filter_processor.plot_paths.append(
-                plot_rate_filter_segment(
-                    diagnostics=rate_filter_result.diagnostics,
-                    output_path=make_rate_filter_plot_path(
-                        ms_path=rate_filter_processor.open_ms_tables.ms_path,
-                        diagnostics=rate_filter_result.diagnostics,
-                    ),
-                )
-            )
+            rate_filter_processor.diagnostics.append(rate_filter_result.diagnostics)
         add_to_rate_filter_write_buffer(
             rate_filter_processor.write_buffer, rate_filter_result
         )
@@ -1713,10 +1705,35 @@ def finish_rate_filter(rate_filter_processor: RateFilterProcessor) -> None:
         rate_filter_processor.summary,
         doubly_contaminated_rows=rate_filter_processor.accumulator.doubly_contaminated_rows,
     )
-    if rate_filter_processor.plot_paths:
-        logger.info(
-            f"Made {len(rate_filter_processor.plot_paths)} delay-rate filter plots in {rate_filter_processor.plot_paths[0].parent}"
+
+
+def make_rate_filter_plots(rate_filter_processor: RateFilterProcessor) -> list[Path]:
+    """Plot the delay-rate filtered segments kept during processing. The kept
+    diagnostics are released once plotted.
+
+    Args:
+        rate_filter_processor (RateFilterProcessor): The delay-rate filtering state
+
+    Returns:
+        list[Path]: The plots that were created
+    """
+    plot_paths = [
+        plot_rate_filter_segment(
+            diagnostics=diagnostics,
+            output_path=make_rate_filter_plot_path(
+                ms_path=rate_filter_processor.open_ms_tables.ms_path,
+                diagnostics=diagnostics,
+            ),
         )
+        for diagnostics in rate_filter_processor.diagnostics
+    ]
+    rate_filter_processor.diagnostics = []
+
+    if plot_paths:
+        logger.info(
+            f"Made {len(plot_paths)} delay-rate filter plots in {plot_paths[0].parent}"
+        )
+    return plot_paths
 
 
 def tukey_tractor(
@@ -1811,6 +1828,7 @@ def tukey_tractor(
         "Sanity check failed, incorrect dimensionality returned"
     )
 
+    rate_filter_processor: RateFilterProcessor | None = None
     if not tukey_tractor_options.dry_run:
         pool: None | ThreadPoolExecutor = None
         if tukey_tractor_options.max_workers > 1:
@@ -1827,7 +1845,6 @@ def tukey_tractor(
             w_delays_list=w_delays_list,
         )
 
-        rate_filter_processor: RateFilterProcessor | None = None
         if tukey_tractor_options.rate_filter:
             rate_filter_processor = make_rate_filter_processor(
                 open_ms_tables=open_ms_tables,
@@ -1925,10 +1942,15 @@ def tukey_tractor(
     else:
         plot_paths = None
 
+    rate_filter_plot_paths: list[Path] | None = None
+    if rate_filter_processor is not None and tukey_tractor_options.rate_filter_plots:
+        rate_filter_plot_paths = make_rate_filter_plots(rate_filter_processor)
+
     return TukeyTractorResults(
         ms_path=open_ms_tables.ms_path,
         output_column=tukey_tractor_options.output_column,
         output_plots=plot_paths,
+        rate_filter_plots=rate_filter_plot_paths,
     )
 
 

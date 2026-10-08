@@ -14,9 +14,14 @@ from casacore.tables import table
 from numpy import ma
 
 from jolly_roger.baselines import get_open_ms_tables
-from jolly_roger.rates import RateFilterResult
+from jolly_roger.rates import (
+    RateFilterResult,
+    SegmentAccumulator,
+    update_segment_accumulator,
+)
 from jolly_roger.tractor import (
     DataChunk,
+    RateFilterProcessor,
     RateFilterWriteBuffer,
     TukeyTractorOptions,
     _rate_filter_settings,
@@ -26,7 +31,9 @@ from jolly_roger.tractor import (
     compute_rate_contamination,
     compute_tukey_multi_taper,
     find_idx_of_closest_delay,
+    finish_rate_filter,
     flush_rate_filter_write_buffer,
+    make_rate_filter_plots,
     make_search_window,
     merge_rate_filter_results,
     tukey_tractor,
@@ -363,9 +370,9 @@ def test_compute_tukey_multi_taper_rate_payload_nothing_to_do() -> None:
     assert not np.any(result.rate_payload.recoverable)
 
 
-@pytest.mark.parametrize(("unflag", "pad"), [(False, 0), (True, 0), (True, 2)])
+@pytest.mark.parametrize("pad", [0, 2])
 def test_tractor_rate_filter(
-    ms_example, monkeypatch: pytest.MonkeyPatch, caplog, unflag: bool, pad: int
+    ms_example, monkeypatch: pytest.MonkeyPatch, caplog, pad: int
 ) -> None:
     """End-to-end run identifying crashes when delay-rate filtering. The target
     is placed close to the phase direction so that it enters the delay
@@ -386,13 +393,12 @@ def test_tractor_rate_filter(
         rate_filter=True,
         rate_filter_min_timesteps=2,
         rate_filter_pad_timesteps=pad,
-        unflag_rate_filtered=unflag,
         rate_filter_plots=True,
         rate_filter_max_plots=2,
         chunk_size=100,
     )
     with caplog.at_level("INFO"):
-        tukey_tractor(
+        tractor_results = tukey_tractor(
             ms_path=Path(ms_example), tukey_tractor_options=tukey_tractor_options
         )
 
@@ -411,14 +417,15 @@ def test_tractor_rate_filter(
     with table(str(ms_example), ack=False) as tab:
         assert new_column in tab.colnames()
 
-    # Plots are only made of filtered segments, up to the maximum
-    plots = list((Path(ms_example).parent / "plots").glob("*_rate_filter_*.png"))
+    # Plots are only made of filtered segments, up to the maximum, at the end
+    plots = sorted((Path(ms_example).parent / "plots").glob("*_rate_filter_*.png"))
     assert len(plots) <= 2
+    assert tractor_results.rate_filter_plots is not None
+    assert sorted(tractor_results.rate_filter_plots) == plots
 
 
-@pytest.mark.parametrize("unflag", [False, True])
-def test_write_rate_filtered_segment(ms_example, unflag: bool) -> None:
-    """Only the nominated rows are written, and flags only when unflagging"""
+def test_write_rate_filtered_segment(ms_example) -> None:
+    """Only the nominated rows are written, including their restored flags"""
     rows = np.array([3, 7, 8])
     with table(str(ms_example), ack=False) as tab:
         data_shape = tab.getcell("DATA", 0).shape
@@ -426,9 +433,7 @@ def test_write_rate_filtered_segment(ms_example, unflag: bool) -> None:
         original_weights = tab.getcol("WEIGHT")
 
     open_ms_tables = get_open_ms_tables(ms_path=Path(ms_example), read_only=False)
-    tukey_tractor_options = TukeyTractorOptions(
-        output_column="DATA", unflag_rate_filtered=unflag
-    )
+    tukey_tractor_options = TukeyTractorOptions(output_column="DATA")
     result = RateFilterResult(
         rows=rows,
         success=True,
@@ -462,10 +467,9 @@ def test_write_rate_filtered_segment(ms_example, unflag: bool) -> None:
     assert np.all(weights[rows] == 5.0)
     np.testing.assert_array_equal(weights[others], original_weights[others])
     np.testing.assert_array_equal(flags[others], original_flags[others])
-    if unflag:
-        assert not np.any(flags[rows])
-    else:
-        np.testing.assert_array_equal(flags[rows], original_flags[rows])
+    # The example measurement set is entirely flagged, so the restored flags show
+    assert np.all(original_flags[rows])
+    assert not np.any(flags[rows])
 
 
 def _segment_result(rows: list[int], value: float) -> RateFilterResult:
@@ -537,11 +541,15 @@ def test_rate_filter_write_buffer() -> None:
 
     # Reaching max_rows writes all buffered segments as one sorted selection
     add_to_rate_filter_write_buffer(buffer, _segment_result([3, 4], 1.0))
-    assert main_table.writes == [([3, 4, 8, 9], "OUT"), ([3, 4, 8, 9], "WEIGHT")]
+    assert main_table.writes == [
+        ([3, 4, 8, 9], "OUT"),
+        ([3, 4, 8, 9], "FLAG"),
+        ([3, 4, 8, 9], "WEIGHT"),
+    ]
 
     add_to_rate_filter_write_buffer(buffer, _segment_result([6], 1.0))
     flush_rate_filter_write_buffer(buffer)
-    assert main_table.writes[-2:] == [([6], "OUT"), ([6], "WEIGHT")]
+    assert main_table.writes[-3:] == [([6], "OUT"), ([6], "FLAG"), ([6], "WEIGHT")]
 
     # Nothing left to write
     n_writes = len(main_table.writes)
@@ -624,3 +632,96 @@ def test_rate_filter_settings_auto(
     )
     assert settings.auto_width is auto_size
     assert settings.auto_sidelobes == expected_sidelobes
+
+
+def _rate_filter_processor_with_segments(
+    tmp_path: Path, n_baselines: int, max_plots: int
+) -> RateFilterProcessor:
+    """A processor whose accumulator holds one filterable segment per baseline. The
+    object crosses delay zero at a constant delay-rate, separable from the field."""
+    n_time, n_chan, dt_s = 64, 64, 10.0
+    freq_hz = np.linspace(0.8e9, 1.1e9, n_chan)
+    time_s = 5e9 + np.arange(n_time) * dt_s
+    tau_s = 2e-11 * (time_s - time_s.mean())
+    vis = 1.0 + 5.0 * np.exp(2j * np.pi * freq_hz[None, :] * tau_s[:, None])
+    vis = np.repeat(vis[..., None], 2, axis=-1)
+
+    w_delays = WDelays(
+        object_name="sun",
+        w_delays=np.repeat((tau_s * u.s)[None, :], n_baselines, axis=0),
+        b_map={(0, b + 1): b for b in range(n_baselines)},
+        time_map={t * u.s: idx for idx, t in enumerate(time_s)},
+        elevation=np.full(n_time, 45.0) * u.deg,
+    )
+    options = TukeyTractorOptions(
+        outer_width_ns=10.0,
+        tukey_width_ns=5.0,
+        rate_filter=True,
+        rate_filter_plots=True,
+        rate_filter_max_plots=max_plots,
+    )
+    open_ms_tables = cast(
+        Any,
+        type(
+            "Tables",
+            (),
+            {"main_table": _RecordingTable(), "ms_path": tmp_path / "test.ms"},
+        )(),
+    )
+    processor = RateFilterProcessor(
+        open_ms_tables=open_ms_tables,
+        tukey_tractor_options=options,
+        w_delays_list=[w_delays],
+        settings=_rate_filter_settings(options),
+        freq_chan=freq_hz * u.Hz,
+        accumulator=SegmentAccumulator(),
+        write_buffer=RateFilterWriteBuffer(
+            open_ms_tables=open_ms_tables,
+            tukey_tractor_options=options,
+            max_rows=10_000,
+        ),
+    )
+    for baseline in range(n_baselines):
+        update_segment_accumulator(
+            accumulator=processor.accumulator,
+            row_numbers=baseline * n_time + np.arange(n_time),
+            ant_1=np.zeros(n_time, dtype=int),
+            ant_2=np.full(n_time, baseline + 1),
+            baseline_idx=np.full(n_time, baseline),
+            time_mjds=time_s,
+            time_idx=np.arange(n_time),
+            data=vis,
+            mask=np.zeros(vis.shape, dtype=bool),
+            recoverable=np.ones(n_time, dtype=bool),
+            delay_contaminated=np.ones(n_time, dtype=bool),
+        )
+    return processor
+
+
+def test_rate_filter_plots_deferred(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Segments are not plotted while processing, only once it has finished, and
+    no more than the maximum number of plots are made"""
+    plotted: list[Path] = []
+
+    def _record(output_path: Path, **_: Any) -> Path:
+        plotted.append(output_path)
+        return output_path
+
+    monkeypatch.setattr("jolly_roger.tractor.plot_rate_filter_segment", _record)
+    processor = _rate_filter_processor_with_segments(
+        tmp_path=tmp_path, n_baselines=3, max_plots=2
+    )
+
+    finish_rate_filter(processor)
+    assert processor.summary.segments_filtered == 3
+    assert plotted == []
+    assert len(processor.diagnostics) == 2
+
+    plot_paths = make_rate_filter_plots(processor)
+    assert plot_paths == plotted
+    assert len(plot_paths) == 2
+    assert all(path.parent == tmp_path / "plots" for path in plot_paths)
+    # The kept diagnostics are released once plotted
+    assert processor.diagnostics == []
