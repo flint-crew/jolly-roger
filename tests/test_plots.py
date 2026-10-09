@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import astropy.units as u
@@ -236,3 +237,47 @@ def test_delay_rate_comparison_shows_applied_notches(
     assert first.get_width() == pytest.approx(2 * 0.004 * 1e3)
     assert first.get_height() == pytest.approx(2 * 10e-9 * 1e9)
     plt.close("all")
+
+
+def test_delay_rate_comparison_path_wraps_in_rate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An object whose fringe-rate sweeps beyond the edge of the panel is drawn
+    for the whole observation, aliased back into the panel as the data are,
+    rather than leaving the panel"""
+    before, after, w_delays = _baseline_inputs()
+    # 0.95 GHz x 2e-11 ~ 19 mHz up to x 2e-10 ~ 190 mHz, beyond the 50 mHz edge
+    sweeping = replace(
+        w_delays,
+        w_rates=np.linspace(2e-11, 2e-10, N_TIME)[None, :] * u.dimensionless_unscaled,
+    )
+    before_delay_rate = data_to_delay_rate(before)
+    rate_mhz = before_delay_rate.rate.to("mHz").value
+
+    figures: list[plt.Figure] = []
+    monkeypatch.setattr("jolly_roger.plots.plt.close", figures.append)
+    plot_baseline_delay_rate_comparison(
+        before_baseline_data=before,
+        after_baseline_data=after,
+        before_delay_rate=before_delay_rate,
+        after_delay_rate=data_to_delay_rate(after),
+        output_path=tmp_path / "delay_rate_comparison.png",
+        w_delays=sweeping,
+        outer_width_ns=10.0,
+    )
+    (figure,) = figures
+    ax = next(
+        ax
+        for ax in figure.axes
+        if ax.get_ylabel() == "Delay / ns" and not ax.get_title()
+    )
+    path_segments = [line for line in ax.lines if line.get_linewidth() == 3]
+
+    # Every timestep is drawn once, within the panel, in several wrapped pieces
+    assert sum(len(line.get_xdata()) for line in path_segments) == N_TIME
+    assert len(path_segments) > 1
+    for line in path_segments:
+        x = np.asarray(line.get_xdata())
+        assert np.all(x >= rate_mhz.min() - 1e-9)
+        assert np.all(x <= rate_mhz.max() + 1e-9)
+    plt.close(figure)

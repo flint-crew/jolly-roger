@@ -497,12 +497,22 @@ def plot_baseline_delay_rate_comparison(
                     label=f"{_w_delays.object_name} taper extent",
                 )
 
+            # The data are sampled in time, so fringe-rates beyond the edge of the
+            # panel alias back into it, as in the before and after panels. The path
+            # is broken wherever it wraps in either delay or fringe-rate.
+            wrapped_rate = calculate_wrapped_data(
+                values=object_rate_mhz,
+                upper_limit=float(np.max(np.abs(rate_mhz))),
+            )
+            path_zones = wrapped_data.zones * (
+                np.max(wrapped_rate.zones) + 1
+            ) + np.asarray(wrapped_rate.zones)
             for _zone_idx, object_slice in enumerate(
-                iterate_over_zones(zones=wrapped_data)
+                iterate_over_zones(zones=path_zones)
             ):
                 current_zone = np.mean(wrapped_data.zones[object_slice])
                 ax5.plot(
-                    object_rate_mhz[object_slice],
+                    wrapped_rate.values[object_slice],
                     wrapped_data.values[object_slice],
                     color=f"C{_object_idx}",
                     label=f"Path of {_w_delays.object_name}"
