@@ -230,22 +230,67 @@ def _footprint(delay_ns: float) -> RateFootprint:
     )
 
 
+def _path_points(ax: plt.Axes) -> int:
+    """The number of points drawn along object paths"""
+    return sum(len(line.get_xdata()) for line in ax.lines if line.get_linewidth() == 3)
+
+
 def test_delay_rate_comparison_shows_applied_notches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each region nulled is drawn as an outline, in addition to the taper extent"""
-    without = _object_panel(tmp_path, monkeypatch, applied_notches=None)
-    n_without = len(without.collections)
-    plt.close("all")
-
-    ax = _object_panel(
-        tmp_path, monkeypatch, applied_notches=[_footprint(-5.0), _footprint(5.0)]
-    )
+    """With the regions nulled given, objects are drawn only where they were
+    filtered: one path and extent per region, plus its outline"""
+    footprints = [_footprint(-5.0), _footprint(5.0)]
+    ax = _object_panel(tmp_path, monkeypatch, applied_notches=footprints)
     labels = ax.get_legend_handles_labels()[1]
     assert labels.count("Applied notch") == 1
-    # One outline per region nulled
-    assert len(ax.collections) - n_without == 2
+    assert labels.count("sun taper extent") == 1
+    assert labels.count("Path of sun") == 1
+    assert _path_points(ax) == sum(len(fp.delay_s) for fp in footprints)
     plt.close("all")
+
+
+def test_delay_rate_comparison_without_filtered_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A baseline where nothing was filtered shows no object, only the field"""
+    ax = _object_panel(tmp_path, monkeypatch, applied_notches=[])
+    labels = ax.get_legend_handles_labels()[1]
+    assert "Field" in labels
+    assert not any("sun" in label for label in labels)
+    assert "Applied notch" not in labels
+    assert _path_points(ax) == 0
+    plt.close("all")
+
+
+def test_delay_rate_comparison_shows_rate_nyquist_zones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The top-middle panel shows Nyquist zones in delay and in fringe-rate"""
+    before, after, w_delays = _baseline_inputs()
+    figures: list[plt.Figure] = []
+    monkeypatch.setattr("jolly_roger.plots.plt.close", figures.append)
+    plot_baseline_delay_rate_comparison(
+        before_baseline_data=before,
+        after_baseline_data=after,
+        before_delay_rate=data_to_delay_rate(before),
+        after_delay_rate=data_to_delay_rate(after),
+        output_path=tmp_path / "delay_rate_comparison.png",
+        w_delays=w_delays,
+        outer_width_ns=10.0,
+    )
+    (figure,) = figures
+    zone_ax = next(ax for ax in figure.axes if ax.get_ylabel() == "Nyquist Zone")
+    styles = [line.get_linestyle() for line in zone_ax.lines]
+    assert "--" in styles
+    assert ":" in styles
+    elevation_ax = next(
+        ax for ax in figure.axes if ax.get_ylabel().startswith("Elevation")
+    )
+    legend_labels = [text.get_text() for text in elevation_ax.get_legend().get_texts()]
+    assert "Delay zone" in legend_labels
+    assert "Fringe-rate zone" in legend_labels
+    plt.close(figure)
 
 
 def test_delay_rate_comparison_path_wraps_in_rate(

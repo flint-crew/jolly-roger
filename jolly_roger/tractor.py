@@ -576,7 +576,7 @@ def make_plot_results(
                 outer_width_ns=outer_width_ns,
                 applied_notches=None
                 if rate_filter_notches is None
-                else rate_filter_notches.get((int(ant_1), int(ant_2))),
+                else rate_filter_notches.get((int(ant_1), int(ant_2)), []),
             )
             logger.info(f"Have written {delay_rate_output_path=}")
             output_paths.append(plot_path)

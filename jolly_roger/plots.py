@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +26,7 @@ from jolly_roger.logging import logger
 from jolly_roger.uvws import WDelays, get_w_rates
 from jolly_roger.wrap import (
     axis_half_period,
+    calculate_nyquist_zone,
     calculate_wrapped_data,
     iterate_over_zones,
     symmetric_domain_wrap,
@@ -73,6 +75,7 @@ def _plot_dynamic_spectra_row(
     w_delays: list[WDelays] | None,
     b_idx: int | None,
     max_delay_ns: float,
+    max_rate_mhz: float | None = None,
 ) -> None:
     """Draw the before and after dynamic spectra (time vs frequency) and, between
     them, the elevation and Nyquist zone of each object. Must be called within
@@ -86,6 +89,7 @@ def _plot_dynamic_spectra_row(
         w_delays (list[WDelays] | None): Delays corresponding to objects that have been nulled
         b_idx (int | None): The index of the baseline into the ``w_delays``
         max_delay_ns (float): The largest delay of the delay spectrum, in ns, used to compute Nyquist zones
+        max_rate_mhz (float | None, optional): The half-period of the fringe-rate axis, in mHz. If given the Nyquist zones of each object in fringe-rate are also drawn. Defaults to None.
     """
     ax1, ax2, ax3 = axes
     before_amp_stokesi = np.abs(
@@ -155,11 +159,40 @@ def _plot_dynamic_spectra_row(
                 values=plot_delay,
                 upper_limit=max_delay_ns,
             )
-            ax2_zone.plot(before_baseline_data.time, plot_zone.zones, ls="--")
+            (delay_zone_line,) = ax2_zone.plot(
+                before_baseline_data.time, plot_zone.zones, ls="--"
+            )
             object_max_zone = max(plot_zone.zones)
             max_zone = object_max_zone if object_max_zone > max_zone else max_zone
+
+            if max_rate_mhz is not None:
+                freq_hz = before_baseline_data.freq_chan.to("Hz").value
+                nu_mid = (np.min(freq_hz) + np.max(freq_hz)) / 2
+                rate_zones = calculate_nyquist_zone(
+                    values=nu_mid * get_w_rates(_w_delays)[b_idx].value * 1e3,
+                    upper_limit=max_rate_mhz,
+                )
+                ax2_zone.plot(
+                    before_baseline_data.time,
+                    rate_zones,
+                    ls=":",
+                    lw=2,
+                    color=delay_zone_line.get_color(),
+                )
+                max_zone = max(max_zone, int(np.max(rate_zones)))
         ax2_zone.set(ylabel="Nyquist Zone", ylim=[0, max_zone + 1])
-        ax2.legend()
+        if max_rate_mhz is None:
+            ax2.legend()
+        else:
+            handles, labels = ax2.get_legend_handles_labels()
+            ax2.legend(
+                handles=[
+                    *handles,
+                    plt.Line2D([], [], color="grey", ls="--"),
+                    plt.Line2D([], [], color="grey", ls=":", lw=2),
+                ],
+                labels=[*labels, "Delay zone", "Fringe-rate zone"],
+            )
         ax2.grid()
         ax2.set(
             ylabel=f"Elevation / {plot_elevation.unit:latex_inline}",
@@ -361,6 +394,106 @@ def plot_baseline_comparison_data(
         return output_path
 
 
+@dataclass
+class _DelayRateTrack:
+    """The path of an object through delay and fringe-rate to be drawn"""
+
+    object_name: str
+    """The name of the object"""
+    delay_ns: NDArray[np.floating[Any]]
+    """The delay of the object at each time, in ns"""
+    rate_low_mhz: NDArray[np.floating[Any]]
+    """The fringe-rate of the object at the lowest frequency at each time, in mHz"""
+    rate_high_mhz: NDArray[np.floating[Any]]
+    """The fringe-rate of the object at the highest frequency at each time, in mHz"""
+    width_ns: float | NDArray[np.floating[Any]]
+    """The half-width of the taper in delay about the object, in ns"""
+
+
+def _plot_delay_rate_track(
+    ax: plt.Axes,
+    track: _DelayRateTrack,
+    delay_ns: NDArray[np.floating[Any]],
+    rate_mhz: NDArray[np.floating[Any]],
+    color: str,
+    label: bool = True,
+) -> None:
+    """Draw the extent of an object's power (shaded) and its path at the central
+    frequency, with fringe-rate along the x-axis and delay along the y-axis. Both
+    are wrapped into the panel, as the data alias, and the path is broken wherever
+    it wraps. Dashes lengthen with the Nyquist zone in delay.
+
+    Args:
+        ax (plt.Axes): The axes to draw on
+        track (_DelayRateTrack): The object's path
+        delay_ns (NDArray[np.floating[Any]]): The delay axis of the panel, in ns
+        rate_mhz (NDArray[np.floating[Any]]): The fringe-rate axis of the panel, in mHz
+        color (str): The colour of the object
+        label (bool, optional): Add legend entries for the object. Defaults to True.
+    """
+    import matplotlib.patheffects as pe  # noqa: PLC0415
+
+    # Where the object's power lies: its fringe-rate spans the band, and the
+    # taper extends either side of its delay
+    extent = _taper_extent_mask(
+        delay_ns=delay_ns,
+        rate_mhz=rate_mhz,
+        object_delay_ns=track.delay_ns,
+        object_rate_low_mhz=track.rate_low_mhz,
+        object_rate_high_mhz=track.rate_high_mhz,
+        width_ns=track.width_ns,
+    )
+    if np.any(extent):
+        ax.contourf(
+            rate_mhz,
+            delay_ns,
+            extent.astype(float),
+            levels=[0.5, 1.5],
+            colors=[color],
+            alpha=0.25,
+        )
+        ax.contour(
+            rate_mhz,
+            delay_ns,
+            extent.astype(float),
+            levels=[0.5],
+            colors=[color],
+            linestyles=":",
+            linewidths=2,
+        )
+        if label:
+            # Contours are not added to a legend, so a labelled proxy is
+            ax.fill_between(
+                [],
+                [],
+                color=color,
+                alpha=0.25,
+                label=f"{track.object_name} taper extent",
+            )
+
+    wrapped_delay = calculate_wrapped_data(
+        values=track.delay_ns, upper_limit=axis_half_period(delay_ns)
+    )
+    wrapped_rate = calculate_wrapped_data(
+        values=(track.rate_low_mhz + track.rate_high_mhz) / 2,
+        upper_limit=axis_half_period(rate_mhz),
+    )
+    path_zones = wrapped_delay.zones * (np.max(wrapped_rate.zones) + 1) + np.asarray(
+        wrapped_rate.zones
+    )
+    for piece_idx, piece in enumerate(iterate_over_zones(zones=path_zones)):
+        current_zone = np.mean(wrapped_delay.zones[piece])
+        ax.plot(
+            wrapped_rate.values[piece],
+            wrapped_delay.values[piece],
+            color=color,
+            label=f"Path of {track.object_name}" if label and piece_idx == 0 else None,
+            lw=3,
+            path_effects=[pe.Stroke(linewidth=4, foreground="k"), pe.Normal()],
+            dashes=(1.2 * current_zone + 1, 1.2 * current_zone + 1),
+        )
+
+
 def plot_baseline_delay_rate_comparison(
     before_baseline_data: BaselineData,
     after_baseline_data: BaselineData,
@@ -386,7 +519,7 @@ def plot_baseline_delay_rate_comparison(
         output_path (Path): The location that the figure will be saved to
         w_delays (WDelays | list[WDelays] | None, optional): Delays corresponding to objects that have been nulled. Defaults to None.
         outer_width_ns (float | None, optional): The taper size. Defaults to None.
-        applied_notches (list[RateFootprint] | None, optional): The region nulled for each object by delay-rate filtering in each segment of the baseline. Defaults to None.
+        applied_notches (list[RateFootprint] | None, optional): The region nulled for each object by delay-rate filtering in each segment of the baseline. When given, objects are only drawn where they were filtered. Defaults to None, where objects are drawn across the whole observation.
 
     Returns:
         Path: Path to the saved figure
@@ -402,7 +535,6 @@ def plot_baseline_delay_rate_comparison(
     rate_mhz = before_delay_rate.rate.to("mHz").value
     freq_hz = before_baseline_data.freq_chan.to("Hz").value
     nu_min, nu_max = float(freq_hz.min()), float(freq_hz.max())
-    nu_mid = (nu_min + nu_max) / 2
 
     with quantity_support(), time_support():
         cmap = plt.cm.viridis
@@ -420,6 +552,7 @@ def plot_baseline_delay_rate_comparison(
             w_delays=w_delays,
             b_idx=b_idx,
             max_delay_ns=float(np.max(delay_ns)),
+            max_rate_mhz=axis_half_period(rate_mhz),
         )
 
     before_rate_i = np.abs(
@@ -448,91 +581,53 @@ def plot_baseline_delay_rate_comparison(
         ax.set(xlabel="Fringe-rate / mHz", ylabel="Delay / ns", title=title)
         fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
-    # The path each object takes through delay and delay-rate, at the central frequency
-    if w_delays is not None and b_idx is not None:
-        import matplotlib.patheffects as pe  # noqa: PLC0415
-
-        for _object_idx, _w_delays in enumerate(w_delays):
-            wrapped_data = calculate_wrapped_data(
-                values=_w_delays.w_delays[b_idx].to("ns").value,
-                upper_limit=axis_half_period(delay_ns),
+    # The path of each object through delay and delay-rate, at the central
+    # frequency, with the extent of its power. When the regions nulled by the
+    # delay-rate filter are given only the times it was applied are drawn, otherwise
+    # the whole observation is.
+    object_colors = {
+        _w_delays.object_name: f"C{_object_idx}"
+        for _object_idx, _w_delays in enumerate(w_delays or [])
+    }
+    tracks: list[_DelayRateTrack] = []
+    if applied_notches is not None:
+        tracks = [
+            _DelayRateTrack(
+                object_name=footprint.object_name,
+                delay_ns=footprint.delay_s * 1e9,
+                rate_low_mhz=footprint.rate_low_hz * 1e3,
+                rate_high_mhz=footprint.rate_high_hz * 1e3,
+                width_ns=footprint.delay_half_width_s * 1e9,
             )
+            for footprint in applied_notches
+        ]
+    elif w_delays is not None and b_idx is not None:
+        for _w_delays in w_delays:
             object_tau_rate = get_w_rates(_w_delays)[b_idx].value
-            object_rate_mhz = nu_mid * object_tau_rate * 1e3
-
-            # Where the object's power lies: its fringe-rate spans the band, and
-            # the taper extends outer_width_ns either side of its delay
-            extent = _taper_extent_mask(
-                delay_ns=delay_ns,
-                rate_mhz=rate_mhz,
-                object_delay_ns=wrapped_data.values,
-                object_rate_low_mhz=nu_min * object_tau_rate * 1e3,
-                object_rate_high_mhz=nu_max * object_tau_rate * 1e3,
-                width_ns=outer_width_ns or 0.0,
+            tracks.append(
+                _DelayRateTrack(
+                    object_name=_w_delays.object_name,
+                    delay_ns=_w_delays.w_delays[b_idx].to("ns").value,
+                    rate_low_mhz=nu_min * object_tau_rate * 1e3,
+                    rate_high_mhz=nu_max * object_tau_rate * 1e3,
+                    width_ns=outer_width_ns or 0.0,
+                )
             )
-            if np.any(extent):
-                color = f"C{_object_idx}"
-                ax5.contourf(
-                    rate_mhz,
-                    delay_ns,
-                    extent.astype(float),
-                    levels=[0.5, 1.5],
-                    colors=[color],
-                    alpha=0.25,
-                )
-                ax5.contour(
-                    rate_mhz,
-                    delay_ns,
-                    extent.astype(float),
-                    levels=[0.5],
-                    colors=[color],
-                    linestyles=":",
-                    linewidths=2,
-                )
-                # Contours are not added to a legend, so a labelled proxy is
-                ax5.fill_between(
-                    [],
-                    [],
-                    color=color,
-                    alpha=0.25,
-                    label=f"{_w_delays.object_name} taper extent",
-                )
 
-            # The data are sampled in time, so fringe-rates beyond the edge of the
-            # panel alias back into it, as in the before and after panels. The path
-            # is broken wherever it wraps in either delay or fringe-rate.
-            wrapped_rate = calculate_wrapped_data(
-                values=object_rate_mhz,
-                upper_limit=axis_half_period(rate_mhz),
-            )
-            path_zones = wrapped_data.zones * (
-                np.max(wrapped_rate.zones) + 1
-            ) + np.asarray(wrapped_rate.zones)
-            for _zone_idx, object_slice in enumerate(
-                iterate_over_zones(zones=path_zones)
-            ):
-                current_zone = np.mean(wrapped_data.zones[object_slice])
-                ax5.plot(
-                    wrapped_rate.values[object_slice],
-                    wrapped_data.values[object_slice],
-                    color=f"C{_object_idx}",
-                    label=f"Path of {_w_delays.object_name}"
-                    if _zone_idx == 0
-                    else None,
-                    lw=3,
-                    path_effects=[
-                        pe.Stroke(linewidth=4, foreground="k"),
-                        pe.Normal(),
-                    ],
-                    dashes=(1.2 * current_zone + 1, 1.2 * current_zone + 1),
-                )
+    labelled: set[str] = set()
+    for track in tracks:
+        _plot_delay_rate_track(
+            ax=ax5,
+            track=track,
+            delay_ns=delay_ns,
+            rate_mhz=rate_mhz,
+            color=object_colors.get(track.object_name, "black"),
+            label=track.object_name not in labelled,
+        )
+        labelled.add(track.object_name)
 
     # The regions actually nulled by delay-rate filtering, one per segment
     if applied_notches:
-        object_colors = {
-            _w_delays.object_name: f"C{_object_idx}"
-            for _object_idx, _w_delays in enumerate(w_delays or [])
-        }
         for notch_idx, footprint in enumerate(applied_notches):
             color = object_colors.get(footprint.object_name, "black")
             nulled = _taper_extent_mask(
