@@ -42,11 +42,11 @@ from jolly_roger.plots import (
 )
 from jolly_roger.rates import (
     ContaminatedSegment,
-    RateBox,
     RateFilterDiagnostics,
     RateFilterResult,
     RateFilterSettings,
     RateFilterSummary,
+    RateFootprint,
     SegmentAccumulator,
     flush_segment_accumulator,
     log_rate_filter_summary,
@@ -472,7 +472,7 @@ def make_plot_results(
     outer_width_ns: float | None = None,
     max_baselines: int = 10,
     delay_rate: bool = False,
-    rate_filter_notches: dict[tuple[int, int], list[tuple[str, RateBox]]] | None = None,
+    rate_filter_notches: dict[tuple[int, int], list[RateFootprint]] | None = None,
 ) -> list[Path]:
     """Create plots useful for diagnostics
 
@@ -486,7 +486,7 @@ def make_plot_results(
         outer_width_ns (float | None, optional): Size, in nanoseconds, of the tukey taper. Defaults to None.
         max_baselines (int, optional): The maximum number of baseline plots to create. Defaults to 10.
         delay_rate (bool, optional): Also create, for each baseline, a version of the comparison in delay and delay-rate. Defaults to False.
-        rate_filter_notches (dict[tuple[int, int], list[tuple[str, RateBox]]] | None, optional): The regions nulled by delay-rate filtering, keyed by (ANTENNA1, ANTENNA2), drawn on the delay-rate comparison. Defaults to None.
+        rate_filter_notches (dict[tuple[int, int], list[RateFootprint]] | None, optional): The regions nulled by delay-rate filtering, keyed by (ANTENNA1, ANTENNA2), drawn on the delay-rate comparison. Defaults to None.
 
     Returns:
         list[Path]: Collection of paths to use
@@ -1268,6 +1268,8 @@ class TukeyTractorOptions(BaseOptions):
     """The maximum number of contaminated timesteps collected for a baseline before it is delay-rate filtered. Limits memory usage. If None there is no limit."""
     rate_filter_pad_timesteps: int = 0
     """The number of clean timesteps either side of a contaminated segment to include when delay-rate filtering. These are not modified. A value of 0 disables padding."""
+    rate_filter_ignore_nyquist_zone: int | None = 2
+    """Do not null an object in delay-rate if its fringe-rate is beyond this Nyquist zone throughout a segment. Such rows are written back unfiltered and unflagged, as the object is smeared by the integration time. None disables."""
     rate_filter_plots: bool = False
     """Plot the delay vs delay-rate of each segment that is delay-rate filtered"""
     rate_filter_max_plots: int = 20
@@ -1609,6 +1611,7 @@ def _rate_filter_settings(
         ignore_nyquist_zone=tukey_tractor_options.ignore_nyquist_zone,
         auto_width=tukey_tractor_options.auto_size,
         auto_sidelobes=tukey_tractor_options.nth_sidelobe_null or 1,
+        ignore_rate_nyquist_zone=tukey_tractor_options.rate_filter_ignore_nyquist_zone,
     )
 
 
@@ -1636,10 +1639,10 @@ class RateFilterProcessor:
     """Tally of the filtering outcomes"""
     diagnostics: list[RateFilterDiagnostics] = field(default_factory=list)
     """Filtered segments kept to be plotted once processing has finished"""
-    applied_notches: dict[tuple[int, int], list[tuple[str, RateBox]]] = field(
+    applied_notches: dict[tuple[int, int], list[RateFootprint]] = field(
         default_factory=dict
     )
-    """The (object name, region) nulled in each filtered segment, keyed by (ANTENNA1, ANTENNA2)"""
+    """The region nulled for each object in each filtered segment, keyed by (ANTENNA1, ANTENNA2)"""
 
 
 def make_rate_filter_processor(

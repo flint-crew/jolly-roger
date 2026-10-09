@@ -24,6 +24,7 @@ from jolly_roger.baselines import BaselineData
 from jolly_roger.logging import logger
 from jolly_roger.uvws import WDelays, get_w_rates
 from jolly_roger.wrap import (
+    axis_half_period,
     calculate_wrapped_data,
     iterate_over_zones,
     symmetric_domain_wrap,
@@ -31,7 +32,7 @@ from jolly_roger.wrap import (
 
 if TYPE_CHECKING:
     from jolly_roger.delays import DelayRate, DelayTime
-    from jolly_roger.rates import RateBox, RateFilterDiagnostics
+    from jolly_roger.rates import RateBox, RateFilterDiagnostics, RateFootprint
 
 
 def plot_baseline_data(
@@ -368,7 +369,7 @@ def plot_baseline_delay_rate_comparison(
     output_path: Path,
     w_delays: WDelays | list[WDelays] | None = None,
     outer_width_ns: float | None = None,
-    applied_notches: list[tuple[str, RateBox]] | None = None,
+    applied_notches: list[RateFootprint] | None = None,
 ) -> Path:
     """Make a comparison figure of a baseline before and after the nulling process,
     in delay and delay-rate across the whole observation. The top row matches
@@ -385,7 +386,7 @@ def plot_baseline_delay_rate_comparison(
         output_path (Path): The location that the figure will be saved to
         w_delays (WDelays | list[WDelays] | None, optional): Delays corresponding to objects that have been nulled. Defaults to None.
         outer_width_ns (float | None, optional): The taper size. Defaults to None.
-        applied_notches (list[tuple[str, RateBox]] | None, optional): The (object name, region) nulled by delay-rate filtering in each segment of the baseline. Defaults to None.
+        applied_notches (list[RateFootprint] | None, optional): The region nulled for each object by delay-rate filtering in each segment of the baseline. Defaults to None.
 
     Returns:
         Path: Path to the saved figure
@@ -454,7 +455,7 @@ def plot_baseline_delay_rate_comparison(
         for _object_idx, _w_delays in enumerate(w_delays):
             wrapped_data = calculate_wrapped_data(
                 values=_w_delays.w_delays[b_idx].to("ns").value,
-                upper_limit=float(np.max(delay_ns)),
+                upper_limit=axis_half_period(delay_ns),
             )
             object_tau_rate = get_w_rates(_w_delays)[b_idx].value
             object_rate_mhz = nu_mid * object_tau_rate * 1e3
@@ -502,7 +503,7 @@ def plot_baseline_delay_rate_comparison(
             # is broken wherever it wraps in either delay or fringe-rate.
             wrapped_rate = calculate_wrapped_data(
                 values=object_rate_mhz,
-                upper_limit=float(np.max(np.abs(rate_mhz))),
+                upper_limit=axis_half_period(rate_mhz),
             )
             path_zones = wrapped_data.zones * (
                 np.max(wrapped_rate.zones) + 1
@@ -532,16 +533,31 @@ def plot_baseline_delay_rate_comparison(
             _w_delays.object_name: f"C{_object_idx}"
             for _object_idx, _w_delays in enumerate(w_delays or [])
         }
-        for notch_idx, (object_name, notch) in enumerate(applied_notches):
-            _add_rate_box(
-                ax5,
-                notch,
-                transpose=True,
-                edgecolor=object_colors.get(object_name, "black"),
-                linestyle="--",
-                linewidth=1.5,
-                label="Applied notch" if notch_idx == 0 else None,
+        for notch_idx, footprint in enumerate(applied_notches):
+            color = object_colors.get(footprint.object_name, "black")
+            nulled = _taper_extent_mask(
+                delay_ns=delay_ns,
+                rate_mhz=rate_mhz,
+                object_delay_ns=footprint.delay_s * 1e9,
+                object_rate_low_mhz=footprint.rate_low_hz * 1e3,
+                object_rate_high_mhz=footprint.rate_high_hz * 1e3,
+                width_ns=footprint.delay_half_width_s * 1e9,
+                rate_margin_mhz=footprint.rate_margin_hz * 1e3,
             )
+            if not np.any(nulled):
+                continue
+            ax5.contour(
+                rate_mhz,
+                delay_ns,
+                nulled.astype(float),
+                levels=[0.5],
+                colors=[color],
+                linestyles="--",
+                linewidths=1.5,
+            )
+            if notch_idx == 0:
+                # Contours are not added to a legend, so a labelled proxy is
+                ax5.plot([], [], color=color, ls="--", lw=1.5, label="Applied notch")
 
     # The region occupied by the field
     delay_guard_ns = outer_width_ns or 0.0
@@ -600,22 +616,20 @@ def plot_baseline_delay_rate_comparison(
     return output_path
 
 
-def _add_rate_box(
-    ax: plt.Axes, box: RateBox, transpose: bool = False, **kwargs: Any
-) -> None:
-    """Draw a delay (ns) and fringe-rate (mHz) box, with delay along the x-axis, or
-    along the y-axis if ``transpose``. Wrapping is not drawn."""
-    delay_corner_ns = (box.delay_center_s - box.delay_half_width_s) * 1e9
-    rate_corner_mhz = (box.rate_center_hz - box.rate_half_width_hz) * 1e3
-    delay_extent_ns = 2 * box.delay_half_width_s * 1e9
-    rate_extent_mhz = 2 * box.rate_half_width_hz * 1e3
-    if transpose:
-        corner = (rate_corner_mhz, delay_corner_ns)
-        width, height = rate_extent_mhz, delay_extent_ns
-    else:
-        corner = (delay_corner_ns, rate_corner_mhz)
-        width, height = delay_extent_ns, rate_extent_mhz
-    ax.add_patch(Rectangle(corner, width, height, fill=False, **kwargs))
+def _add_rate_box(ax: plt.Axes, box: RateBox, **kwargs: Any) -> None:
+    """Draw a delay (ns) and fringe-rate (mHz) box. Wrapping is not drawn."""
+    ax.add_patch(
+        Rectangle(
+            (
+                (box.delay_center_s - box.delay_half_width_s) * 1e9,
+                (box.rate_center_hz - box.rate_half_width_hz) * 1e3,
+            ),
+            2 * box.delay_half_width_s * 1e9,
+            2 * box.rate_half_width_hz * 1e3,
+            fill=False,
+            **kwargs,
+        )
+    )
 
 
 def _taper_extent_mask(
@@ -624,7 +638,8 @@ def _taper_extent_mask(
     object_delay_ns: NDArray[np.floating[Any]],
     object_rate_low_mhz: NDArray[np.floating[Any]],
     object_rate_high_mhz: NDArray[np.floating[Any]],
-    width_ns: float,
+    width_ns: float | NDArray[np.floating[Any]],
+    rate_margin_mhz: float = 0.0,
 ) -> NDArray[np.bool_]:
     """The cells of a (delay, rate) grid covered by an object at any time: within
     ``width_ns`` of its delay, and between its fringe-rates at the edges of the band.
@@ -637,7 +652,8 @@ def _taper_extent_mask(
         object_delay_ns (NDArray[np.floating[Any]]): The object's delay at each time, in ns
         object_rate_low_mhz (NDArray[np.floating[Any]]): The object's fringe-rate at the lowest frequency at each time, in mHz
         object_rate_high_mhz (NDArray[np.floating[Any]]): The object's fringe-rate at the highest frequency at each time, in mHz
-        width_ns (float): The half-width of the taper in delay, in ns
+        width_ns (float | NDArray[np.floating[Any]]): The half-width of the taper in delay, in ns, for all or each time
+        rate_margin_mhz (float, optional): A margin beyond the object's fringe-rates, in mHz. Defaults to 0.
 
     Returns:
         NDArray[np.bool_]: The covered cells, shape (delay, rate)
@@ -647,17 +663,21 @@ def _taper_extent_mask(
 
     delay_offset = symmetric_domain_wrap(
         values=delay_ns[None, :] - object_delay_ns[:, None],
-        upper_limit=float(np.max(np.abs(delay_ns))),
+        upper_limit=axis_half_period(delay_ns),
     )
-    within_delay = np.abs(delay_offset) <= max(width_ns, half_delay_bin)
+    delay_half_width = np.maximum(
+        np.broadcast_to(width_ns, object_delay_ns.shape), half_delay_bin
+    )
+    within_delay = np.abs(delay_offset) <= delay_half_width[:, None]
 
     rate_center = (object_rate_low_mhz + object_rate_high_mhz) / 2
     rate_half_width = np.maximum(
-        np.abs(object_rate_high_mhz - object_rate_low_mhz) / 2, half_rate_bin
+        np.abs(object_rate_high_mhz - object_rate_low_mhz) / 2 + rate_margin_mhz,
+        half_rate_bin,
     )
     rate_offset = symmetric_domain_wrap(
         values=rate_mhz[None, :] - rate_center[:, None],
-        upper_limit=float(np.max(np.abs(rate_mhz))),
+        upper_limit=axis_half_period(rate_mhz),
     )
     within_rate = np.abs(rate_offset) <= rate_half_width[:, None]
 
@@ -707,19 +727,41 @@ def plot_rate_filter_segment(
             ax, diagnostics.field, edgecolor="white", linewidth=1.5, label="Field"
         )
         for object_idx, track in enumerate(diagnostics.tracks):
-            color = f"C{object_idx + 1}"
-            ax.plot(
-                track.delay_s * 1e9,
-                track.rate_hz * 1e3,
-                color=color,
-                marker=".",
-                markersize=3,
-                linewidth=1,
-                label=track.object_name,
+            # The data alias in delay and fringe-rate, so the track is wrapped
+            # into the panel and broken wherever it wraps
+            wrapped_delay = calculate_wrapped_data(
+                values=track.delay_s * 1e9,
+                upper_limit=axis_half_period(delay_ns),
             )
-            _add_rate_box(
-                ax, track.notch, edgecolor=color, linestyle="--", linewidth=1.5
+            wrapped_rate = calculate_wrapped_data(
+                values=track.rate_hz * 1e3,
+                upper_limit=axis_half_period(rate_mhz),
             )
+            zones = wrapped_delay.zones * (np.max(wrapped_rate.zones) + 1) + np.asarray(
+                wrapped_rate.zones
+            )
+            for piece_idx, piece in enumerate(iterate_over_zones(zones=zones)):
+                ax.plot(
+                    wrapped_delay.values[piece],
+                    wrapped_rate.values[piece],
+                    color=f"C{object_idx + 1}",
+                    marker=".",
+                    markersize=3,
+                    linewidth=1,
+                    label=track.object_name if piece_idx == 0 else None,
+                )
+        # The edge of the region nulled, which follows the wrapping of the taper
+        if np.any(diagnostics.taper < 0.5):
+            ax.contour(
+                delay_ns,
+                rate_mhz,
+                diagnostics.taper,
+                levels=[0.5],
+                colors=["C1"],
+                linestyles="--",
+                linewidths=1.5,
+            )
+            ax.plot([], [], color="C1", ls="--", lw=1.5, label="Notch")
         ax.set(
             xlabel="Delay / ns",
             title=title,

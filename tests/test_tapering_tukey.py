@@ -110,3 +110,28 @@ def test_make_outputs_consistent_raise_error() -> None:
             tukey_width=np.arange(5),
             tukey_offset=np.arange(1200),
         )
+
+
+def test_get_2d_taper_upper_limit() -> None:
+    """With an even number of samples the largest value of a shifted Fourier axis
+    is one sample short of the half-period. A notch crossing the edge then wraps to
+    the wrong place unless the half-period is given."""
+    n, spacing = 64, 1.0
+    x = np.fft.fftshift(np.fft.fftfreq(n, d=1 / (n * spacing)))  # -32 .. 31
+    # A notch centred beyond the edge, at 36, should reach -30 (36 - 64 = -28 +/- 3)
+    kwargs = {
+        "x": x,
+        "outer_width": 3.0,
+        "tukey_width": 1.0,
+        "tukey_offset": np.array([36.0]),
+    }
+
+    wrapped = get_2d_taper(**kwargs, upper_limit=n * spacing / 2)[:, 0]
+    assert wrapped[x == -28.0] == 0.0
+    assert np.all(wrapped[np.abs(x + 28.0) > 3.0] == 1.0)
+
+    # The default keeps the historical behaviour of wrapping at the largest value
+    default = get_2d_taper(**kwargs)[:, 0]
+    np.testing.assert_array_equal(
+        default, get_2d_taper(**kwargs, upper_limit=float(np.max(x)))[:, 0]
+    )

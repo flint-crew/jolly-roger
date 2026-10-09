@@ -15,15 +15,16 @@ from jolly_roger.rates import (
     RateFilterSettings,
     RateFilterSummary,
     SegmentAccumulator,
-    _axis_notch,
     _axis_protection,
+    _footprint_notch,
+    _make_footprint,
     flush_segment_accumulator,
     log_rate_filter_summary,
     rate_filter_segment,
     record_rate_filter_result,
     update_segment_accumulator,
 )
-from jolly_roger.uvws import WDelays
+from jolly_roger.uvws import WDelays, get_w_rates
 
 N_CHAN = 64
 DT_S = 10.0
@@ -450,17 +451,69 @@ def test_plot_rate_filter_segment(tmp_path: Path) -> None:
     assert output_path.exists()
 
 
-def test_axis_notch_is_a_smooth_taper() -> None:
-    """Zero at the object, one far away, with a 1 - cos transition between"""
-    x = np.linspace(-100.0, 100.0, 201)
-    notch = _axis_notch(x=x, center=20.0, outer_width=30.0, tukey_width=10.0)
+def test_footprint_notch_is_a_smooth_taper() -> None:
+    """Zero across the object's footprint, one far away, with a 1 - cos
+    transition between. A stationary object gives a box, as the delay taper."""
+    delay = np.linspace(-100.0, 100.0, 201)
+    rate = np.linspace(-50.0, 50.0, 101)
+    footprint = _make_footprint(
+        object_name="sun",
+        tau_s=np.full(4, 20.0),
+        tau_rate=np.zeros(4),
+        time_s=np.arange(4.0),
+        nu_min_hz=1.0,
+        nu_max_hz=1.0,
+        outer_width_s=30.0,
+        rate_margin_hz=10.0,
+    )
+    notch = _footprint_notch(
+        footprint=footprint,
+        delay_s=delay,
+        rate_hz=rate,
+        delay_transition_s=10.0,
+        rate_transition_hz=5.0,
+    )
+    assert notch.shape == (len(rate), len(delay))
 
-    assert notch[x == 20.0] == 0.0
-    assert np.all(notch[np.abs(x - 20.0) < 20.0] == 0.0)
-    assert np.all(notch[np.abs(x - 20.0) > 30.0] == 1.0)
-    transition = (np.abs(x - 20.0) > 20.0) & (np.abs(x - 20.0) < 30.0)
-    assert np.all((notch[transition] > 0.0) & (notch[transition] < 1.0))
-    assert np.max(np.abs(np.diff(notch))) < 0.3
+    # Along delay through the centre of the object in rate
+    profile = notch[rate == 0.0][0]
+    assert np.all(profile[np.abs(delay - 20.0) < 20.0] == 0.0)
+    assert np.all(profile[np.abs(delay - 20.0) > 30.0] == 1.0)
+    transition = (np.abs(delay - 20.0) > 20.0) & (np.abs(delay - 20.0) < 30.0)
+    assert np.all((profile[transition] > 0.0) & (profile[transition] < 1.0))
+    assert np.max(np.abs(np.diff(profile))) < 0.3
+    # Far from the object in rate nothing is nulled
+    assert np.all(notch[np.abs(rate) > 10.0] == 1.0)
+
+
+def test_footprint_notch_follows_a_moving_object() -> None:
+    """An object whose delay and fringe-rate both change is nulled along its
+    path, not across the box bounding it"""
+    delay = np.linspace(-100.0, 100.0, 201)
+    rate = np.linspace(-50.0, 50.0, 101)
+    n_time = 41
+    footprint = _make_footprint(
+        object_name="sun",
+        tau_s=np.linspace(-40.0, 40.0, n_time),
+        tau_rate=np.linspace(-30.0, 30.0, n_time),
+        time_s=np.arange(float(n_time)),
+        nu_min_hz=1.0,
+        nu_max_hz=1.0,
+        outer_width_s=3.0,
+        rate_margin_hz=3.0,
+    )
+    notch = _footprint_notch(
+        footprint=footprint,
+        delay_s=delay,
+        rate_hz=rate,
+        delay_transition_s=2.0,
+        rate_transition_hz=2.0,
+    )
+    on_path = notch[np.argmin(np.abs(rate - 0.0)), np.argmin(np.abs(delay - 0.0))]
+    off_path = notch[np.argmin(np.abs(rate - 30.0)), np.argmin(np.abs(delay + 40.0))]
+    assert on_path == 0.0
+    # The opposite corner of the bounding box is not on the path
+    assert off_path == 1.0
 
 
 def test_axis_protection_is_a_smooth_window() -> None:
@@ -536,7 +589,7 @@ def test_rate_filter_auto_width_long_segment() -> None:
     assert auto.success
     assert auto.diagnostics is not None
     (track,) = auto.diagnostics.tracks
-    assert track.rate_width_hz == pytest.approx(2 / duration_s)
+    assert track.footprint.rate_margin_hz == pytest.approx(2 / duration_s)
     assert (
         _suppression_db(auto, object_vis) < _suppression_db(default, object_vis) + 0.5
     )
@@ -571,8 +624,8 @@ def test_rate_filter_auto_width_fits_short_segment() -> None:
     assert auto.success
     assert auto.diagnostics is not None
     (track,) = auto.diagnostics.tracks
-    assert track.rate_width_hz < 3 / duration_s
-    assert track.rate_width_hz >= 1 / duration_s * (1 - 1e-9)
+    assert track.footprint.rate_margin_hz < 3 / duration_s
+    assert track.footprint.rate_margin_hz >= 1 / duration_s * (1 - 1e-9)
     assert _suppression_db(auto, object_vis) < -8.0
 
 
@@ -604,8 +657,12 @@ def test_rate_filter_fixed_width_unchanged() -> None:
     )
     assert default.diagnostics is not None
     assert requested.diagnostics is not None
-    assert default.diagnostics.tracks[0].rate_width_hz == pytest.approx(2 * rate_bin_hz)
-    assert requested.diagnostics.tracks[0].rate_width_hz == pytest.approx(0.004)
+    assert default.diagnostics.tracks[0].footprint.rate_margin_hz == pytest.approx(
+        2 * rate_bin_hz
+    )
+    assert requested.diagnostics.tracks[0].footprint.rate_margin_hz == pytest.approx(
+        0.004
+    )
 
 
 def test_plot_rate_filter_segment_unmasked(
@@ -650,7 +707,8 @@ def test_rate_filter_records_notches() -> None:
     assert result.success
     assert result.diagnostics is not None
     (track,) = result.diagnostics.tracks
-    assert result.notches == [(track.object_name, track.notch)]
+    assert result.notches == [track.footprint]
+    assert result.notches[0].object_name == "sun"
 
     static_data, _, static_w_delays = _make_segment_inputs(tau_rate=1e-14)
     failed, _ = _filter(
@@ -658,3 +716,157 @@ def test_rate_filter_records_notches() -> None:
     )
     assert not failed.success
     assert failed.notches == []
+
+
+def _make_moving_segment_inputs(
+    tau_fn, rate_fn, n_time: int = 64, object_amp: float = 5.0
+) -> tuple[NDArray[np.complexfloating[Any]], NDArray[np.complexfloating[Any]], WDelays]:
+    """A field source and an object with a given delay and delay-rate as a
+    function of time from the middle of the segment"""
+    time_s = T0_S + np.arange(n_time) * DT_S
+    time_from_middle = time_s - time_s.mean()
+    tau_s = tau_fn(time_from_middle)
+    object_vis = object_amp * np.exp(2j * np.pi * FREQ_HZ[None, :] * tau_s[:, None])
+    data = np.repeat((1.0 + object_vis)[..., None], 2, axis=-1)
+    w_delays = WDelays(
+        object_name="sun",
+        w_delays=(tau_s * u.s)[None, :],
+        b_map={(0, 1): 0},
+        time_map={t * u.s: idx for idx, t in enumerate(time_s)},
+        elevation=np.full(n_time, 45.0) * u.deg,
+        w_rates=rate_fn(time_from_middle)[None, :] * u.dimensionless_unscaled,
+    )
+    return data, np.repeat(object_vis[..., None], 2, axis=-1), w_delays
+
+
+def test_rate_filter_footprint_smaller_than_bounding_box() -> None:
+    """When the delay-rate changes across a segment the object is nulled along its
+    path, a fraction of the box bounding it, while still suppressed"""
+    a, b = 2e-11, 2e-14
+    data, object_vis, w_delays = _make_moving_segment_inputs(
+        tau_fn=lambda t: a * t + b * t**2, rate_fn=lambda t: a + 2 * b * t
+    )
+    result, _ = _filter(
+        data, w_delays, np.ones(len(data), dtype=bool), keep_diagnostics=True
+    )
+    assert result.success
+    assert result.diagnostics is not None
+
+    tau_ns = w_delays.w_delays.to(u.ns).value[0]
+    tau_rate = get_w_rates(w_delays).value[0]
+    delay_ns = result.diagnostics.delay_s * 1e9
+    rate_mhz = result.diagnostics.rate_hz * 1e3
+    margin_mhz = result.diagnostics.tracks[0].footprint.rate_margin_hz * 1e3
+    in_box_delay = (delay_ns >= tau_ns.min() - 10) & (delay_ns <= tau_ns.max() + 10)
+    in_box_rate = (rate_mhz >= FREQ_HZ.min() * tau_rate.min() * 1e3 - margin_mhz) & (
+        rate_mhz <= FREQ_HZ.max() * tau_rate.max() * 1e3 + margin_mhz
+    )
+    bounding_box_fraction = in_box_delay.mean() * in_box_rate.mean()
+
+    assert result.nulled_fraction < 0.6 * bounding_box_fraction
+    assert _suppression_db(result, object_vis) < -10.0
+    # The applied taper is attached for plotting
+    assert result.diagnostics.taper.shape == (len(rate_mhz), len(delay_ns))
+
+
+def test_rate_filter_footprint_separable_where_box_is_not() -> None:
+    """The object passes through zero delay only while its fringe-rate is high, and
+    through zero fringe-rate only far from zero delay. Its bounding box meets the
+    field but its path does not, so it is filtered."""
+    half_duration_s = 32 * DT_S
+    data, _, w_delays = _make_moving_segment_inputs(
+        tau_fn=lambda t: 60e-9 * t / half_duration_s,
+        rate_fn=lambda t: 3.2e-11 * (1 - (t / half_duration_s) ** 2),
+    )
+    result, _ = _filter(data, w_delays, np.ones(len(data), dtype=bool))
+    assert result.success
+    assert result.reason == "filtered"
+
+
+def test_rate_filter_beyond_rate_nyquist_zone_passed_through() -> None:
+    """An object far beyond the Nyquist zone in fringe-rate is not nulled, and its
+    rows are returned unmodified with their original flags"""
+    data, _, w_delays = _make_moving_segment_inputs(
+        tau_fn=lambda t: 3e-10 * t, rate_fn=lambda t: np.full_like(t, 3e-10)
+    )
+    weights = {"WEIGHT": np.ones((len(data), 2))}
+    result, core = _filter(
+        data, w_delays, np.ones(len(data), dtype=bool), weights=weights
+    )
+    assert result.success
+    assert result.reason == "beyond rate nyquist zone"
+    assert result.data is not None
+    np.testing.assert_array_equal(result.data, data[core])
+    assert result.flags is not None
+    assert not np.any(result.flags)
+    assert result.weights is not None
+    np.testing.assert_array_equal(result.weights["WEIGHT"], 1.0)
+    assert result.notches == []
+
+    unlimited, _ = _filter(
+        data,
+        w_delays,
+        np.ones(len(data), dtype=bool),
+        settings=RateFilterSettings(
+            outer_width_ns=10.0, tukey_width_ns=5.0, ignore_rate_nyquist_zone=None
+        ),
+    )
+    assert unlimited.reason != "beyond rate nyquist zone"
+
+
+def test_rate_filter_summary_counts_passed_through() -> None:
+    summary = RateFilterSummary()
+    record_rate_filter_result(
+        summary, RateFilterResult(rows=np.arange(4), success=True)
+    )
+    record_rate_filter_result(
+        summary,
+        RateFilterResult(
+            rows=np.arange(3), success=True, reason="beyond rate nyquist zone"
+        ),
+    )
+    assert summary.segments_filtered == 1
+    assert summary.rows_filtered == 4
+    assert summary.passed_through["beyond rate nyquist zone"] == 1
+    assert summary.rows_passed_through == 3
+    log_rate_filter_summary(summary)
+
+
+def test_plot_rate_filter_segment_wraps_overlays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An object aliased beyond the edge of the panel in fringe-rate has its track
+    and notch outline drawn inside the panel"""
+    data, _, w_delays = _make_moving_segment_inputs(
+        tau_fn=lambda t: 6.5e-11 * t, rate_fn=lambda t: np.full_like(t, 6.5e-11)
+    )
+    result, _ = _filter(
+        data, w_delays, np.ones(len(data), dtype=bool), keep_diagnostics=True
+    )
+    assert result.success
+    assert result.diagnostics is not None
+    # ~62 mHz at the central frequency, beyond the 50 mHz edge
+    assert np.all(np.abs(result.diagnostics.tracks[0].rate_hz) > 0.05)
+
+    figures: list[plt.Figure] = []
+    monkeypatch.setattr("jolly_roger.plots.plt.close", figures.append)
+    plot_rate_filter_segment(
+        diagnostics=result.diagnostics, output_path=tmp_path / "segment.png"
+    )
+    (figure,) = figures
+    after_ax = next(ax for ax in figure.axes if ax.get_title() == "After")
+    rate_mhz = result.diagnostics.rate_hz * 1e3
+
+    track = [line for line in after_ax.lines if line.get_marker() == "."]
+    assert sum(len(line.get_ydata()) for line in track) == len(data)
+    for line in track:
+        y = np.asarray(line.get_ydata())
+        assert np.all((y >= rate_mhz.min() - 1e-9) & (y <= rate_mhz.max() + 1e-9))
+    assert "Notch" in figure.axes[0].get_legend_handles_labels()[1]
+    plt.close(figure)
+
+    # The object's band starts at ~52 mHz, aliased to ~-48 mHz, so the taper must
+    # reach across the edge of the axis (which wraps at +/- 50 mHz, not +48.4 mHz)
+    taper = result.diagnostics.taper
+    delay_col = np.argmin(np.abs(result.diagnostics.delay_s))
+    assert taper[np.argmin(np.abs(rate_mhz + 48.4375)), delay_col] < 0.1

@@ -25,7 +25,11 @@ from jolly_roger.response import calculate_expected_rate_sinc_width
 from jolly_roger.tapering.tukey import get_2d_taper
 from jolly_roger.uvws import WDelays, get_w_rates
 from jolly_roger.weights import scale_weights
-from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
+from jolly_roger.wrap import (
+    axis_half_period,
+    calculate_nyquist_zone,
+    symmetric_domain_wrap,
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,8 @@ class RateFilterSettings:
     """Size the margin of each segment from its expected sinc response in delay-rate, overriding ``width_hz``. The margin covers ``auto_sidelobes`` sidelobes, reduced towards the main lobe as needed to keep the object separable from the field."""
     auto_sidelobes: int = 1
     """The number of delay-rate sidelobes the margin includes when ``auto_width`` is set"""
+    ignore_rate_nyquist_zone: int | None = 2
+    """Objects whose fringe-rate is beyond this Nyquist zone throughout a segment are not nulled. Should no object be nulled for this reason the segment is passed through unfiltered. If None there is no limit."""
 
 
 @dataclass
@@ -317,6 +323,26 @@ class RateBox:
     rate_half_width_hz: float
 
 
+@dataclass(frozen=True)
+class RateFootprint:
+    """The region of delay and fringe-rate an object occupies across a segment. At
+    each time the object is at a delay, and spans a range of fringe-rates across the
+    band. The region nulled is this footprint widened in delay and fringe-rate."""
+
+    object_name: str
+    """The name of the object"""
+    delay_s: NDArray[np.floating[Any]]
+    """The delay of the object at each time, in seconds"""
+    rate_low_hz: NDArray[np.floating[Any]]
+    """The fringe-rate of the object at the lowest frequency at each time, in Hz"""
+    rate_high_hz: NDArray[np.floating[Any]]
+    """The fringe-rate of the object at the highest frequency at each time, in Hz"""
+    delay_half_width_s: NDArray[np.floating[Any]]
+    """The half-width in delay nulled about the object at each time, in seconds"""
+    rate_margin_hz: float
+    """The margin beyond the object's fringe-rates over which the taper rolls off, in Hz"""
+
+
 @dataclass
 class ObjectTrack:
     """The predicted path of an object through delay and fringe-rate across a segment"""
@@ -327,10 +353,8 @@ class ObjectTrack:
     """The predicted delay of each row, in seconds"""
     rate_hz: NDArray[np.floating[Any]]
     """The predicted fringe-rate of each row at the central frequency, in Hz"""
-    notch: RateBox
+    footprint: RateFootprint
     """The region nulled for the object"""
-    rate_width_hz: float
-    """The margin beyond the object's fringe-rate band over which the taper rolls off, in Hz"""
 
 
 @dataclass
@@ -355,6 +379,8 @@ class RateFilterDiagnostics:
     """The region occupied by the field, which is not modified"""
     tracks: list[ObjectTrack]
     """The predicted path of each nulled object"""
+    taper: NDArray[np.floating[Any]]
+    """The taper applied, between zero and one. shape=(rate, delay)"""
 
 
 @dataclass
@@ -377,8 +403,8 @@ class RateFilterResult:
     """The fraction of the delay-rate plane that was nulled"""
     diagnostics: RateFilterDiagnostics | None = None
     """Description of the filtering for plotting. Only set when requested and the segment was filtered."""
-    notches: list[tuple[str, RateBox]] = field(default_factory=list)
-    """The (object name, region) nulled for each object. Only set when the segment was filtered."""
+    notches: list[RateFootprint] = field(default_factory=list)
+    """The region nulled for each object. Only set when the segment was filtered."""
 
 
 def _wrapped_overlap(
@@ -403,19 +429,6 @@ def _transition_width(
     return max(width, 2 * float(np.max(np.abs(np.diff(x)))))
 
 
-def _axis_notch(
-    x: NDArray[np.floating[Any]], center: float, outer_width: float, tukey_width: float
-) -> NDArray[np.floating[Any]]:
-    """A one-dimensional notch: zero within ``outer_width - tukey_width`` of ``center``,
-    rising to one at ``outer_width`` with a ``1 - cos`` transition, as the delay taper"""
-    return get_2d_taper(
-        x=x,
-        outer_width=max(outer_width, tukey_width),
-        tukey_width=tukey_width,
-        tukey_offset=np.array([center]),
-    )[:, 0]
-
-
 def _axis_protection(
     x: NDArray[np.floating[Any]], half_width: float, tukey_width: float
 ) -> NDArray[np.floating[Any]]:
@@ -424,46 +437,122 @@ def _axis_protection(
     return (
         1.0
         - get_2d_taper(
-            x=x, outer_width=half_width + tukey_width, tukey_width=tukey_width
+            x=x,
+            outer_width=half_width + tukey_width,
+            tukey_width=tukey_width,
+            upper_limit=axis_half_period(x),
         )[:, 0]
     )
 
 
-def _object_box(
+def _wrapped_separation(
+    values: NDArray[np.floating[Any]], upper: float
+) -> NDArray[np.floating[Any]]:
+    """The absolute distance of values from zero on a symmetric cyclic domain"""
+    return np.abs(symmetric_domain_wrap(values=np.asarray(values), upper_limit=upper))
+
+
+def _make_footprint(
+    object_name: str,
     tau_s: NDArray[np.floating[Any]],
-    rate_extremes_hz: NDArray[np.floating[Any]],
+    tau_rate: NDArray[np.floating[Any]],
+    time_s: NDArray[np.floating[Any]],
+    nu_min_hz: float,
+    nu_max_hz: float,
     outer_width_s: float,
-    width_hz: float,
-) -> RateBox:
-    """The region to null for an object: its delay track and fringe-rate band
-    across a segment, widened by ``outer_width_s`` in delay and ``width_hz`` in rate"""
-    return RateBox(
-        delay_center_s=float(np.max(tau_s) + np.min(tau_s)) / 2,
-        delay_half_width_s=float(np.max(tau_s) - np.min(tau_s)) / 2 + outer_width_s,
-        rate_center_hz=float(np.max(rate_extremes_hz) + np.min(rate_extremes_hz)) / 2,
-        rate_half_width_hz=float(np.max(rate_extremes_hz) - np.min(rate_extremes_hz))
-        / 2
-        + width_hz,
+    rate_margin_hz: float,
+) -> RateFootprint:
+    """The region an object occupies across a segment, widened by ``outer_width_s``
+    in delay and ``rate_margin_hz`` in fringe-rate. In delay each time is also
+    widened by half of the object's movement to the next time, so consecutive
+    times overlap and the footprint has no gaps."""
+    step_s = np.abs(tau_rate) * np.abs(np.gradient(time_s)) if len(time_s) > 1 else 0
+    return RateFootprint(
+        object_name=object_name,
+        delay_s=tau_s,
+        rate_low_hz=nu_min_hz * tau_rate,
+        rate_high_hz=nu_max_hz * tau_rate,
+        delay_half_width_s=outer_width_s + step_s / 2 + np.zeros_like(tau_s),
+        rate_margin_hz=rate_margin_hz,
     )
 
 
-def _boxes_overlap(
-    box_a: RateBox, box_b: RateBox, max_delay_s: float, max_rate_hz: float
+def _footprint_rate_center_half(
+    footprint: RateFootprint,
+) -> tuple[NDArray[np.floating[Any]], NDArray[np.floating[Any]]]:
+    """The centre and half-width (including the margin) in fringe-rate at each time"""
+    center = (footprint.rate_low_hz + footprint.rate_high_hz) / 2
+    half = (
+        np.abs(footprint.rate_high_hz - footprint.rate_low_hz) / 2
+        + footprint.rate_margin_hz
+    )
+    return center, half
+
+
+def _footprint_overlaps_field(
+    footprint: RateFootprint, field: RateBox, max_delay_s: float, max_rate_hz: float
 ) -> bool:
-    """Whether two regions intersect in both delay and fringe-rate"""
-    return _wrapped_overlap(
-        box_a.delay_center_s,
-        box_a.delay_half_width_s,
-        box_b.delay_center_s,
-        box_b.delay_half_width_s,
-        max_delay_s,
-    ) and _wrapped_overlap(
-        box_a.rate_center_hz,
-        box_a.rate_half_width_hz,
-        box_b.rate_center_hz,
-        box_b.rate_half_width_hz,
-        max_rate_hz,
+    """Whether the footprint of an object meets the field at any time, in both
+    delay and fringe-rate"""
+    rate_center, rate_half = _footprint_rate_center_half(footprint)
+    delay_overlap = (
+        footprint.delay_half_width_s + field.delay_half_width_s >= max_delay_s
+    ) | (
+        _wrapped_separation(footprint.delay_s - field.delay_center_s, max_delay_s)
+        < footprint.delay_half_width_s + field.delay_half_width_s
     )
+    rate_overlap = (rate_half + field.rate_half_width_hz >= max_rate_hz) | (
+        _wrapped_separation(rate_center - field.rate_center_hz, max_rate_hz)
+        < rate_half + field.rate_half_width_hz
+    )
+    return bool(np.any(delay_overlap & rate_overlap))
+
+
+def _footprint_notch(
+    footprint: RateFootprint,
+    delay_s: NDArray[np.floating[Any]],
+    rate_hz: NDArray[np.floating[Any]],
+    delay_transition_s: float,
+    rate_transition_hz: float,
+) -> NDArray[np.floating[Any]]:
+    """The taper nulling a footprint: zero across the region the object occupies at
+    some time, rising with a ``1 - cos`` transition. Each time contributes a box in
+    delay and fringe-rate, as the delay taper, and the taper is the least of these.
+
+    Returns:
+        NDArray[np.floating[Any]]: The taper, shape (rate, delay)
+    """
+    rate_center, rate_half = _footprint_rate_center_half(footprint)
+    # get_2d_taper returns one column per time, shape (axis, time)
+    delay_null = 1.0 - get_2d_taper(
+        x=delay_s,
+        outer_width=np.maximum(footprint.delay_half_width_s, delay_transition_s),
+        tukey_width=np.full(len(footprint.delay_s), delay_transition_s),
+        tukey_offset=footprint.delay_s,
+        upper_limit=axis_half_period(delay_s),
+    )
+    rate_null = 1.0 - get_2d_taper(
+        x=rate_hz,
+        outer_width=np.maximum(rate_half, rate_transition_hz),
+        tukey_width=np.full(len(rate_center), rate_transition_hz),
+        tukey_offset=rate_center,
+        upper_limit=axis_half_period(rate_hz),
+    )
+
+    # The amount nulled is the most any time nulls. Each time only touches a small
+    # block of the plane, so only that block is updated
+    nulled = np.zeros((len(rate_hz), len(delay_s)))
+    for t in range(len(footprint.delay_s)):
+        rate_rows = np.flatnonzero(rate_null[:, t])
+        delay_cols = np.flatnonzero(delay_null[:, t])
+        if rate_rows.size == 0 or delay_cols.size == 0:
+            continue
+        block = np.ix_(rate_rows, delay_cols)
+        nulled[block] = np.maximum(
+            nulled[block],
+            rate_null[rate_rows, t][:, None] * delay_null[delay_cols, t][None, :],
+        )
+    return 1.0 - nulled
 
 
 def _candidate_rate_widths(
@@ -491,11 +580,13 @@ def rate_filter_segment(
     """Null the objects in ``w_delays_list`` from a segment in delay and
     delay-rate space while protecting the field.
 
-    The object is nulled over a box spanning its predicted delay track and
-    fringe-rate band across the segment. The field occupies a box around
-    (delay, rate) = (0, 0) whose size is set by the guard regions. Should
-    the two boxes intersect the object can not be separated and the segment
-    is not filtered.
+    Each object is nulled over its footprint: at each time it is at its predicted
+    delay and spans the fringe-rates across the band. The field occupies a box
+    around (delay, rate) = (0, 0) whose size is set by the guard regions. Should
+    the footprint meet the field the object can not be separated and the segment
+    is not filtered. Objects whose fringe-rate is beyond
+    ``settings.ignore_rate_nyquist_zone`` throughout the segment are not nulled,
+    and should that leave nothing to null the segment is passed through unfiltered.
 
     Args:
         segment (ContaminatedSegment): The rows to filter
@@ -521,8 +612,9 @@ def rate_filter_segment(
     )
     delay_s = delay_rate.delay.to(u.s).value
     rate_hz = delay_rate.rate.to(u.Hz).value
-    max_delay_s = float(np.max(np.abs(delay_s)))
-    max_rate_hz = float(np.max(np.abs(rate_hz)))
+    # Delay and fringe-rate are cyclic, wrapping at half of their period
+    max_delay_s = axis_half_period(delay_s)
+    max_rate_hz = axis_half_period(rate_hz)
     rate_bin_hz = 1.0 / (len(time_s) * float(np.mean(np.diff(time_s))))
 
     freq_hz = freq_chan.to(u.Hz).value
@@ -568,6 +660,7 @@ def rate_filter_segment(
 
     nu_mid = (nu_min + nu_max) / 2
     tracks: list[ObjectTrack] = []
+    beyond_rate_nyquist_zone = 0
     notch = np.ones((len(rate_hz), len(delay_s)))
     for w_delays in w_delays_list:
         elevation = w_delays.elevation[t_idx]
@@ -581,58 +674,83 @@ def rate_filter_segment(
             continue
         tau_rate = get_w_rates(w_delays)[b_idx, t_idx].value
 
-        # The fringe-rate of the object spans the band and its change across the segment
-        rate_extremes = np.outer([nu_min, nu_max], [np.min(tau_rate), np.max(tau_rate)])
+        # Beyond a few rate Nyquist zones the object is smeared by the integration
+        # time, and its aliased position too sensitive to be nulled reliably. The
+        # lowest fringe-rate across the band is used.
+        if settings.ignore_rate_nyquist_zone is not None and np.all(
+            calculate_nyquist_zone(
+                values=nu_min * np.abs(tau_rate), upper_limit=max_rate_hz
+            )
+            > settings.ignore_rate_nyquist_zone
+        ):
+            beyond_rate_nyquist_zone += 1
+            continue
 
         # Use the widest margin that keeps the object separable from the field
-        fitted: tuple[RateBox, float] | None = None
+        footprint: RateFootprint | None = None
         for width_hz in candidate_widths_hz:
-            candidate = _object_box(
+            candidate = _make_footprint(
+                object_name=w_delays.object_name,
                 tau_s=tau_s,
-                rate_extremes_hz=rate_extremes,
+                tau_rate=tau_rate,
+                time_s=time_s,
+                nu_min_hz=nu_min,
+                nu_max_hz=nu_max,
                 outer_width_s=outer_width_s,
-                width_hz=width_hz,
+                rate_margin_hz=width_hz,
             )
-            if not _boxes_overlap(candidate, field, max_delay_s, max_rate_hz):
-                fitted = (candidate, width_hz)
+            if not _footprint_overlaps_field(
+                candidate, field, max_delay_s, max_rate_hz
+            ):
+                footprint = candidate
                 break
-        if fitted is None:
+        if footprint is None:
             return RateFilterResult(
                 rows=core_rows, success=False, reason="rate-contaminated"
             )
-        obj, width_hz = fitted
-        if width_hz < candidate_widths_hz[0]:
+        if footprint.rate_margin_hz < candidate_widths_hz[0]:
             logger.debug(
-                f"Reduced the delay-rate margin of {w_delays.object_name} to {width_hz:.3g} Hz "
+                f"Reduced the delay-rate margin of {w_delays.object_name} to {footprint.rate_margin_hz:.3g} Hz "
                 f"(from {candidate_widths_hz[0]:.3g} Hz) to stay separable from the field"
             )
 
-        delay_notch = _axis_notch(
-            x=delay_s,
-            center=obj.delay_center_s,
-            outer_width=obj.delay_half_width_s,
-            tukey_width=delay_transition_s,
-        )
-        rate_notch = _axis_notch(
-            x=rate_hz,
-            center=obj.rate_center_hz,
-            outer_width=obj.rate_half_width_hz,
-            tukey_width=_transition_width(
-                x=rate_hz, requested=width_hz, fallback=width_hz
+        notch = np.minimum(
+            notch,
+            _footprint_notch(
+                footprint=footprint,
+                delay_s=delay_s,
+                rate_hz=rate_hz,
+                delay_transition_s=delay_transition_s,
+                rate_transition_hz=_transition_width(
+                    x=rate_hz,
+                    requested=footprint.rate_margin_hz,
+                    fallback=footprint.rate_margin_hz,
+                ),
             ),
         )
-        object_notch = 1.0 - (1.0 - rate_notch[:, None]) * (1.0 - delay_notch[None, :])
-        notch = np.minimum(notch, object_notch)
         tracks.append(
             ObjectTrack(
                 object_name=w_delays.object_name,
                 delay_s=tau_s,
                 rate_hz=nu_mid * tau_rate,
-                notch=obj,
-                rate_width_hz=width_hz,
+                footprint=footprint,
             )
         )
 
+    if np.all(notch == 1.0) and beyond_rate_nyquist_zone > 0:
+        # The objects are too far out in fringe-rate to matter, so the data are
+        # returned unmodified with only their original flags
+        original_data = np.array(segment.data)[core]
+        return RateFilterResult(
+            rows=core_rows,
+            success=True,
+            reason="beyond rate nyquist zone",
+            data=original_data,
+            flags=np.array(segment.mask)[core] | ~np.isfinite(original_data),
+            weights=None
+            if segment.weights is None
+            else {k: np.array(v)[core] for k, v in segment.weights.items()},
+        )
     if np.all(notch == 1.0):
         return RateFilterResult(rows=core_rows, success=False, reason="nothing to null")
 
@@ -666,6 +784,7 @@ def rate_filter_segment(
             after=np.abs(delay_rate.delay_rate).mean(axis=-1),
             field=field,
             tracks=tracks,
+            taper=notch,
         )
     filtered = delay_rate_to_array(delay_rate)[core]
 
@@ -691,7 +810,7 @@ def rate_filter_segment(
         weights=scaled_weights,
         nulled_fraction=1.0 - mean_notch,
         diagnostics=diagnostics,
-        notches=[(track.object_name, track.notch) for track in tracks],
+        notches=[track.footprint for track in tracks],
     )
 
 
@@ -707,6 +826,10 @@ class RateFilterSummary:
     """The number of segments not filtered, by reason"""
     rows_not_filtered: int = 0
     """The number of core rows that were not filtered"""
+    passed_through: Counter[str] = field(default_factory=Counter)
+    """The number of segments written back unfiltered and unflagged, by reason"""
+    rows_passed_through: int = 0
+    """The number of core rows written back unfiltered and unflagged"""
 
 
 def record_rate_filter_result(
@@ -718,9 +841,12 @@ def record_rate_filter_result(
         summary (RateFilterSummary): The tally, updated in place
         result (RateFilterResult): The outcome of a segment
     """
-    if result.success:
+    if result.success and result.reason == "filtered":
         summary.segments_filtered += 1
         summary.rows_filtered += len(result.rows)
+    elif result.success:
+        summary.passed_through[result.reason] += 1
+        summary.rows_passed_through += len(result.rows)
     else:
         summary.failures[result.reason] += 1
         summary.rows_not_filtered += len(result.rows)
@@ -738,6 +864,10 @@ def log_rate_filter_summary(
     logger.info(
         f"Delay-rate filtered {summary.segments_filtered} segments ({summary.rows_filtered} rows)"
     )
+    if summary.passed_through:
+        logger.info(
+            f"Segments written back unfiltered and unflagged ({summary.rows_passed_through} rows): {dict(summary.passed_through)}"
+        )
     if summary.failures:
         logger.info(
             f"Segments not filtered ({summary.rows_not_filtered} rows): {dict(summary.failures)}"

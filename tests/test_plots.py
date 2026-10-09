@@ -20,7 +20,7 @@ from jolly_roger.plots import (
     plot_baseline_comparison_data,
     plot_baseline_delay_rate_comparison,
 )
-from jolly_roger.rates import RateBox
+from jolly_roger.rates import RateFootprint
 from jolly_roger.uvws import WDelays
 
 N_TIME = 32
@@ -170,7 +170,7 @@ def test_taper_extent_mask() -> None:
 def _object_panel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    applied_notches: list[tuple[str, RateBox]] | None,
+    applied_notches: list[RateFootprint] | None,
 ) -> plt.Axes:
     """Render the delay-rate comparison and return its object panel"""
     before, after, w_delays = _baseline_inputs()
@@ -217,25 +217,34 @@ def test_delay_rate_comparison_shows_taper_extent(
     plt.close("all")
 
 
+def _footprint(delay_ns: float) -> RateFootprint:
+    """A footprint about a delay at a fringe-rate of ~19 mHz"""
+    n_time = 4
+    return RateFootprint(
+        object_name="sun",
+        delay_s=np.full(n_time, delay_ns * 1e-9),
+        rate_low_hz=np.full(n_time, 0.016),
+        rate_high_hz=np.full(n_time, 0.022),
+        delay_half_width_s=np.full(n_time, 10e-9),
+        rate_margin_hz=0.004,
+    )
+
+
 def test_delay_rate_comparison_shows_applied_notches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    notches = [
-        ("sun", RateBox(-5e-9, 10e-9, 0.019, 0.004)),
-        ("sun", RateBox(5e-9, 10e-9, 0.019, 0.004)),
-    ]
-    ax = _object_panel(tmp_path, monkeypatch, applied_notches=notches)
+    """Each region nulled is drawn as an outline, in addition to the taper extent"""
+    without = _object_panel(tmp_path, monkeypatch, applied_notches=None)
+    n_without = len(without.collections)
+    plt.close("all")
+
+    ax = _object_panel(
+        tmp_path, monkeypatch, applied_notches=[_footprint(-5.0), _footprint(5.0)]
+    )
     labels = ax.get_legend_handles_labels()[1]
     assert labels.count("Applied notch") == 1
-
-    drawn = _dashed_notches(ax)
-    assert len(drawn) == 2
-    # Fringe-rate (mHz) along x and delay (ns) along y
-    first = drawn[0]
-    assert first.get_x() == pytest.approx((0.019 - 0.004) * 1e3)
-    assert first.get_y() == pytest.approx((-5e-9 - 10e-9) * 1e9)
-    assert first.get_width() == pytest.approx(2 * 0.004 * 1e3)
-    assert first.get_height() == pytest.approx(2 * 10e-9 * 1e9)
+    # One outline per region nulled
+    assert len(ax.collections) - n_without == 2
     plt.close("all")
 
 

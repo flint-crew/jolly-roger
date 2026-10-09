@@ -766,5 +766,14 @@ def test_rate_filter_processor_records_applied_notches(
 
     assert sorted(processor.applied_notches) == [(0, 1), (0, 2), (0, 3)]
     for notches in processor.applied_notches.values():
-        ((object_name, _),) = notches
-        assert object_name == "sun"
+        (footprint,) = notches
+        assert footprint.object_name == "sun"
+
+
+@pytest.mark.parametrize("limit", [2, None])
+def test_rate_filter_settings_rate_nyquist_zone(limit: int | None) -> None:
+    assert TukeyTractorOptions().rate_filter_ignore_nyquist_zone == 2
+    settings = _rate_filter_settings(
+        TukeyTractorOptions(rate_filter_ignore_nyquist_zone=limit)
+    )
+    assert settings.ignore_rate_nyquist_zone == limit

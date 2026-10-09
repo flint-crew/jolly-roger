@@ -110,6 +110,7 @@ def get_2d_taper(
     outer_width: NDArray[np.floating[Any]] | float,
     tukey_width: NDArray[np.floating[Any]] | float,
     tukey_offset: NDArray[np.floating[Any]] | None = None,
+    upper_limit: float | None = None,
 ) -> NDArray[np.floating[Any]]:
     """Calculate a tapering function across the domain defined by ``x``. The output
     shape of this function will always be two-dimensional ``(x, N)``, where ``N`` is
@@ -130,6 +131,7 @@ def get_2d_taper(
         outer_width (NDArray[np.floating[Any]] | float): The total size of the taper, including the transition width
         tukey_width (NDArray[np.floating[Any]] | float): The width of the transition region
         tukey_offset (NDArray[np.floating[Any]] | None, optional): A shift of the center of the origin. Defaults to None.
+        upper_limit (float | None, optional): The half-period of the cyclic domain of ``x``. If None the largest value of ``x`` is used. Defaults to None.
 
     Returns:
         NDArray[np.floating[Any]]: A two-dimensional array, with first axis being the same length as ``x``.
@@ -144,7 +146,7 @@ def get_2d_taper(
     assert not isinstance(tukey_width, float)
     assert tukey_offset is not None
 
-    original_x_local_maximum = np.max(x)
+    original_x_local_maximum = np.max(x) if upper_limit is None else upper_limit
     x_local = x[:, None] - tukey_offset[None, :]
 
     x_local = symmetric_domain_wrap(
