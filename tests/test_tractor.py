@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from astropy import units as u
 from astropy.coordinates import SkyCoord
+from capn_crunch import create_options_from_parser
 from casacore.tables import table
 from numpy import ma
 
@@ -33,6 +34,7 @@ from jolly_roger.tractor import (
     find_idx_of_closest_delay,
     finish_rate_filter,
     flush_rate_filter_write_buffer,
+    get_parser,
     make_rate_filter_plots,
     make_search_window,
     merge_rate_filter_results,
@@ -777,3 +779,52 @@ def test_rate_filter_settings_rate_nyquist_zone(limit: int | None) -> None:
         TukeyTractorOptions(rate_filter_ignore_nyquist_zone=limit)
     )
     assert settings.ignore_rate_nyquist_zone == limit
+
+
+def _zero_dish_diameter(ms_path: Path) -> None:
+    with table(str(ms_path / "ANTENNA"), ack=False, readonly=False) as tab:
+        tab.putcol("DISH_DIAMETER", np.zeros(tab.nrows()))
+
+
+def test_tractor_guard_field_requires_dish_diameter(ms_example) -> None:
+    """A zero dish diameter gives an unbounded guard region, so fails early and
+    leaves the measurement set untouched"""
+    _zero_dish_diameter(Path(ms_example))
+    with pytest.raises(ValueError, match="--dish-diameter-m"):
+        tukey_tractor(
+            ms_path=Path(ms_example),
+            tukey_tractor_options=TukeyTractorOptions(
+                guard_field=True, output_column="JACKS_DATA"
+            ),
+        )
+    with table(str(ms_example), ack=False) as tab:
+        assert "JACKS_DATA" not in tab.colnames()
+
+
+@pytest.mark.parametrize(
+    ("guard_field", "dish_diameter_m"), [(True, 12.0), (False, None)]
+)
+def test_tractor_zero_dish_diameter_runs(
+    ms_example, guard_field: bool, dish_diameter_m: float | None
+) -> None:
+    """Overriding the dish diameter, or not guarding the field, runs as normal"""
+    _zero_dish_diameter(Path(ms_example))
+    tukey_tractor(
+        ms_path=Path(ms_example),
+        tukey_tractor_options=TukeyTractorOptions(
+            guard_field=guard_field,
+            dish_diameter_m=dish_diameter_m,
+            output_column="JACKS_DATA",
+        ),
+    )
+    with table(str(ms_example), ack=False) as tab:
+        assert "JACKS_DATA" in tab.colnames()
+
+
+def test_cli_dish_diameter_option() -> None:
+    """The option is available on the command line and converted to a float"""
+    args = get_parser().parse_args(["tukey", "example.ms", "--dish-diameter-m", "12"])
+    options = create_options_from_parser(
+        parser_namespace=args, options_class=TukeyTractorOptions
+    )
+    assert options.dish_diameter_m == 12.0
