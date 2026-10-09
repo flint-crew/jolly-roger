@@ -430,10 +430,16 @@ def plot_baseline_delay_rate_comparison(
         (ax4, before_rate_i, "Before"),
         (ax6, after_rate_i, "After"),
     ):
+        # Delay is along the y-axis, as in the delay vs time panels
         im = ax.pcolormesh(
-            delay_ns, rate_mhz, amplitude, norm=rate_norm, cmap=cmap, shading="nearest"
+            rate_mhz,
+            delay_ns,
+            amplitude.T,
+            norm=rate_norm,
+            cmap=cmap,
+            shading="nearest",
         )
-        ax.set(xlabel="Delay / ns", ylabel="Fringe-rate / mHz", title=title)
+        ax.set(xlabel="Fringe-rate / mHz", ylabel="Delay / ns", title=title)
         fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
 
     # The path each object takes through delay and delay-rate, at the central frequency
@@ -451,8 +457,8 @@ def plot_baseline_delay_rate_comparison(
             ):
                 current_zone = np.mean(wrapped_data.zones[object_slice])
                 ax5.plot(
-                    wrapped_data.values[object_slice],
                     object_rate_mhz[object_slice],
+                    wrapped_data.values[object_slice],
                     color=f"C{_object_idx}",
                     label=f"Path of {_w_delays.object_name}"
                     if _zone_idx == 0
@@ -481,9 +487,9 @@ def plot_baseline_delay_rate_comparison(
     if rate_guard_mhz > 0:
         ax5.add_patch(
             Rectangle(
-                (-delay_guard_ns, -rate_guard_mhz),
-                2 * delay_guard_ns,
+                (-rate_guard_mhz, -delay_guard_ns),
                 2 * rate_guard_mhz,
+                2 * delay_guard_ns,
                 alpha=0.3,
                 color="grey",
                 label="Guard Region",
@@ -491,11 +497,11 @@ def plot_baseline_delay_rate_comparison(
         )
     else:
         # Without a guard in delay-rate the field region is only extended in delay
-        ax5.axhline(0, ls="-", c="black", lw=1)
+        ax5.axvline(0, ls="-", c="black", lw=1)
         if delay_guard_ns > 0:
             ax5.plot(
-                [-delay_guard_ns, delay_guard_ns],
                 [0, 0],
+                [-delay_guard_ns, delay_guard_ns],
                 lw=8,
                 alpha=0.3,
                 color="grey",
@@ -506,10 +512,10 @@ def plot_baseline_delay_rate_comparison(
     ax5.legend(loc="upper right")
     ax5.grid()
     ax5.set(
-        xlim=[np.min(delay_ns), np.max(delay_ns)],
-        ylim=[np.min(rate_mhz), np.max(rate_mhz)],
-        xlabel="Delay / ns",
-        ylabel="Fringe-rate / mHz",
+        xlim=[np.min(rate_mhz), np.max(rate_mhz)],
+        ylim=[np.min(delay_ns), np.max(delay_ns)],
+        xlabel="Fringe-rate / mHz",
+        ylabel="Delay / ns",
     )
 
     fig.suptitle(
