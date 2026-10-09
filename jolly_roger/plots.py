@@ -16,7 +16,7 @@ from astropy.visualization import (
     quantity_support,
     time_support,
 )
-from matplotlib.colors import LogNorm
+from matplotlib.colors import SymLogNorm
 from matplotlib.patches import Rectangle
 
 from jolly_roger.baselines import BaselineData
@@ -562,12 +562,14 @@ def plot_rate_filter_segment(
     delay_ns = diagnostics.delay_s * 1e9
     rate_mhz = diagnostics.rate_hz * 1e3
 
-    # Shared colour scale so the before and after are comparable
+    # Shared colour scale so the before and after are comparable. The scale is
+    # linear below ``linthresh`` so values of zero (e.g. where the taper nulls the
+    # object) and the taper's roll-off are drawn, rather than masked as on a log scale
     positive = diagnostics.before[diagnostics.before > 0]
-    vmin, vmax = (
+    linthresh, vmax = (
         (np.percentile(positive, 5), np.max(positive)) if positive.size else (1e-6, 1.0)
     )
-    norm = LogNorm(vmin=vmin, vmax=vmax)
+    norm = SymLogNorm(linthresh=linthresh, vmin=0.0, vmax=vmax, base=10)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
     for ax, amplitude, title in zip(
@@ -576,7 +578,7 @@ def plot_rate_filter_segment(
         im = ax.pcolormesh(
             delay_ns,
             rate_mhz,
-            np.where(amplitude > 0, amplitude, np.nan),
+            amplitude,
             norm=norm,
             shading="nearest",
         )

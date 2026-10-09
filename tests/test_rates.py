@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import astropy.units as u
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 from numpy.typing import NDArray
@@ -605,3 +606,36 @@ def test_rate_filter_fixed_width_unchanged() -> None:
     assert requested.diagnostics is not None
     assert default.diagnostics.tracks[0].rate_width_hz == pytest.approx(2 * rate_bin_hz)
     assert requested.diagnostics.tracks[0].rate_width_hz == pytest.approx(0.004)
+
+
+def test_plot_rate_filter_segment_unmasked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The filtered values are drawn as they are: zeros are at the bottom of the
+    colour scale rather than masked, and the taper's roll-off is visible"""
+    data, _, w_delays = _make_segment_inputs()
+    result, _ = _filter(
+        data, w_delays, np.ones(len(data), dtype=bool), keep_diagnostics=True
+    )
+    assert result.diagnostics is not None
+
+    figures: list[plt.Figure] = []
+    monkeypatch.setattr("jolly_roger.plots.plt.close", figures.append)
+    plot_rate_filter_segment(
+        diagnostics=result.diagnostics, output_path=tmp_path / "segment.png"
+    )
+
+    (figure,) = figures
+    after_ax = next(ax for ax in figure.axes if ax.get_title() == "After")
+    mesh = after_ax.collections[0]
+    values = np.ma.getdata(mesh.get_array())
+
+    assert not np.any(np.ma.getmaskarray(mesh.get_array()))
+    assert np.all(np.isfinite(values))
+    assert np.any(values == 0.0)
+    # Zero is the bottom of the colour scale, not a "bad" value
+    assert mesh.norm(0.0) == pytest.approx(0.0)
+    # Some of the taper's roll-off lies in the linear part of the scale
+    linthresh = mesh.norm.linthresh
+    assert np.any((values > 0.0) & (values < linthresh))
+    plt.close(figure)
