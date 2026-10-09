@@ -377,6 +377,8 @@ class RateFilterResult:
     """The fraction of the delay-rate plane that was nulled"""
     diagnostics: RateFilterDiagnostics | None = None
     """Description of the filtering for plotting. Only set when requested and the segment was filtered."""
+    notches: list[tuple[str, RateBox]] = field(default_factory=list)
+    """The (object name, region) nulled for each object. Only set when the segment was filtered."""
 
 
 def _wrapped_overlap(
@@ -689,6 +691,7 @@ def rate_filter_segment(
         weights=scaled_weights,
         nulled_fraction=1.0 - mean_notch,
         diagnostics=diagnostics,
+        notches=[(track.object_name, track.notch) for track in tracks],
     )
 
 

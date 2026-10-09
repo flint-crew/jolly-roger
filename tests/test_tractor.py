@@ -749,3 +749,22 @@ def test_tractor_make_plots_delay_rate(ms_example, rate_filter: bool) -> None:
     delay_rate = [name for name in names if name.endswith("_delay_rate_comparison.png")]
     assert len(comparison) - len(delay_rate) == 2
     assert len(delay_rate) == (2 if rate_filter else 0)
+
+
+def test_rate_filter_processor_records_applied_notches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regions nulled are kept per baseline for the delay-rate comparison"""
+    monkeypatch.setattr(
+        "jolly_roger.tractor.plot_rate_filter_segment",
+        lambda output_path, **_: output_path,
+    )
+    processor = _rate_filter_processor_with_segments(
+        tmp_path=tmp_path, n_baselines=3, max_plots=1
+    )
+    finish_rate_filter(processor)
+
+    assert sorted(processor.applied_notches) == [(0, 1), (0, 2), (0, 3)]
+    for notches in processor.applied_notches.values():
+        ((object_name, _),) = notches
+        assert object_name == "sun"

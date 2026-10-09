@@ -639,3 +639,22 @@ def test_plot_rate_filter_segment_unmasked(
     linthresh = mesh.norm.linthresh
     assert np.any((values > 0.0) & (values < linthresh))
     plt.close(figure)
+
+
+def test_rate_filter_records_notches() -> None:
+    """A filtered segment reports the region nulled for each object"""
+    data, _, w_delays = _make_segment_inputs()
+    result, _ = _filter(
+        data, w_delays, np.ones(len(data), dtype=bool), keep_diagnostics=True
+    )
+    assert result.success
+    assert result.diagnostics is not None
+    (track,) = result.diagnostics.tracks
+    assert result.notches == [(track.object_name, track.notch)]
+
+    static_data, _, static_w_delays = _make_segment_inputs(tau_rate=1e-14)
+    failed, _ = _filter(
+        static_data, static_w_delays, np.ones(len(static_data), dtype=bool)
+    )
+    assert not failed.success
+    assert failed.notches == []

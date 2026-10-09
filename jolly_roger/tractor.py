@@ -42,6 +42,7 @@ from jolly_roger.plots import (
 )
 from jolly_roger.rates import (
     ContaminatedSegment,
+    RateBox,
     RateFilterDiagnostics,
     RateFilterResult,
     RateFilterSettings,
@@ -471,6 +472,7 @@ def make_plot_results(
     outer_width_ns: float | None = None,
     max_baselines: int = 10,
     delay_rate: bool = False,
+    rate_filter_notches: dict[tuple[int, int], list[tuple[str, RateBox]]] | None = None,
 ) -> list[Path]:
     """Create plots useful for diagnostics
 
@@ -484,6 +486,7 @@ def make_plot_results(
         outer_width_ns (float | None, optional): Size, in nanoseconds, of the tukey taper. Defaults to None.
         max_baselines (int, optional): The maximum number of baseline plots to create. Defaults to 10.
         delay_rate (bool, optional): Also create, for each baseline, a version of the comparison in delay and delay-rate. Defaults to False.
+        rate_filter_notches (dict[tuple[int, int], list[tuple[str, RateBox]]] | None, optional): The regions nulled by delay-rate filtering, keyed by (ANTENNA1, ANTENNA2), drawn on the delay-rate comparison. Defaults to None.
 
     Returns:
         list[Path]: Collection of paths to use
@@ -571,6 +574,9 @@ def make_plot_results(
                 output_path=delay_rate_output_path,
                 w_delays=w_delays,
                 outer_width_ns=outer_width_ns,
+                applied_notches=None
+                if rate_filter_notches is None
+                else rate_filter_notches.get((int(ant_1), int(ant_2))),
             )
             logger.info(f"Have written {delay_rate_output_path=}")
             output_paths.append(plot_path)
@@ -1630,6 +1636,10 @@ class RateFilterProcessor:
     """Tally of the filtering outcomes"""
     diagnostics: list[RateFilterDiagnostics] = field(default_factory=list)
     """Filtered segments kept to be plotted once processing has finished"""
+    applied_notches: dict[tuple[int, int], list[tuple[str, RateBox]]] = field(
+        default_factory=dict
+    )
+    """The (object name, region) nulled in each filtered segment, keyed by (ANTENNA1, ANTENNA2)"""
 
 
 def make_rate_filter_processor(
@@ -1691,6 +1701,10 @@ def _filter_rate_segments(
             keep_diagnostics=_rate_filter_plot_wanted(rate_filter_processor),
         )
         record_rate_filter_result(rate_filter_processor.summary, rate_filter_result)
+        if rate_filter_result.success:
+            rate_filter_processor.applied_notches.setdefault(
+                (segment.ant_1, segment.ant_2), []
+            ).extend(rate_filter_result.notches)
         # Plotting is slow, so is deferred until processing has finished
         if rate_filter_result.diagnostics is not None:
             rate_filter_processor.diagnostics.append(rate_filter_result.diagnostics)
@@ -1966,6 +1980,9 @@ def tukey_tractor(
             outer_width_ns=tukey_tractor_options.outer_width_ns,
             max_baselines=tukey_tractor_options.number_of_plots,
             delay_rate=tukey_tractor_options.rate_filter,
+            rate_filter_notches=None
+            if rate_filter_processor is None
+            else rate_filter_processor.applied_notches,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
