@@ -3,6 +3,7 @@ all are important in their own way"""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -13,10 +14,14 @@ from astropy.coordinates import SkyCoord
 from capn_crunch import create_options_from_parser
 from casacore.tables import table
 from numpy import ma
+from numpy.typing import NDArray
 
 from jolly_roger.baselines import get_open_ms_tables
 from jolly_roger.rates import (
+    RateFilterOutcome,
+    RateFilterPayload,
     RateFilterResult,
+    RateFilterSettings,
     SegmentAccumulator,
     update_segment_accumulator,
 )
@@ -29,7 +34,6 @@ from jolly_roger.tractor import (
     add_to_rate_filter_write_buffer,
     apply_roll_for_taper,
     compute_auto_taper_widths,
-    compute_rate_contamination,
     compute_tukey_multi_taper,
     find_idx_of_closest_delay,
     finish_rate_filter,
@@ -268,8 +272,18 @@ def test_compute_tukey_multi_taper_skips_below_elevation_cut() -> None:
     assert result.data_chunk is data_chunk
 
 
-def _with_rates(w_delays: WDelays, rate: float, guard: float | None = None) -> WDelays:
-    """Attach a constant delay-rate (and rate guard) to a WDelays"""
+# The synthetic chunks are sampled every second
+_RATE_FILTER_SETTINGS = RateFilterSettings(
+    outer_width_ns=10.0, tukey_width_ns=10.0, integration_s=1.0
+)
+
+
+def _with_rates(
+    w_delays: WDelays,
+    rate: float | NDArray[np.floating[Any]],
+    guard: float | None = None,
+) -> WDelays:
+    """Attach a delay-rate per timestep, or constant, (and rate guard) to a WDelays"""
     shape = w_delays.w_delays.shape
     return WDelays(
         object_name=w_delays.object_name,
@@ -281,36 +295,6 @@ def _with_rates(w_delays: WDelays, rate: float, guard: float | None = None) -> W
         rate_guard_region=None
         if guard is None
         else np.full(shape, guard) * u.dimensionless_unscaled,
-    )
-
-
-def test_compute_rate_contamination() -> None:
-    n_time = 4
-    w_delays = _make_w_delays(n_time=n_time)
-    freq_chan = np.linspace(1.0, 2.0, 16) * u.GHz
-    idx = np.zeros(n_time, dtype=int), np.arange(n_time)
-
-    def _contaminated(w: WDelays, **kwargs) -> np.ndarray:
-        return compute_rate_contamination(
-            w_delays=w,
-            baseline_idx=idx[0],
-            time_idx=idx[1],
-            freq_chan=freq_chan,
-            tukey_tractor_options=TukeyTractorOptions(rate_filter=True, **kwargs),
-        )
-
-    # No rate (derived from constant delays) can not be separated
-    assert np.all(_contaminated(w_delays))
-    # Moving object, no guard
-    assert not np.any(_contaminated(_with_rates(w_delays, rate=1e-11)))
-    # Moving object, within the field guard
-    assert np.all(_contaminated(_with_rates(w_delays, rate=1e-11, guard=2e-11)))
-    # Moving object, within the absolute guard (1e-11 * 1 GHz = 0.01 Hz)
-    assert np.all(
-        _contaminated(_with_rates(w_delays, rate=1e-11), rate_filter_guard_hz=0.02)
-    )
-    assert not np.any(
-        _contaminated(_with_rates(w_delays, rate=1e-11), rate_filter_guard_hz=0.005)
     )
 
 
@@ -326,6 +310,7 @@ def test_compute_tukey_multi_taper_rate_payload() -> None:
         data_chunk=data_chunk,
         tukey_tractor_options=TukeyTractorOptions(rate_filter=True),
         w_delays_list=[_make_w_delays(n_time=n_time)],
+        rate_filter_settings=_RATE_FILTER_SETTINGS,
     )
     payload = static.rate_payload
     assert payload is not None
@@ -336,6 +321,7 @@ def test_compute_tukey_multi_taper_rate_payload() -> None:
     np.testing.assert_array_equal(payload.original_masked_data.data, original_values)
     assert static.data_chunk is not None
     assert not np.allclose(static.data_chunk.masked_data.data, original_values)
+    np.testing.assert_array_equal(payload.rows, np.arange(n_time))
     np.testing.assert_array_equal(payload.time_idx, np.arange(n_time))
     np.testing.assert_array_equal(payload.baseline_idx, np.zeros(n_time))
 
@@ -343,6 +329,7 @@ def test_compute_tukey_multi_taper_rate_payload() -> None:
         data_chunk=_make_data_chunk(n_time=n_time),
         tukey_tractor_options=TukeyTractorOptions(rate_filter=True),
         w_delays_list=[_with_rates(_make_w_delays(n_time=n_time), rate=1e-11)],
+        rate_filter_settings=_RATE_FILTER_SETTINGS,
     )
     assert moving.rate_payload is not None
     assert np.all(moving.rate_payload.recoverable)
@@ -365,11 +352,63 @@ def test_compute_tukey_multi_taper_rate_payload_nothing_to_do() -> None:
         data_chunk=_make_data_chunk(n_time=n_time),
         tukey_tractor_options=TukeyTractorOptions(rate_filter=True),
         w_delays_list=[_make_w_delays(n_time=n_time, elevation_deg=-10.0)],
+        rate_filter_settings=_RATE_FILTER_SETTINGS,
     )
     assert result.nothing_to_do
     assert result.rate_payload is not None
     assert not np.any(result.rate_payload.delay_contaminated)
     assert not np.any(result.rate_payload.recoverable)
+
+
+def test_compute_tukey_multi_taper_rate_payload_every_object() -> None:
+    """A row is only recoverable when every object contaminating it in delay is
+    separable in delay-rate"""
+    n_time = 8
+    moving = _with_rates(_make_w_delays(n_time=n_time), rate=1e-11)
+    stopping = _with_rates(
+        _make_w_delays(n_time=n_time),
+        rate=np.where(np.arange(n_time) < 4, 1e-11, 0.0),
+    )
+    result = compute_tukey_multi_taper(
+        data_chunk=_make_data_chunk(n_time=n_time),
+        tukey_tractor_options=TukeyTractorOptions(rate_filter=True),
+        w_delays_list=[moving, stopping],
+        rate_filter_settings=_RATE_FILTER_SETTINGS,
+    )
+    payload = result.rate_payload
+    assert payload is not None
+    assert np.all(payload.delay_contaminated)
+    np.testing.assert_array_equal(payload.recoverable, np.arange(n_time) < 4)
+
+    # Beyond the second fringe-rate Nyquist zone (1.5 Hz at 1 GHz) the object can
+    # not be nulled reliably, so its rows remain flagged
+    beyond = compute_tukey_multi_taper(
+        data_chunk=_make_data_chunk(n_time=n_time),
+        tukey_tractor_options=TukeyTractorOptions(rate_filter=True),
+        w_delays_list=[moving, _with_rates(_make_w_delays(n_time=n_time), rate=2e-9)],
+        rate_filter_settings=_RATE_FILTER_SETTINGS,
+    )
+    assert beyond.rate_payload is not None
+    assert np.all(beyond.rate_payload.delay_contaminated)
+    assert not np.any(beyond.rate_payload.recoverable)
+
+
+def test_compute_tukey_multi_taper_rate_payload_ignores_autos() -> None:
+    """Auto-correlations are not described by the delays, so are never tracked"""
+    n_time = 8
+    data_chunk = _make_data_chunk(n_time=n_time)
+    data_chunk = replace(data_chunk, ant_2=np.where(np.arange(n_time) % 2, 1, 0))
+    result = compute_tukey_multi_taper(
+        data_chunk=data_chunk,
+        tukey_tractor_options=TukeyTractorOptions(rate_filter=True),
+        w_delays_list=[_with_rates(_make_w_delays(n_time=n_time), rate=1e-11)],
+        rate_filter_settings=_RATE_FILTER_SETTINGS,
+    )
+    payload = result.rate_payload
+    assert payload is not None
+    cross_correlation = data_chunk.ant_1 != data_chunk.ant_2
+    np.testing.assert_array_equal(payload.delay_contaminated, cross_correlation)
+    np.testing.assert_array_equal(payload.recoverable, cross_correlation)
 
 
 @pytest.mark.parametrize("pad", [0, 2])
@@ -438,7 +477,7 @@ def test_write_rate_filtered_segment(ms_example) -> None:
     tukey_tractor_options = TukeyTractorOptions(output_column="DATA")
     result = RateFilterResult(
         rows=rows,
-        success=True,
+        outcome=RateFilterOutcome.FILTERED,
         data=np.full((len(rows), *data_shape), 2 + 1j),
         flags=np.zeros((len(rows), *data_shape), dtype=bool),
         weights={"WEIGHT": np.full((len(rows), original_weights.shape[1]), 5.0)},
@@ -452,7 +491,7 @@ def test_write_rate_filtered_segment(ms_example) -> None:
     write_rate_filtered_segment(
         open_ms_tables=open_ms_tables,
         rate_filter_result=RateFilterResult(
-            rows=np.array([0]), success=False, reason="too short"
+            rows=np.array([0]), outcome=RateFilterOutcome.TOO_SHORT
         ),
         tukey_tractor_options=tukey_tractor_options,
     )
@@ -478,7 +517,7 @@ def _segment_result(rows: list[int], value: float) -> RateFilterResult:
     n_rows = len(rows)
     return RateFilterResult(
         rows=np.array(rows),
-        success=True,
+        outcome=RateFilterOutcome.FILTERED,
         data=np.full((n_rows, 2, 2), value, dtype=complex),
         flags=np.full((n_rows, 2, 2), value > 1),
         weights={"WEIGHT": np.full((n_rows, 2), value)},
@@ -537,7 +576,10 @@ def test_rate_filter_write_buffer() -> None:
 
     add_to_rate_filter_write_buffer(buffer, _segment_result([8, 9], 1.0))
     add_to_rate_filter_write_buffer(
-        buffer, RateFilterResult(rows=np.array([0, 1, 2, 3]), success=False)
+        buffer,
+        RateFilterResult(
+            rows=np.array([0, 1, 2, 3]), outcome=RateFilterOutcome.RATE_CONTAMINATED
+        ),
     )
     assert main_table.writes == []
 
@@ -624,7 +666,7 @@ def test_compute_auto_taper_widths_overrides_rate_width() -> None:
 
 @pytest.mark.parametrize(
     ("auto_size", "nth_sidelobe_null", "expected_sidelobes"),
-    [(False, None, 1), (True, None, 1), (True, 3, 3)],
+    [(False, None, 1), (True, None, 1), (True, 3, 3), (True, 0, 0)],
 )
 def test_rate_filter_settings_auto(
     auto_size: bool, nth_sidelobe_null: int | None, expected_sidelobes: int
@@ -634,6 +676,17 @@ def test_rate_filter_settings_auto(
     )
     assert settings.auto_width is auto_size
     assert settings.auto_sidelobes == expected_sidelobes
+    assert settings.nth_sidelobe_null == nth_sidelobe_null
+
+
+def test_rate_filter_settings_peak_shift() -> None:
+    settings = _rate_filter_settings(
+        TukeyTractorOptions(peak_shift_search=True, peak_shift_search_width_ns=30.0),
+        integration_s=10.0,
+    )
+    assert settings.peak_shift_search
+    assert settings.peak_shift_search_width_ns == 30.0
+    assert settings.integration_s == 10.0
 
 
 def _rate_filter_processor_with_segments(
@@ -684,19 +737,20 @@ def _rate_filter_processor_with_segments(
         ),
     )
     for baseline in range(n_baselines):
-        update_segment_accumulator(
-            accumulator=processor.accumulator,
-            row_numbers=baseline * n_time + np.arange(n_time),
+        payload = RateFilterPayload(
+            rows=baseline * n_time + np.arange(n_time),
             ant_1=np.zeros(n_time, dtype=int),
             ant_2=np.full(n_time, baseline + 1),
-            baseline_idx=np.full(n_time, baseline),
             time_mjds=time_s,
+            baseline_idx=np.full(n_time, baseline),
             time_idx=np.arange(n_time),
-            data=vis,
-            mask=np.zeros(vis.shape, dtype=bool),
-            recoverable=np.ones(n_time, dtype=bool),
+            original_masked_data=np.ma.masked_array(
+                vis, mask=np.zeros(vis.shape, bool)
+            ),
             delay_contaminated=np.ones(n_time, dtype=bool),
+            recoverable=np.ones(n_time, dtype=bool),
         )
+        update_segment_accumulator(accumulator=processor.accumulator, payload=payload)
     return processor
 
 
@@ -828,3 +882,28 @@ def test_cli_dish_diameter_option() -> None:
         parser_namespace=args, options_class=TukeyTractorOptions
     )
     assert options.dish_diameter_m == 12.0
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"rate_filter_pad_timesteps": -1},
+        {"rate_filter_max_timesteps": 0},
+        {"rate_filter_min_timesteps": 1},
+        {"rate_filter_max_plots": -1},
+        {"rate_filter_ignore_nyquist_zone": 0},
+    ],
+)
+def test_tractor_invalid_rate_filter_options(
+    ms_example, invalid: dict[str, Any]
+) -> None:
+    """Invalid options fail before the measurement set is modified"""
+    with pytest.raises(ValueError, match=next(iter(invalid))):
+        tukey_tractor(
+            ms_path=Path(ms_example),
+            tukey_tractor_options=TukeyTractorOptions(
+                rate_filter=True, output_column="JACKS_DATA", **invalid
+            ),
+        )
+    with table(str(ms_example), ack=False) as tab:
+        assert "JACKS_DATA" not in tab.colnames()

@@ -191,6 +191,28 @@ def test_get_w_rates_derived_from_delays() -> None:
     np.testing.assert_allclose(get_w_rates(attached).value, 7.0)
 
 
+def test_get_w_rates_unordered_time_map() -> None:
+    """Rates derived from a time map out of time order (e.g. the 'first seen' order
+    when TIME_CENTROID differs between baselines) match those derived in order"""
+    time_s = 5e9 + np.arange(6) * 10.0
+    delays_s = 1e-12 * (time_s - time_s[0]) ** 2
+    shuffled = np.array([3, 0, 5, 1, 4, 2])
+
+    def _rates(order: np.ndarray) -> np.ndarray:
+        w_delays = WDelays(
+            object_name="sun",
+            w_delays=(delays_s[order] * u.s)[None, :],
+            b_map={(0, 1): 0},
+            time_map={t * u.s: idx for idx, t in enumerate(time_s[order])},
+            elevation=np.full(6, 45.0) * u.deg,
+        )
+        return get_w_rates(w_delays).value[0]
+
+    in_order = _rates(np.arange(6))
+    np.testing.assert_allclose(in_order[1:-1], 2e-12 * (time_s - time_s[0])[1:-1])
+    np.testing.assert_allclose(_rates(shuffled), in_order[shuffled])
+
+
 def test_get_object_delay_attaches_rates(ms_example: Path) -> None:
     with table(str(ms_example / "FIELD"), ack=False) as tab:
         phase_dir = tab.getcol("PHASE_DIR")[0, 0]

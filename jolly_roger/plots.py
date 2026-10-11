@@ -23,6 +23,7 @@ from numpy.typing import NDArray
 
 from jolly_roger.baselines import BaselineData
 from jolly_roger.logging import logger
+from jolly_roger.rates import footprint_rate_band
 from jolly_roger.uvws import WDelays, get_w_rates
 from jolly_roger.wrap import (
     axis_half_period,
@@ -402,12 +403,32 @@ class _DelayRateTrack:
     """The name of the object"""
     delay_ns: NDArray[np.floating[Any]]
     """The delay of the object at each time, in ns"""
+    path_rate_mhz: NDArray[np.floating[Any]]
+    """The fringe-rate of the object at the central frequency at each time, in mHz"""
     rate_low_mhz: NDArray[np.floating[Any]]
-    """The fringe-rate of the object at the lowest frequency at each time, in mHz"""
+    """The lowest fringe-rate of the object's power at each time, in mHz"""
     rate_high_mhz: NDArray[np.floating[Any]]
-    """The fringe-rate of the object at the highest frequency at each time, in mHz"""
+    """The highest fringe-rate of the object's power at each time, in mHz"""
     width_ns: float | NDArray[np.floating[Any]]
     """The half-width of the taper in delay about the object, in ns"""
+
+
+def _footprint_track(footprint: RateFootprint, max_rate_hz: float) -> _DelayRateTrack:
+    """The path and extent of an object at the times its footprint is nulled.
+    Times nulled across all fringe-rates have an extent spanning every rate."""
+    active = footprint.active
+    rate_center, rate_half = footprint_rate_band(footprint, max_rate_hz)
+    return _DelayRateTrack(
+        object_name=footprint.object_name,
+        delay_ns=footprint.delay_s[active] * 1e9,
+        path_rate_mhz=(footprint.rate_low_hz + footprint.rate_high_hz)[active]
+        / 2
+        * 1e3,
+        rate_low_mhz=(rate_center - rate_half)[active] * 1e3,
+        rate_high_mhz=(rate_center + rate_half)[active] * 1e3,
+        width_ns=(footprint.delay_occupied_half_s + footprint.delay_margin_s)[active]
+        * 1e9,
+    )
 
 
 def _plot_delay_rate_track(
@@ -475,8 +496,7 @@ def _plot_delay_rate_track(
         values=track.delay_ns, upper_limit=axis_half_period(delay_ns)
     )
     wrapped_rate = calculate_wrapped_data(
-        values=(track.rate_low_mhz + track.rate_high_mhz) / 2,
-        upper_limit=axis_half_period(rate_mhz),
+        values=track.path_rate_mhz, upper_limit=axis_half_period(rate_mhz)
     )
     path_zones = wrapped_delay.zones * (np.max(wrapped_rate.zones) + 1) + np.asarray(
         wrapped_rate.zones
@@ -589,17 +609,13 @@ def plot_baseline_delay_rate_comparison(
         _w_delays.object_name: f"C{_object_idx}"
         for _object_idx, _w_delays in enumerate(w_delays or [])
     }
+    max_rate_hz = axis_half_period(rate_mhz) * 1e-3
     tracks: list[_DelayRateTrack] = []
     if applied_notches is not None:
         tracks = [
-            _DelayRateTrack(
-                object_name=footprint.object_name,
-                delay_ns=footprint.delay_s * 1e9,
-                rate_low_mhz=footprint.rate_low_hz * 1e3,
-                rate_high_mhz=footprint.rate_high_hz * 1e3,
-                width_ns=footprint.delay_half_width_s * 1e9,
-            )
+            _footprint_track(footprint, max_rate_hz)
             for footprint in applied_notches
+            if footprint.sidelobe == 0
         ]
     elif w_delays is not None and b_idx is not None:
         for _w_delays in w_delays:
@@ -608,6 +624,7 @@ def plot_baseline_delay_rate_comparison(
                 _DelayRateTrack(
                     object_name=_w_delays.object_name,
                     delay_ns=_w_delays.w_delays[b_idx].to("ns").value,
+                    path_rate_mhz=(nu_min + nu_max) / 2 * object_tau_rate * 1e3,
                     rate_low_mhz=nu_min * object_tau_rate * 1e3,
                     rate_high_mhz=nu_max * object_tau_rate * 1e3,
                     width_ns=outer_width_ns or 0.0,
@@ -616,6 +633,8 @@ def plot_baseline_delay_rate_comparison(
 
     labelled: set[str] = set()
     for track in tracks:
+        if track.delay_ns.size == 0:
+            continue
         _plot_delay_rate_track(
             ax=ax5,
             track=track,
@@ -630,13 +649,14 @@ def plot_baseline_delay_rate_comparison(
     if applied_notches:
         for notch_idx, footprint in enumerate(applied_notches):
             color = object_colors.get(footprint.object_name, "black")
+            region = _footprint_track(footprint, max_rate_hz)
             nulled = _taper_extent_mask(
                 delay_ns=delay_ns,
                 rate_mhz=rate_mhz,
-                object_delay_ns=footprint.delay_s * 1e9,
-                object_rate_low_mhz=footprint.rate_low_hz * 1e3,
-                object_rate_high_mhz=footprint.rate_high_hz * 1e3,
-                width_ns=footprint.delay_half_width_s * 1e9,
+                object_delay_ns=region.delay_ns,
+                object_rate_low_mhz=region.rate_low_mhz,
+                object_rate_high_mhz=region.rate_high_mhz,
+                width_ns=region.width_ns,
                 rate_margin_mhz=footprint.rate_margin_hz * 1e3,
             )
             if not np.any(nulled):
@@ -821,15 +841,22 @@ def plot_rate_filter_segment(
         _add_rate_box(
             ax, diagnostics.field, edgecolor="white", linewidth=1.5, label="Field"
         )
-        for object_idx, track in enumerate(diagnostics.tracks):
+        object_names = list(
+            dict.fromkeys(fp.object_name for fp in diagnostics.footprints)
+        )
+        for footprint in diagnostics.footprints:
+            if footprint.sidelobe != 0 or not np.any(footprint.active):
+                continue
+            object_idx = object_names.index(footprint.object_name)
+            track = _footprint_track(footprint, axis_half_period(rate_mhz) * 1e-3)
             # The data alias in delay and fringe-rate, so the track is wrapped
             # into the panel and broken wherever it wraps
             wrapped_delay = calculate_wrapped_data(
-                values=track.delay_s * 1e9,
+                values=track.delay_ns,
                 upper_limit=axis_half_period(delay_ns),
             )
             wrapped_rate = calculate_wrapped_data(
-                values=track.rate_hz * 1e3,
+                values=track.path_rate_mhz,
                 upper_limit=axis_half_period(rate_mhz),
             )
             zones = wrapped_delay.zones * (np.max(wrapped_rate.zones) + 1) + np.asarray(

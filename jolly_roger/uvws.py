@@ -178,10 +178,17 @@ def _time_map_to_seconds(time_map: dict[Any, int]) -> NDArray[np.floating[Any]]:
 def _gradient_in_time(
     values: NDArray[np.floating[Any]], time_s: NDArray[np.floating[Any]]
 ) -> NDArray[np.floating[Any]]:
-    """Derivative along the last (time) axis. Fewer than two timesteps have no rate."""
+    """Derivative along the last (time) axis. Fewer than two timesteps have no rate.
+
+    The times need not be in order (e.g. the 'first seen' order of a time map, where
+    TIME_CENTROID differs between baselines), so the derivative is taken in time
+    order and returned in the order given."""
     if len(time_s) < 2:
         return np.zeros_like(values)
-    return np.gradient(values, time_s, axis=-1)
+    order = np.argsort(time_s, kind="stable")
+    gradient = np.empty_like(values, dtype=float)
+    gradient[..., order] = np.gradient(values[..., order], time_s[order], axis=-1)
+    return gradient
 
 
 def get_w_rates(w_delays: WDelays) -> u.Quantity:

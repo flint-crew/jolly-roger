@@ -43,14 +43,17 @@ from jolly_roger.plots import (
 from jolly_roger.rates import (
     ContaminatedSegment,
     RateFilterDiagnostics,
+    RateFilterOutcome,
+    RateFilterPayload,
     RateFilterResult,
     RateFilterSettings,
     RateFilterSummary,
     RateFootprint,
     SegmentAccumulator,
+    compute_rate_contamination,
     flush_segment_accumulator,
     log_rate_filter_summary,
-    rate_filter_segment,
+    rate_filter_segments,
     record_rate_filter_result,
     update_segment_accumulator,
 )
@@ -60,7 +63,7 @@ from jolly_roger.response import (
 )
 from jolly_roger.tapering.tukey import get_2d_taper
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
-from jolly_roger.uvws import WDelays, get_object_delay_from_tables, get_w_rates
+from jolly_roger.uvws import WDelays, get_object_delay_from_tables
 from jolly_roger.weights import scale_multiple_weights, select_weight_columns
 from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
 
@@ -676,51 +679,13 @@ def make_search_window(x: u.Quantity, width_ns: float) -> NDArray[np.bool_]:
     return np.abs(delay_time_ns) < width_ns
 
 
-def compute_rate_contamination(
-    w_delays: WDelays,
-    baseline_idx: NDArray[np.int_],
-    time_idx: NDArray[np.int_],
-    freq_chan: u.Quantity,
-    tukey_tractor_options: TukeyTractorOptions,
-) -> NDArray[np.bool_]:
-    """Identify rows where the object can not be separated from the field in
-    delay-rate. The field occupies fringe-rates up to ``nu * rate_guard``, and the
-    object sits at ``nu * w_rate``. As both scale with frequency the bands intersect
-    when ``|w_rate| <= rate_guard + (guard_hz + width_hz) / nu_min``.
-
-    Args:
-        w_delays (WDelays): The object delays and rates
-        baseline_idx (NDArray[np.int_]): The baseline index of each row
-        time_idx (NDArray[np.int_]): The time index of each row
-        freq_chan (u.Quantity): The frequency of each channel
-        tukey_tractor_options (TukeyTractorOptions): Options describing the rate filter
-
-    Returns:
-        NDArray[np.bool_]: Rows contaminated in delay-rate
-    """
-    w_rates = np.abs(get_w_rates(w_delays)[baseline_idx, time_idx].value)
-
-    rate_guard = (
-        w_delays.rate_guard_region[baseline_idx, time_idx].value
-        if w_delays.rate_guard_region is not None
-        else np.zeros_like(w_rates)
-    )
-    # Absolute fringe-rates are converted to a delay-rate at the lowest
-    # frequency, where they are the largest
-    nu_min_hz = np.min(freq_chan).to(u.Hz).value
-    floor_hz = (tukey_tractor_options.rate_filter_guard_hz or 0.0) + (
-        tukey_tractor_options.rate_filter_width_hz or 0.0
-    )
-
-    return np.asarray(w_rates <= rate_guard + floor_hz / nu_min_hz)
-
-
 def compute_tukey_taper(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays: WDelays,
     delay_time: DelayTime | None = None,
     sidelobe_offset: u.Quantity | None = None,
+    rate_filter_settings: RateFilterSettings | None = None,
 ) -> TaperResult:
     """Compute a tukey taper for a dataset and then apply it
     to the dataset. Here the data corresponds to a (chan, time, pol)
@@ -737,6 +702,7 @@ def compute_tukey_taper(
         w_delays (WDelays): The w-derived delays to apply.
         delay_time (DelayTime | None, optional): Optional pre-computed DelayTime object.
         sidelobe_offset (u.Quantity | None, optional): If provided, the tukey taper will be offset by this amount in delay space in order to target specific sidelobes of the response. Defaults to None.
+        rate_filter_settings (RateFilterSettings | None, optional): When delay-rate filtering, the settings used to classify rows contaminated in delay-rate. Defaults to None.
 
     Returns:
         TaperResult: Scaled complex visibilities, corresponding flags, and delays.
@@ -924,13 +890,13 @@ def compute_tukey_taper(
     #     ~ignore_wrapping_for
     # ] = 0.0
     rate_contaminated: NDArray[np.bool_] | None = None
-    if tukey_tractor_options.rate_filter:
+    if rate_filter_settings is not None:
         rate_contaminated = compute_rate_contamination(
             w_delays=w_delays,
             baseline_idx=baseline_idx,
             time_idx=time_idx,
             freq_chan=data_chunk.freq_chan,
-            tukey_tractor_options=tukey_tractor_options,
+            settings=rate_filter_settings,
         )
 
     # Update flags
@@ -973,24 +939,6 @@ def apply_taper(
     logger.debug(f"{tapered_data.masked_data.shape=} {tapered_data.masked_data.dtype}")
 
     return tapered_data
-
-
-@dataclass
-class RateFilterPayload:
-    """The per-row information needed to delay-rate filter rows of a chunk"""
-
-    original_masked_data: np.ma.MaskedArray
-    """The visibilities before any delay tapering"""
-    baseline_idx: NDArray[np.int_]
-    """The index of each row's baseline into the ``WDelays``"""
-    time_idx: NDArray[np.int_]
-    """The index of each row's time into the ``WDelays``"""
-    delay_contaminated: NDArray[np.bool_]
-    """Rows contaminated in delay by any object"""
-    recoverable: NDArray[np.bool_]
-    """Rows contaminated in delay where every contaminating object is separable in delay-rate"""
-    original_weights: dict[str, NDArray[np.floating[Any]]] | None = None
-    """The weights before any scaling"""
 
 
 @dataclass
@@ -1052,9 +1000,13 @@ def make_rate_filter_payload(
                 taper_result.delay_contaminated & taper_result.rate_contaminated
             )
 
-    # Auto-correlations are mapped onto another baseline, so are not filtered
+    # Auto-correlations are mapped onto another baseline's delays, so are not
+    # delay-rate filtered or tracked
     cross_correlation = data_chunk.ant_1 != data_chunk.ant_2
-    recoverable = delay_contaminated & ~doubly_contaminated & cross_correlation
+    delay_contaminated &= cross_correlation
+    doubly_contaminated &= cross_correlation
+    # A row is only recovered when every object is separable in delay-rate
+    recoverable = delay_contaminated & ~doubly_contaminated
 
     logger.debug(
         f"Rows contaminated in delay: {np.sum(delay_contaminated)}, "
@@ -1063,9 +1015,13 @@ def make_rate_filter_payload(
     )
 
     return RateFilterPayload(
-        original_masked_data=data_chunk.masked_data,
+        rows=data_chunk.row_start + np.arange(n_rows),
+        ant_1=data_chunk.ant_1,
+        ant_2=data_chunk.ant_2,
+        time_mjds=data_chunk.time_mjds,
         baseline_idx=baseline_idx,
         time_idx=time_idx,
+        original_masked_data=data_chunk.masked_data,
         delay_contaminated=delay_contaminated,
         recoverable=recoverable,
         original_weights=data_chunk.weights,
@@ -1076,6 +1032,7 @@ def compute_tukey_multi_taper(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays_list: list[WDelays],
+    rate_filter_settings: RateFilterSettings | None = None,
 ) -> TaperedChunkResult:
     chunk_size = data_chunk.chunk_size
 
@@ -1091,6 +1048,7 @@ def compute_tukey_multi_taper(
             tukey_tractor_options=tukey_tractor_options,
             w_delays=w_delays,
             delay_time=delay_time,
+            rate_filter_settings=rate_filter_settings,
         )
         # An object that is skipped (e.g. below the elevation cut) has no
         # delay_time, and should not discard the one formed for an earlier object
@@ -1117,6 +1075,7 @@ def compute_tukey_multi_taper(
                     w_delays=w_delays,
                     delay_time=delay_time,
                     sidelobe_offset=sidelobe_offset * sign,
+                    rate_filter_settings=rate_filter_settings,
                 )
                 if taper_result.delay_time is not None:
                     delay_time = taper_result.delay_time
@@ -1125,7 +1084,7 @@ def compute_tukey_multi_taper(
     # Note that applying the taper replaces (rather than modifies) the masked
     # data of the data chunk, so a reference keeps the original visibilities
     rate_payload: RateFilterPayload | None = None
-    if tukey_tractor_options.rate_filter:
+    if rate_filter_settings is not None:
         rate_payload = make_rate_filter_payload(
             data_chunk=data_chunk,
             w_delays=w_delays_list[0],
@@ -1241,7 +1200,7 @@ class TukeyTractorOptions(BaseOptions):
     auto_size: bool = False
     """Automatically size the outer width of the tukey taper based on the data. With rate_filter, the delay-rate width of each segment is also sized from its duration T as (N+1)/T, reduced towards 1/T as needed to keep the object separable from the field. Overrides outer_width_ns, tukey_width_ns and rate_filter_width_hz."""
     nth_sidelobe_null: int | None = None
-    """Null up to the N'th sidelobe. Only used in auto_size mode. With rate_filter this is also the number of delay-rate sidelobes (N) included, where None includes 1. Defaults to None."""
+    """Null up to the N'th sidelobe. Only used in auto_size mode. With rate_filter the delay sidelobes are also nulled in delay-rate, and this is the number of delay-rate sidelobes (N) included, where None includes 1. Defaults to None."""
     reweight: bool = False
     """Attempt to identify a WEIGHT-like column and rescale to indicate modified data. Defaults to False."""
     weight_column: str | None = None
@@ -1271,7 +1230,7 @@ class TukeyTractorOptions(BaseOptions):
     rate_filter_pad_timesteps: int = 0
     """The number of clean timesteps either side of a contaminated segment to include when delay-rate filtering. These are not modified. A value of 0 disables padding."""
     rate_filter_ignore_nyquist_zone: int | None = 2
-    """Do not null an object in delay-rate if its fringe-rate is beyond this Nyquist zone throughout a segment. Such rows are written back unfiltered and unflagged, as the object is smeared by the integration time. None disables."""
+    """Do not separate an object in delay-rate beyond this Nyquist zone in fringe-rate, where it is smeared by the integration time and its aliased position unreliable. Rows where such an object is contaminated in delay remain flagged, and elsewhere it is nulled in delay only. None disables."""
     rate_filter_plots: bool = False
     """Plot the delay vs delay-rate of each segment that is delay-rate filtered"""
     rate_filter_max_plots: int = 20
@@ -1313,7 +1272,11 @@ def compute_auto_taper_widths(
     outer_width_ns = sinc_width.to("ns").value
     logger.info(f"Setting automatic {outer_width_ns=}")
     if tukey_tractor_options.rate_filter:
-        n_sidelobes = tukey_tractor_options.nth_sidelobe_null or 1
+        n_sidelobes = (
+            1
+            if tukey_tractor_options.nth_sidelobe_null is None
+            else tukey_tractor_options.nth_sidelobe_null
+        )
         logger.info(
             f"Setting automatic delay-rate width per segment: ({n_sidelobes}+1)/T, fitted down to 1/T"
         )
@@ -1410,40 +1373,6 @@ def write_back_results(
         logger.debug("No updating of weights")
 
 
-def accumulate_rate_filter_rows(
-    accumulator: SegmentAccumulator, taper_chunk_result: TaperedChunkResult
-) -> list[ContaminatedSegment]:
-    """Feed the rows of a processed chunk to the accumulator
-
-    Args:
-        accumulator (SegmentAccumulator): Per-baseline collection of contaminated rows
-        taper_chunk_result (TaperedChunkResult): The processed chunk, with its rate filter payload
-
-    Returns:
-        list[ContaminatedSegment]: Segments that are ready to be filtered
-    """
-    payload = taper_chunk_result.rate_payload
-    data_chunk = taper_chunk_result.data_chunk
-    assert payload is not None, "Rate filter payload expected"
-    assert data_chunk is not None, "Data chunk expected"
-
-    original = payload.original_masked_data
-    return update_segment_accumulator(
-        accumulator=accumulator,
-        row_numbers=data_chunk.row_start + np.arange(len(data_chunk.ant_1)),
-        ant_1=data_chunk.ant_1,
-        ant_2=data_chunk.ant_2,
-        baseline_idx=payload.baseline_idx,
-        time_mjds=data_chunk.time_mjds,
-        time_idx=payload.time_idx,
-        data=np.ma.getdata(original),
-        mask=np.ma.getmaskarray(original),
-        recoverable=payload.recoverable,
-        delay_contaminated=payload.delay_contaminated,
-        weights=payload.original_weights,
-    )
-
-
 def write_rate_filtered_segment(
     open_ms_tables: OpenMSTables,
     rate_filter_result: RateFilterResult,
@@ -1456,9 +1385,9 @@ def write_rate_filtered_segment(
         rate_filter_result (RateFilterResult): The filtered segment
         tukey_tractor_options (TukeyTractorOptions): Options relevant to the data selection
     """
-    if not rate_filter_result.success:
+    if rate_filter_result.outcome is not RateFilterOutcome.FILTERED:
         logger.debug(
-            f"Segment of {len(rate_filter_result.rows)} rows not filtered: {rate_filter_result.reason}"
+            f"Segment of {len(rate_filter_result.rows)} rows not filtered: {rate_filter_result.outcome.value}"
         )
         return
 
@@ -1491,9 +1420,9 @@ def merge_rate_filter_results(
         RateFilterResult: The combined segments, sorted by row
     """
     assert len(rate_filter_results) > 0, "Expected at least one result to merge"
-    assert all(result.success for result in rate_filter_results), (
-        "Only filtered segments may be merged"
-    )
+    assert all(
+        result.outcome is RateFilterOutcome.FILTERED for result in rate_filter_results
+    ), "Only filtered segments may be merged"
 
     rows = np.concatenate([result.rows for result in rate_filter_results])
     order = np.argsort(rows, kind="stable")
@@ -1510,7 +1439,7 @@ def merge_rate_filter_results(
 
     return RateFilterResult(
         rows=rows[order],
-        success=True,
+        outcome=RateFilterOutcome.FILTERED,
         data=_merge(data),
         flags=_merge(flags) if len(flags) == len(rate_filter_results) else None,
         weights={k: _merge([w[k] for w in weights]) for k in weights[0]}
@@ -1567,9 +1496,9 @@ def add_to_rate_filter_write_buffer(
         write_buffer (RateFilterWriteBuffer): The buffered segments, updated in place
         rate_filter_result (RateFilterResult): The outcome of filtering a segment
     """
-    if not rate_filter_result.success:
+    if rate_filter_result.outcome is not RateFilterOutcome.FILTERED:
         logger.debug(
-            f"Segment of {len(rate_filter_result.rows)} rows not filtered: {rate_filter_result.reason}"
+            f"Segment of {len(rate_filter_result.rows)} rows not filtered: {rate_filter_result.outcome.value}"
         )
         return
 
@@ -1601,8 +1530,10 @@ def make_rate_filter_plot_path(
 
 def _rate_filter_settings(
     tukey_tractor_options: TukeyTractorOptions,
+    integration_s: float | None = None,
 ) -> RateFilterSettings:
     """Extract the options needed to delay-rate filter a segment"""
+    nth_sidelobe_null = tukey_tractor_options.nth_sidelobe_null
     return RateFilterSettings(
         outer_width_ns=tukey_tractor_options.outer_width_ns,
         tukey_width_ns=tukey_tractor_options.tukey_width_ns,
@@ -1612,9 +1543,71 @@ def _rate_filter_settings(
         elevation_cut_deg=tukey_tractor_options.elevation_cut_deg,
         ignore_nyquist_zone=tukey_tractor_options.ignore_nyquist_zone,
         auto_width=tukey_tractor_options.auto_size,
-        auto_sidelobes=tukey_tractor_options.nth_sidelobe_null or 1,
+        auto_sidelobes=1 if nth_sidelobe_null is None else nth_sidelobe_null,
         ignore_rate_nyquist_zone=tukey_tractor_options.rate_filter_ignore_nyquist_zone,
+        nth_sidelobe_null=nth_sidelobe_null,
+        peak_shift_search=tukey_tractor_options.peak_shift_search,
+        peak_shift_search_width_ns=tukey_tractor_options.peak_shift_search_width_ns,
+        integration_s=integration_s,
     )
+
+
+def _validate_rate_filter_options(tukey_tractor_options: TukeyTractorOptions) -> None:
+    """Check the delay-rate filtering options before the measurement set is modified
+
+    Args:
+        tukey_tractor_options (TukeyTractorOptions): The options to check
+
+    Raises:
+        ValueError: Raised if an option is out of range
+    """
+    options = tukey_tractor_options
+    problems = [
+        message
+        for invalid, message in (
+            (
+                options.rate_filter_pad_timesteps < 0,
+                f"rate_filter_pad_timesteps={options.rate_filter_pad_timesteps} should not be negative",
+            ),
+            (
+                options.rate_filter_max_timesteps is not None
+                and options.rate_filter_max_timesteps < 1,
+                f"rate_filter_max_timesteps={options.rate_filter_max_timesteps} should be positive",
+            ),
+            (
+                options.rate_filter_min_timesteps < 2,
+                f"rate_filter_min_timesteps={options.rate_filter_min_timesteps} should be at least 2",
+            ),
+            (
+                options.rate_filter_max_plots < 0,
+                f"rate_filter_max_plots={options.rate_filter_max_plots} should not be negative",
+            ),
+            (
+                options.rate_filter_ignore_nyquist_zone is not None
+                and options.rate_filter_ignore_nyquist_zone < 1,
+                f"rate_filter_ignore_nyquist_zone={options.rate_filter_ignore_nyquist_zone} should be at least 1",
+            ),
+        )
+        if invalid
+    ]
+    if problems:
+        raise ValueError("; ".join(problems))
+
+
+def _get_integration_time_s(open_ms_tables: OpenMSTables) -> float:
+    """The integration time of a measurement set: the spacing of its timesteps.
+    The TIME column is shared by every baseline of a timestep (unlike TIME_CENTROID).
+
+    Args:
+        open_ms_tables (OpenMSTables): The open measurement set
+
+    Returns:
+        float: The integration time, in seconds
+    """
+    times = np.unique(open_ms_tables.main_table.getcol("TIME"))
+    if len(times) > 1:
+        return float(np.median(np.diff(times)))
+    return float(np.median(open_ms_tables.main_table.getcol("INTERVAL")))
 
 
 @dataclass
@@ -1651,6 +1644,7 @@ def make_rate_filter_processor(
     open_ms_tables: OpenMSTables,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays_list: list[WDelays],
+    settings: RateFilterSettings,
 ) -> RateFilterProcessor:
     """Set up the delay-rate filtering of a measurement set
 
@@ -1658,6 +1652,7 @@ def make_rate_filter_processor(
         open_ms_tables (OpenMSTables): The set of open handlers to the measurement set being processed
         tukey_tractor_options (TukeyTractorOptions): Options describing the rate filter
         w_delays_list (list[WDelays]): The objects to null
+        settings (RateFilterSettings): The settings of the delay-rate filter, including the integration time
 
     Returns:
         RateFilterProcessor: State used by ``process_rate_filter_chunk`` and ``finish_rate_filter``
@@ -1666,11 +1661,16 @@ def make_rate_filter_processor(
         open_ms_tables=open_ms_tables,
         tukey_tractor_options=tukey_tractor_options,
         w_delays_list=w_delays_list,
-        settings=_rate_filter_settings(tukey_tractor_options),
+        settings=settings,
         freq_chan=open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze() * u.Hz,
         accumulator=SegmentAccumulator(
             max_timesteps=tukey_tractor_options.rate_filter_max_timesteps,
             pad_timesteps=tukey_tractor_options.rate_filter_pad_timesteps,
+            # A segment is broken by a missing timestep, but not by the
+            # centroids of timesteps differing between baselines
+            max_time_gap_s=None
+            if settings.integration_s is None
+            else 1.5 * settings.integration_s,
         ),
         # Rows of a released segment are all in chunks that have already been
         # written, so deferring the segment writes can not be overwritten later
@@ -1698,24 +1698,28 @@ def _filter_rate_segments(
 ) -> None:
     """Filter, keep for plotting, and buffer the writing of released segments"""
     for segment in segments:
-        rate_filter_result = rate_filter_segment(
+        # Timesteps where an object meets the field remain flagged, and the rest of
+        # the segment is filtered in parts around them
+        for rate_filter_result in rate_filter_segments(
             segment=segment,
             freq_chan=rate_filter_processor.freq_chan,
             w_delays_list=rate_filter_processor.w_delays_list,
             settings=rate_filter_processor.settings,
             keep_diagnostics=_rate_filter_plot_wanted(rate_filter_processor),
-        )
-        record_rate_filter_result(rate_filter_processor.summary, rate_filter_result)
-        if rate_filter_result.success:
-            rate_filter_processor.applied_notches.setdefault(
-                (segment.ant_1, segment.ant_2), []
-            ).extend(rate_filter_result.notches)
-        # Plotting is slow, so is deferred until processing has finished
-        if rate_filter_result.diagnostics is not None:
-            rate_filter_processor.diagnostics.append(rate_filter_result.diagnostics)
-        add_to_rate_filter_write_buffer(
-            rate_filter_processor.write_buffer, rate_filter_result
-        )
+        ):
+            record_rate_filter_result(rate_filter_processor.summary, rate_filter_result)
+            if rate_filter_result.outcome is RateFilterOutcome.FILTERED:
+                rate_filter_processor.applied_notches.setdefault(
+                    (segment.ant_1, segment.ant_2), []
+                ).extend(rate_filter_result.notches)
+            # Plotting is slow, so is deferred until processing has finished
+            if rate_filter_result.diagnostics is not None and _rate_filter_plot_wanted(
+                rate_filter_processor
+            ):
+                rate_filter_processor.diagnostics.append(rate_filter_result.diagnostics)
+            add_to_rate_filter_write_buffer(
+                rate_filter_processor.write_buffer, rate_filter_result
+            )
 
 
 def process_rate_filter_chunk(
@@ -1729,11 +1733,12 @@ def process_rate_filter_chunk(
         rate_filter_processor (RateFilterProcessor): The delay-rate filtering state
         taper_chunk_result (TaperedChunkResult): The processed chunk, with its rate filter payload
     """
+    payload = taper_chunk_result.rate_payload
+    assert payload is not None, "Rate filter payload expected"
     _filter_rate_segments(
         rate_filter_processor=rate_filter_processor,
-        segments=accumulate_rate_filter_rows(
-            accumulator=rate_filter_processor.accumulator,
-            taper_chunk_result=taper_chunk_result,
+        segments=update_segment_accumulator(
+            accumulator=rate_filter_processor.accumulator, payload=payload
         ),
     )
 
@@ -1818,10 +1823,12 @@ def tukey_tractor(
             nth_sidelobe_null=None,  # type: ignore[arg-type]
         )
 
-    if tukey_tractor_options.rate_filter and not tukey_tractor_options.guard_field:
-        logger.warning(
-            "rate_filter is set without guard_field. Only rate_filter_guard_hz protects the field in delay-rate."
-        )
+    if tukey_tractor_options.rate_filter:
+        _validate_rate_filter_options(tukey_tractor_options)
+        if not tukey_tractor_options.guard_field:
+            logger.warning(
+                "rate_filter is set without guard_field. Only rate_filter_guard_hz protects the field in delay-rate."
+            )
 
     # acquire all the tables necessary to get unit information and data from
     open_ms_tables = get_open_ms_tables(
@@ -1900,20 +1907,27 @@ def tukey_tractor(
             )
             pool = ThreadPoolExecutor(max_workers=tukey_tractor_options.max_workers)
 
+        rate_filter_settings: RateFilterSettings | None = None
+        if tukey_tractor_options.rate_filter:
+            rate_filter_settings = _rate_filter_settings(
+                tukey_tractor_options=tukey_tractor_options,
+                integration_s=_get_integration_time_s(open_ms_tables),
+            )
+            rate_filter_processor = make_rate_filter_processor(
+                open_ms_tables=open_ms_tables,
+                tukey_tractor_options=tukey_tractor_options,
+                w_delays_list=w_delays_list,
+                settings=rate_filter_settings,
+            )
+
         # This could be offloaded to some other function if we end up
         # havig multiple modes
         partial_compute_func = partial(
             compute_tukey_multi_taper,
             tukey_tractor_options=tukey_tractor_options,
             w_delays_list=w_delays_list,
+            rate_filter_settings=rate_filter_settings,
         )
-
-        if tukey_tractor_options.rate_filter:
-            rate_filter_processor = make_rate_filter_processor(
-                open_ms_tables=open_ms_tables,
-                tukey_tractor_options=tukey_tractor_options,
-                w_delays_list=w_delays_list,
-            )
 
         logger.info(f"Incremental data flushes {write_back_required=}")
         start = time()

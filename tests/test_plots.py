@@ -223,10 +223,13 @@ def _footprint(delay_ns: float) -> RateFootprint:
     return RateFootprint(
         object_name="sun",
         delay_s=np.full(n_time, delay_ns * 1e-9),
+        delay_occupied_half_s=np.zeros(n_time),
+        delay_margin_s=10e-9,
         rate_low_hz=np.full(n_time, 0.016),
         rate_high_hz=np.full(n_time, 0.022),
-        delay_half_width_s=np.full(n_time, 10e-9),
         rate_margin_hz=0.004,
+        active=np.ones(n_time, dtype=bool),
+        all_rates=np.zeros(n_time, dtype=bool),
     )
 
 
