@@ -1,5 +1,7 @@
 [build-system]
-requires = ["hatchling>=1.26", "hatch-vcs"]
+# hatchling 1.30 and 1.32 write Metadata-Version 2.5, which the twine pinned by
+# hynek/build-and-inspect-python-package rejects
+requires = ["hatchling>=1.26,<1.30", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 
