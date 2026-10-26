@@ -21,8 +21,12 @@ from jolly_roger.hour_angles import (
 from jolly_roger.uvws import (
     SunScale,
     UVWs,
+    WDelays,
     compute_sun_uv_scales,
     compute_uvw_flags,
+    construct_rate_guard_region,
+    get_object_delay_for_ms,
+    get_w_rates,
     uvw_flagger,
     xyz_to_uvw,
 )
@@ -233,4 +237,149 @@ def test_xyz_to_uvw_frame_independent() -> None:
         .uvws.to(u.m)
         .value,
         -_uvws(icrs),
+    )
+
+
+def test_construct_rate_guard_region() -> None:
+    """For a uv-track moving at a constant speed the guard is theta * speed / c"""
+    n_baseline, n_time = 2, 10
+    time_s = np.arange(n_time) * 10.0
+    speed_m_s = np.array([1.0, 3.0])
+    uvws = np.zeros((3, n_baseline, n_time))
+    uvws[0] = speed_m_s[:, None] * time_s[None, :] * 0.6
+    uvws[1] = speed_m_s[:, None] * time_s[None, :] * 0.8
+
+    radial_fov = 1.0 * u.deg
+    guard = construct_rate_guard_region(
+        uvws=uvws * u.m, time_s=time_s, radial_fov=radial_fov
+    )
+
+    assert guard.shape == (n_baseline, n_time)
+    expected = np.deg2rad(1.0) * speed_m_s / 299792458.0
+    np.testing.assert_allclose(guard.value, np.repeat(expected[:, None], n_time, 1))
+
+    double = construct_rate_guard_region(
+        uvws=uvws * u.m, time_s=time_s, radial_fov=2 * radial_fov
+    )
+    np.testing.assert_allclose(double.value, 2 * guard.value)
+
+
+def test_get_w_rates_derived_from_delays() -> None:
+    """Without attached rates they are derived from the delays and time map"""
+    time_s = 5e9 + np.arange(5) * 10.0
+    w_delays = WDelays(
+        object_name="sun",
+        w_delays=(2e-11 * (time_s - time_s[0]) * u.s)[None, :],
+        b_map={(0, 1): 0},
+        time_map={t * u.s: idx for idx, t in enumerate(time_s)},
+        elevation=np.full(5, 45.0) * u.deg,
+    )
+    np.testing.assert_allclose(get_w_rates(w_delays).value, 2e-11)
+
+    attached = WDelays(
+        object_name="sun",
+        w_delays=w_delays.w_delays,
+        b_map=w_delays.b_map,
+        time_map=w_delays.time_map,
+        elevation=w_delays.elevation,
+        w_rates=np.full((1, 5), 7.0) * u.dimensionless_unscaled,
+    )
+    np.testing.assert_allclose(get_w_rates(attached).value, 7.0)
+
+
+def test_get_w_rates_unordered_time_map() -> None:
+    """Rates derived from a time map out of time order (e.g. the 'first seen' order
+    when TIME_CENTROID differs between baselines) match those derived in order"""
+    time_s = 5e9 + np.arange(6) * 10.0
+    delays_s = 1e-12 * (time_s - time_s[0]) ** 2
+    shuffled = np.array([3, 0, 5, 1, 4, 2])
+
+    def _rates(order: np.ndarray) -> np.ndarray:
+        w_delays = WDelays(
+            object_name="sun",
+            w_delays=(delays_s[order] * u.s)[None, :],
+            b_map={(0, 1): 0},
+            time_map={t * u.s: idx for idx, t in enumerate(time_s[order])},
+            elevation=np.full(6, 45.0) * u.deg,
+        )
+        return get_w_rates(w_delays).value[0]
+
+    in_order = _rates(np.arange(6))
+    np.testing.assert_allclose(in_order[1:-1], 2e-12 * (time_s - time_s[0])[1:-1])
+    np.testing.assert_allclose(_rates(shuffled), in_order[shuffled])
+
+
+def test_get_object_delay_attaches_rates(ms_example: Path) -> None:
+    with table(str(ms_example / "FIELD"), ack=False) as tab:
+        phase_dir = tab.getcol("PHASE_DIR")[0, 0]
+    phase = SkyCoord(*phase_dir, unit="rad")
+
+    (without_guard,) = get_object_delay_for_ms(
+        ms_path=ms_example, phase_dir=phase, object_name="sun"
+    )
+    assert without_guard.w_rates is not None
+    assert without_guard.w_rates.shape == without_guard.w_delays.shape
+    assert without_guard.rate_guard_region is None
+    # Rates should be consistent with the delays
+    np.testing.assert_allclose(
+        without_guard.w_rates.value,
+        get_w_rates(
+            WDelays(
+                object_name="sun",
+                w_delays=without_guard.w_delays,
+                b_map=without_guard.b_map,
+                time_map=without_guard.time_map,
+                elevation=without_guard.elevation,
+            )
+        ).value,
+    )
+
+    (with_guard,) = get_object_delay_for_ms(
+        ms_path=ms_example, phase_dir=phase, object_name="sun", radial_fov=1 * u.deg
+    )
+    assert with_guard.rate_guard_region is not None
+    assert with_guard.rate_guard_region.shape == with_guard.w_delays.shape
+    assert np.all(with_guard.rate_guard_region.value >= 0)
+
+
+def test_w_rates_match_earth_rotation() -> None:
+    """The delay-rate between a phase centre and another fixed direction follows
+    from Earth rotation, dw/dt = -omega_E * u * cos(dec), for each direction"""
+    ref = _load_sb56289_uvw()
+    ant_xyz = ref["ant_xyz"]
+    baselines = get_baselines(ant_xyz)
+    location = get_location(ant_xyz)
+    times_s = np.min(ref["time_centroid"]) + np.arange(20) * 10.0
+    phase = SkyCoord(*ref["phase_dir"], unit="rad")
+    offset = phase.directional_offset_by(30 * u.deg, 5 * u.deg)
+
+    def _hour_angles(position: SkyCoord) -> PositionHourAngles:
+        return make_hour_angles(
+            times_mjds=times_s * u.s, location=location, position=position
+        )
+
+    uvw_phase = xyz_to_uvw(baselines, _hour_angles(phase)).uvws.to(u.m).value
+    uvw_offset = xyz_to_uvw(baselines, _hour_angles(offset)).uvws.to(u.m).value
+    w_delays = WDelays(
+        object_name="offset",
+        w_delays=((uvw_offset[2] - uvw_phase[2]) / 299792458.0) * u.s,
+        b_map=baselines.b_map,
+        time_map=_hour_angles(phase).time_map,
+        elevation=np.zeros(len(times_s)) * u.deg,
+    )
+
+    omega_earth = 7.292115e-5  # rad/s, relative to the celestial frame
+    expected = (
+        -omega_earth
+        * (
+            uvw_offset[0] * np.cos(offset.dec.rad)
+            - uvw_phase[0] * np.cos(phase.dec.rad)
+        )
+        / 299792458.0
+    )
+    rates = get_w_rates(w_delays).value
+    # Agreement to ~1% of the largest rate: the rest is the tilt between the
+    # ICRS pole and Earth's rotation axis (precession since J2000)
+    np.testing.assert_allclose(
+        rates, expected, rtol=0, atol=0.02 * np.abs(expected).max()
     )

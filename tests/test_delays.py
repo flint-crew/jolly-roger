@@ -6,7 +6,12 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 from numpy import ma
 
-from jolly_roger.delays import data_to_delay_time, delay_time_to_data
+from jolly_roger.delays import (
+    array_to_delay_rate,
+    data_to_delay_time,
+    delay_rate_to_array,
+    delay_time_to_data,
+)
 from jolly_roger.tractor import DataChunk
 
 
@@ -141,3 +146,42 @@ def test_round_trip_various_channel_counts(n_chan: int):
         atol=1e-10,
         err_msg=f"Round-trip failed for n_chan={n_chan}",
     )
+
+
+def test_delay_rate_round_trip():
+    """Visibilities should survive a forward + inverse delay-rate transform"""
+    data = make_data_chunk(n_time=12, n_chan=16, mask_fraction=0.0)
+    time_s = 5e9 + np.arange(12) * 10.0
+
+    delay_rate = array_to_delay_rate(
+        masked_data=data.masked_data, freq_chan=data.freq_chan, time_s=time_s
+    )
+    assert delay_rate.delay_rate.shape == data.masked_data.shape
+    assert delay_rate.rate.unit.is_equivalent(u.Hz)
+    assert len(delay_rate.rate) == 12
+    np.testing.assert_allclose(
+        np.diff(delay_rate.rate.to(u.Hz).value), 1.0 / (12 * 10.0)
+    )
+
+    recovered = delay_rate_to_array(delay_rate)
+    np.testing.assert_allclose(recovered, data.masked_data.data, atol=1e-10)
+
+
+def test_delay_rate_tone_location():
+    """A tone in frequency and time lands at the expected delay and rate"""
+    n_time, n_chan = 32, 32
+    freq_hz = np.linspace(1e9, 1.031e9, n_chan)
+    time_s = np.arange(n_time) * 1.0
+    delay_s, rate_hz = 4 / (n_chan * 1e6), 3 / (n_time * 1.0)
+    vis = np.exp(2j * np.pi * (freq_hz[None, :] * delay_s + time_s[:, None] * rate_hz))[
+        ..., None
+    ]
+
+    delay_rate = array_to_delay_rate(
+        masked_data=ma.masked_array(vis), freq_chan=freq_hz * u.Hz, time_s=time_s
+    )
+    rate_idx, delay_idx, _ = np.unravel_index(
+        np.argmax(np.abs(delay_rate.delay_rate)), delay_rate.delay_rate.shape
+    )
+    assert delay_rate.rate[rate_idx].to(u.Hz).value == pytest.approx(rate_hz)
+    assert delay_rate.delay[delay_idx].to(u.s).value == pytest.approx(delay_s)
