@@ -9,6 +9,12 @@ from typing import Any
 import numpy as np
 import pytest
 from astropy.coordinates import EarthLocation, SkyCoord
+from astropy.utils import iers
+
+# Use the Earth orientation tables bundled with astropy (astropy-iers-data)
+# so tests don't depend on network access to the IERS servers.
+iers.conf.auto_download = False
+iers.conf.auto_max_age = None
 
 # Sesame-resolved position of PKSB1934-638, hardcoded so tests don't depend
 # on network access to the CDS name resolver.
