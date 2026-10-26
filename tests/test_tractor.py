@@ -263,7 +263,6 @@ def _peak_search_chunk(
         freq_chan=freq_chan,
         phase_center=SkyCoord(ra=0.0 * u.deg, dec=0.0 * u.deg),
         uvws_phase_center=np.zeros((n_time, 3)) * u.m,
-        time=Time.now(),
         time_mjds=np.arange(n_time, dtype=float),
         ant_1=np.zeros(n_time, dtype=np.int64),
         ant_2=np.ones(n_time, dtype=np.int64),
