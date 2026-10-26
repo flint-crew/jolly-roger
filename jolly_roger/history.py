@@ -26,7 +26,9 @@ def dataclass_to_app_params(options: Any) -> list[str]:
     """
     if not is_dataclass(options):
         return []
-    return [f"{field.name} = {getattr(options, field.name)!r}" for field in fields(options)]
+    return [
+        f"{field.name} = {getattr(options, field.name)!r}" for field in fields(options)
+    ]
 
 
 def add_history(
