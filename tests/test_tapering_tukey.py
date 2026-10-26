@@ -35,6 +35,23 @@ def test_get_2d_taper() -> None:
     assert taper.shape[1] == 10
 
 
+def test_get_2d_taper_wraps_at_half_period() -> None:
+    """A notch centred near the top of an even-length Fourier axis must wrap
+    onto the bottom of the axis with the true period (N * dx), not 2 * max(x)"""
+    n = 8
+    x = np.fft.fftshift(np.fft.fftfreq(n, d=1 / n))  # -4 ... 3, period 8
+
+    taper = get_2d_taper(
+        x=x, outer_width=1.2, tukey_width=0.2, tukey_offset=np.array([3.5])
+    )[:, 0]
+
+    # x = 3 and x = -4 are both 0.5 from the centre once wrapped, so fully nulled
+    assert taper[x == 3][0] == 0.0
+    assert taper[x == -4][0] == 0.0
+    # x = 1 is 2.5 away, beyond the notch
+    assert taper[x == 1][0] == 1.0
+
+
 def test_verify_overlap_widths_with_reset() -> None:
     """See if the resetting of outer_width in instances
     where it is too small for the tukey width is correctly handled.

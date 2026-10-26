@@ -37,6 +37,23 @@ def symmetric_domain_wrap(
     return np.angle(wrapped_values) / domain_mapping
 
 
+def axis_half_period(axis: NDArray[np.floating[Any]]) -> float:
+    """The half-period of a regularly sampled cyclic axis, such as the (shifted)
+    frequencies of a discrete Fourier transform. With ``N`` samples spaced by ``dx``
+    the period is ``N * dx``, so values wrap at ``+/- N * dx / 2``. This differs from
+    the largest value of the axis, which for an even ``N`` is one sample short.
+
+    Args:
+        axis (NDArray[np.floating[Any]]): The regularly sampled axis
+
+    Returns:
+        float: Half of the period of the axis
+    """
+    axis = np.asarray(axis)
+    spacing = float(np.abs(np.mean(np.diff(axis))))
+    return len(axis) * spacing / 2
+
+
 def calculate_nyquist_zone(
     values: NDArray[np.floating[Any]], upper_limit: float
 ) -> NDArray[np.int_]:

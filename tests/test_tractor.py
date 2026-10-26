@@ -400,3 +400,31 @@ def test_compute_tukey_multi_taper_skips_below_elevation_cut() -> None:
 
     assert result.nothing_to_do
     assert result.data_chunk is data_chunk
+
+
+def test_compute_tukey_multi_taper_last_object_below_elevation_cut() -> None:
+    """An object below the elevation cut must not discard the delay spectrum
+    formed for an earlier object that is tapered"""
+    n_time = 8
+    data_chunk = _make_data_chunk(n_time=n_time)
+    above = _make_w_delays(n_time=n_time)
+    below = _make_w_delays(n_time=n_time, elevation_deg=-10.0)
+
+    result = compute_tukey_multi_taper(
+        data_chunk=data_chunk,
+        tukey_tractor_options=TukeyTractorOptions(),
+        w_delays_list=[above, below],
+    )
+    expected = compute_tukey_multi_taper(
+        data_chunk=_make_data_chunk(n_time=n_time),
+        tukey_tractor_options=TukeyTractorOptions(),
+        w_delays_list=[above],
+    )
+
+    assert not result.nothing_to_do
+    assert result.data_chunk is not None
+    assert expected.data_chunk is not None
+    assert np.allclose(
+        result.data_chunk.masked_data.filled(0),
+        expected.data_chunk.masked_data.filled(0),
+    )
