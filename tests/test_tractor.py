@@ -428,3 +428,31 @@ def test_compute_tukey_multi_taper_last_object_below_elevation_cut() -> None:
         result.data_chunk.masked_data.filled(0),
         expected.data_chunk.masked_data.filled(0),
     )
+
+
+def test_compute_tukey_multi_taper_sidelobes_with_skipped_object() -> None:
+    """Nulling sidelobes keeps the delay spectrum of a tapered object when a
+    later object is skipped, and the sidelobe notches change the data"""
+    n_time = 8
+    above = _make_w_delays(n_time=n_time)
+    below = _make_w_delays(n_time=n_time, elevation_deg=-10.0)
+
+    # Enough channels that the delay axis (+/- 128 ns) is wider than the notches
+    main_lobe = compute_tukey_multi_taper(
+        data_chunk=_make_data_chunk(n_time=n_time, n_chan=256),
+        tukey_tractor_options=TukeyTractorOptions(),
+        w_delays_list=[above],
+    )
+    with_sidelobes = compute_tukey_multi_taper(
+        data_chunk=_make_data_chunk(n_time=n_time, n_chan=256),
+        tukey_tractor_options=TukeyTractorOptions(nth_sidelobe_null=1),
+        w_delays_list=[above, below],
+    )
+
+    assert not with_sidelobes.nothing_to_do
+    assert main_lobe.data_chunk is not None
+    assert with_sidelobes.data_chunk is not None
+    assert not np.allclose(
+        with_sidelobes.data_chunk.masked_data.filled(0),
+        main_lobe.data_chunk.masked_data.filled(0),
+    )
