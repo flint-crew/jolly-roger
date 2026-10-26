@@ -39,7 +39,11 @@ from jolly_roger.tapering.tukey import get_2d_taper
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_from_tables
 from jolly_roger.weights import scale_multiple_weights, select_weight_columns
-from jolly_roger.wrap import calculate_nyquist_zone, symmetric_domain_wrap
+from jolly_roger.wrap import (
+    axis_half_period,
+    calculate_nyquist_zone,
+    symmetric_domain_wrap,
+)
 
 
 def tukey_taper(
@@ -690,7 +694,7 @@ def compute_tukey_taper(
     # The delay should be symmetric
     tukey_x_offset_sec = symmetric_domain_wrap(
         values=tukey_x_offset.to("s").value,
-        upper_limit=np.max(delay_time.delay).to("s").value,
+        upper_limit=axis_half_period(delay_time.delay.to("s").value),
     )
 
     # Make taper with all units in seconds
@@ -769,8 +773,8 @@ def compute_tukey_taper(
     # than one wrap away
     # Calculate the offset account of nyquist sampling
     no_wraps_for_offset = calculate_nyquist_zone(
-        values=original_tukey_x_offset.value,
-        upper_limit=np.max(delay_time.delay).value,
+        values=original_tukey_x_offset.to("s").value,
+        upper_limit=axis_half_period(delay_time.delay.to("s").value),
     )
     ignore_wrapping_for = (
         no_wraps_for_offset > tukey_tractor_options.ignore_nyquist_zone
@@ -923,7 +927,10 @@ def compute_tukey_multi_taper(
             w_delays=w_delays,
             delay_time=delay_time,
         )
-        delay_time = taper_result.delay_time
+        # An object that is skipped (e.g. below the elevation cut) has no
+        # delay_time, and should not discard the one formed for an earlier object
+        if taper_result.delay_time is not None:
+            delay_time = taper_result.delay_time
         taper_results.append(taper_result)
 
         if (
@@ -946,7 +953,8 @@ def compute_tukey_multi_taper(
                     delay_time=delay_time,
                     sidelobe_offset=sidelobe_offset * sign,
                 )
-                delay_time = taper_result.delay_time
+                if taper_result.delay_time is not None:
+                    delay_time = taper_result.delay_time
                 taper_results.append(taper_result)
 
     # Handle all the cases. If all data chunks showed nothing to do we can
