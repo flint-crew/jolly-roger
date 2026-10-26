@@ -3,6 +3,7 @@ when applying a filter in delay space."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -175,3 +176,79 @@ def get_2d_taper(
     taper[right_idx] = 1 - right_taper[right_idx]
 
     return taper
+
+
+@dataclass(frozen=True)
+class TukeyKernelSummary:
+    """The convolution over frequency that is equivalent to nulling with tukey
+    notches in delay. Each notch removes ``effective_width_s`` of delay, which is
+    the same as subtracting the visibilities convolved with a kernel whose
+    largest weight on any single channel is ``effective_width_s * channel_width``
+    and whose first zero is at ``1 / effective_width_s``."""
+
+    effective_width_s: float
+    """Area of one notch's depth profile, ``2 * outer_width - tukey_width``, in seconds"""
+    number_of_notches: int
+    """Number of notches placed per object (one, plus any nulled sidelobes)"""
+    peak_channel_weight: float
+    """Largest fraction of any single channel that can enter another channel, summed over the notches"""
+    reach_hz: float
+    """Frequency separation over which channels influence each other (first zero of the kernel), in Hz"""
+    delay_resolution_s: float
+    """Delay resolution of the data, ``1 / bandwidth``, in seconds"""
+
+    @property
+    def resolved(self) -> bool:
+        """Whether a notch is at least as wide as the delay resolution of the data"""
+        return self.effective_width_s >= self.delay_resolution_s
+
+
+def summarise_tukey_kernel(
+    outer_width_s: float,
+    tukey_width_s: float,
+    channel_width_hz: float,
+    bandwidth_hz: float,
+    number_of_notches: int = 1,
+) -> TukeyKernelSummary:
+    """Describe the convolution over frequency that a tukey notch in delay is
+    equivalent to.
+
+    Args:
+        outer_width_s (float): Half-width of the notch, in seconds
+        tukey_width_s (float): Width of the transition at each edge of the notch, in seconds
+        channel_width_hz (float): The channel width, in Hz
+        bandwidth_hz (float): The total bandwidth transformed to delay, in Hz
+        number_of_notches (int, optional): Notches placed per object (one, plus any nulled sidelobes). Defaults to 1.
+
+    Returns:
+        TukeyKernelSummary: The size and reach of the equivalent kernel
+    """
+    # Matches verify_overlap_widths, which widens a notch narrower than its transition
+    outer_width_s = max(outer_width_s, tukey_width_s)
+    effective_width_s = 2 * outer_width_s - tukey_width_s
+
+    return TukeyKernelSummary(
+        effective_width_s=effective_width_s,
+        number_of_notches=number_of_notches,
+        peak_channel_weight=number_of_notches
+        * effective_width_s
+        * abs(channel_width_hz),
+        reach_hz=1.0 / effective_width_s,
+        delay_resolution_s=1.0 / abs(bandwidth_hz),
+    )
+
+
+def describe_tukey_kernel(summary: TukeyKernelSummary) -> str:
+    """A plain description of a ``TukeyKernelSummary`` for logs and the HISTORY table"""
+    notches = (
+        "each object"
+        if summary.number_of_notches == 1
+        else f"each object and its sidelobes ({summary.number_of_notches} notches)"
+    )
+    return (
+        f"Delay notch: removes about {summary.effective_width_s * 1e9:.3g} ns of delay "
+        f"around {notches}. Each channel can pick up at most "
+        f"{summary.peak_channel_weight * 100:.2g}% of the value of any other single "
+        f"channel, and channels up to about {summary.reach_hz / 1e6:.3g} MHz apart "
+        "influence each other."
+    )

@@ -29,13 +29,19 @@ from jolly_roger.baselines import (
     get_open_ms_tables,
 )
 from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
+from jolly_roger.history import add_history, dataclass_to_app_params
 from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
 from jolly_roger.response import (
     calculate_expected_sinc_width,
     get_delay_of_nth_sidelobe,
 )
-from jolly_roger.tapering.tukey import get_2d_taper
+from jolly_roger.tapering.tukey import (
+    TukeyKernelSummary,
+    describe_tukey_kernel,
+    get_2d_taper,
+    summarise_tukey_kernel,
+)
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
 from jolly_roger.uvws import WDelays, get_object_delay_from_tables
 from jolly_roger.weights import scale_multiple_weights, select_weight_columns
@@ -1112,6 +1118,8 @@ class TukeyTractorResults:
     """The name of the column that has the modified/tapered visibilities"""
     output_plots: list[Path] | None = None
     """The output plots that were created, if any"""
+    kernel_summary: TukeyKernelSummary | None = None
+    """The convolution over frequency equivalent to the notch that was applied"""
 
 
 def compute_auto_taper_widths(
@@ -1155,6 +1163,41 @@ def _set_auto_taper_widths(
     return compute_auto_taper_widths(
         freq_chan=freq_chan, tukey_tractor_options=tukey_tractor_options
     )
+
+
+def report_tukey_kernel(
+    open_ms_tables: OpenMSTables, tukey_tractor_options: TukeyTractorOptions
+) -> TukeyKernelSummary:
+    """Log the convolution over frequency that the configured notch is equivalent
+    to, and warn should the notch be narrower than the delay resolution
+
+    Args:
+        open_ms_tables (OpenMSTables): Collection of MS tables to inspect
+        tukey_tractor_options (TukeyTractorOptions): The final (e.g. auto-sized) taper options
+
+    Returns:
+        TukeyKernelSummary: The size and reach of the equivalent kernel
+    """
+    freq_chan = np.atleast_1d(open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze())
+    channel_width_hz = (
+        float(np.abs(np.mean(np.diff(freq_chan)))) if len(freq_chan) > 1 else 0.0
+    )
+    sidelobes = tukey_tractor_options.nth_sidelobe_null or 0
+    summary = summarise_tukey_kernel(
+        outer_width_s=tukey_tractor_options.outer_width_ns * 1e-9,
+        tukey_width_s=tukey_tractor_options.tukey_width_ns * 1e-9,
+        channel_width_hz=channel_width_hz,
+        bandwidth_hz=channel_width_hz * len(freq_chan),
+        number_of_notches=1 + 2 * sidelobes,
+    )
+    logger.info(describe_tukey_kernel(summary))
+    if not summary.resolved:
+        logger.warning(
+            f"The delay notch ({summary.effective_width_s * 1e9:.3g} ns) is narrower "
+            f"than the delay resolution of the data ({summary.delay_resolution_s * 1e9:.3g} ns, "
+            "one over the bandwidth), so it removes little or nothing. Consider --auto-size."
+        )
+    return summary
 
 
 def write_back_results(
@@ -1267,6 +1310,10 @@ def tukey_tractor(
         tukey_tractor_options = _set_auto_taper_widths(
             open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
         )
+
+    kernel_summary = report_tukey_kernel(
+        open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
+    )
 
     weight_columns: Sequence[str] | None = select_weight_columns(
         ms_path=ms_path, weight_column=tukey_tractor_options.weight_column
@@ -1402,10 +1449,19 @@ def tukey_tractor(
     else:
         plot_paths = None
 
+    if not tukey_tractor_options.dry_run:
+        add_history(
+            ms_path=open_ms_tables.ms_path,
+            messages=[describe_tukey_kernel(kernel_summary)],
+            origin="jolly_tractor tukey",
+            app_params=dataclass_to_app_params(tukey_tractor_options),
+        )
+
     return TukeyTractorResults(
         ms_path=open_ms_tables.ms_path,
         output_column=tukey_tractor_options.output_column,
         output_plots=plot_paths,
+        kernel_summary=kernel_summary,
     )
 
 
