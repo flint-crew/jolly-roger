@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
-from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,22 +12,19 @@ from casacore.tables import table
 
 from jolly_roger import __version__
 from jolly_roger.logging import logger
+from jolly_roger.utils import options_items
 
 
 def dataclass_to_app_params(options: Any) -> list[str]:
-    """Format the fields of a dataclass as ``name = value`` strings for APP_PARAMS
+    """Format the fields of an options class as ``name = value`` strings for APP_PARAMS
 
     Args:
-        options (Any): A dataclass instance
+        options (Any): A dataclass or pydantic options instance
 
     Returns:
-        list[str]: One string per field. Empty if ``options`` is not a dataclass.
+        list[str]: One string per field. Empty if ``options`` is neither.
     """
-    if not is_dataclass(options):
-        return []
-    return [
-        f"{field.name} = {getattr(options, field.name)!r}" for field in fields(options)
-    ]
+    return [f"{name} = {value!r}" for name, value in options_items(options)]
 
 
 def add_history(

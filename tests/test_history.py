@@ -8,6 +8,7 @@ from pathlib import Path
 from casacore.tables import table
 
 from jolly_roger.history import add_history, dataclass_to_app_params
+from jolly_roger.tractor import TukeyTractorOptions
 
 
 @dataclass
@@ -20,6 +21,13 @@ def test_dataclass_to_app_params() -> None:
     """Fields become name = value strings; anything else gives nothing"""
     assert dataclass_to_app_params(_Options()) == ["width_ns = 10.0", "name = 'sun'"]
     assert dataclass_to_app_params({"width_ns": 10.0}) == []
+
+
+def test_app_params_from_tractor_options() -> None:
+    """The tractor's options (pydantic) are recorded, not silently dropped"""
+    params = dataclass_to_app_params(TukeyTractorOptions(outer_width_ns=25.0))
+    assert "outer_width_ns = 25.0" in params
+    assert len(params) == len(TukeyTractorOptions.model_fields)
 
 
 def test_add_history_rows(ms_example: Path) -> None:
