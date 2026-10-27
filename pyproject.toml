@@ -39,7 +39,7 @@ dependencies = [
 
 [project.optional-dependencies]
 clean = [
-    "rm-lite>=2026.10.0",
+    "rm-lite==2026.10.0",
 ]
 
 [project.urls]
