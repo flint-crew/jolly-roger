@@ -37,6 +37,11 @@ dependencies = [
     "capn-crunch>=1.1.0",
 ]
 
+[project.optional-dependencies]
+clean = [
+    "rm-lite>=2026.10.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/flint-crew/jolly-roger"
 "Bug Tracker" = "https://github.com/flint-crew/jolly-roger/issues"

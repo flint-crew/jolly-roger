@@ -63,7 +63,7 @@ jobs:
           allow-prereleases: true
 
       - name: Install package
-        run: uv sync
+        run: uv sync --all-extras
 
       - name: Test package
         run: >-
