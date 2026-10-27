@@ -39,6 +39,17 @@ If the `--taper-towards-object` argument is used the tukey taper is inverted to 
 ![Tukey Parameterisation - inverted](images/example_inverted_tukey.png)
 
 
+## Python interface
+
+The nulling can be used from Python without the CLI, either on a measurement set or directly on arrays.
+
+- `tukey_tractor(ms_path, tukey_tractor_options)` runs the full `jolly_tractor tukey` process on a measurement set.
+- `prepare_tractor(ms_path, tractor_options)` opens the measurement set, prepares the output column and predicts the delay of each object to null. `run_tractor_chunks(setup, chunk_func, tractor_options)` then reads the data in chunks of rows, passes each `DataChunk` to `chunk_func`, and writes the returned `TaperedChunkResult` back. Any nulling method can be run over a measurement set this way.
+- `compute_tukey_multi_taper(data_chunk, tukey_tractor_options, w_delays_list)` applies the delay notch to one `DataChunk` and does no measurement set I/O. A `DataChunk` can be built directly from arrays: only `masked_data` (rows, channels, polarisations), `freq_chan`, `time_mjds`, `ant_1`, `ant_2` and `chunk_size` are used.
+- `get_object_delay_from_tables` (or `get_object_delay_for_ms`) predicts the delay of each object for every baseline and time, as the `WDelays` passed to `compute_tukey_multi_taper`.
+
+`TractorOptions` holds the options shared by every nulling method (columns, chunking, workers, plots, guard field); `TukeyTractorOptions` adds the notch settings.
+
 ## CLI
 
 
