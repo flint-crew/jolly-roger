@@ -28,7 +28,7 @@ from jolly_roger.deconvolve import (
     describe_clean_run,
     estimate_visibility_noise,
 )
-from jolly_roger.tractor import DataChunk, get_parser
+from jolly_roger.tractor import DataChunk, cli, get_parser
 from jolly_roger.uvws import WDelays
 
 N_CHAN = 128
@@ -452,3 +452,23 @@ def test_clean_subcommand_options() -> None:
     assert not create_options_from_parser(
         parser_namespace=args, options_class=CleanTractorOptions
     ).guard_field
+
+
+def test_cli_runs_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        "jolly_roger.deconvolve.clean_tractor",
+        lambda ms_path, clean_tractor_options: calls.append(
+            (ms_path, clean_tractor_options)
+        ),
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["jolly_tractor", "clean", "example.ms", "--mask-sigma", "6"]
+    )
+
+    cli()
+
+    assert len(calls) == 1
+    ms_path, options = calls[0]
+    assert ms_path == Path("example.ms")
+    assert options.mask_sigma == 6
