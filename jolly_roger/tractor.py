@@ -1663,6 +1663,24 @@ def get_parser() -> ArgumentParser:
         options_class=TukeyTractorOptions,
     )
 
+    # Imported here as jolly_roger.deconvolve builds on this module
+    from jolly_roger.deconvolve import CleanTractorOptions  # noqa: PLC0415
+
+    clean_parser = subparsers.add_parser(
+        name="clean",
+        help="Remove objects outside the field by CLEAN in delay (needs jolly-roger[clean])",
+        formatter_class=ArgumentDefaultsHelpFormatter,
+    )
+    clean_parser.add_argument(
+        "ms_path",
+        type=Path,
+        help="The measurement set to process with delay CLEAN",
+    )
+    clean_parser = add_options_to_parser(
+        parser=clean_parser,
+        options_class=CleanTractorOptions,
+    )
+
     return parser
 
 
@@ -1678,6 +1696,17 @@ def cli() -> None:
         )
 
         tukey_tractor(ms_path=args.ms_path, tukey_tractor_options=tukey_tractor_options)
+    elif args.mode == "clean":
+        from jolly_roger.deconvolve import (  # noqa: PLC0415
+            CleanTractorOptions,
+            clean_tractor,
+        )
+
+        clean_tractor_options = create_options_from_parser(
+            parser_namespace=args,
+            options_class=CleanTractorOptions,
+        )
+        clean_tractor(ms_path=args.ms_path, clean_tractor_options=clean_tractor_options)
     else:
         parser.print_help()
 

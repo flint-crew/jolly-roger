@@ -50,9 +50,13 @@ The nulling can be used from Python without the CLI, either on a measurement set
 
 `TractorOptions` holds the options shared by every nulling method (columns, chunking, workers, plots, guard field); `TukeyTractorOptions` adds the notch settings.
 
-## Delay CLEAN (Python interface)
+## Delay CLEAN
 
-`jolly_roger.deconvolve` removes bright objects outside the field by CLEAN in delay, as an alternative to the notch. It needs the optional `rm-lite` dependency: `pip install 'jolly-roger[clean]'`.
+`jolly_tractor clean` (and `jolly_roger.deconvolve`) removes bright objects outside the field by CLEAN in delay, as an alternative to the notch. It needs the optional `rm-lite` dependency: `pip install 'jolly-roger[clean]'`.
+
+```bash
+jolly_tractor clean my.ms --target-objects sun --output-column CORRECTED_DATA
+```
 
 - Each visibility spectrum is transformed to delay with an FFT. The delay spread function (the delay spectrum of a point source) is the FFT of the channel weights, so flagged channels are accounted for exactly.
 - A Hogbom CLEAN (`rm_lite.utils.clean.minor_loop`) runs over the whole delay axis. Its mask starts at the brightest emission and grows into connected emission above the noise, so the object's size, structure and spectrum need not be known.
@@ -60,7 +64,10 @@ The nulling can be used from Python without the CLI, either on a measurement set
 - Rows where the subtracted emission runs into the field's delay range are flagged, because there the object and field cannot be separated.
 - The noise sets the CLEAN mask and threshold. Unless it is given, it is estimated from each spectrum by `estimate_visibility_noise`: each long run of unflagged channels is windowed and transformed to delay, and a low quantile of the delay amplitudes is compared with the Rayleigh distribution of noise. Emission only raises the estimate, so it errs high (by about 20% next to an object 10^4 times brighter than the noise).
 
-`delay_clean_spectrum` works on one spectrum and `compute_delay_clean` on a `DataChunk`, so the latter can be passed to `run_tractor_chunks`.
+- Only rows where an object in `--target-objects` is above the elevation cut are cleaned. The field's delay range on each baseline is `--field-delay-ns` plus the guard band, which is sized from the field of view and is on by default for `clean` (on the command line, `--guard-field` turns it off).
+- The run is summarised in the log and the measurement set's HISTORY table: how many spectra were cleaned and rows flagged; how bright a spectral line in the field must be before it is partly subtracted; and the residual left at the band edges compared with mid-band.
+
+`delay_clean_spectrum` works on one spectrum, `compute_delay_clean` on a `DataChunk`, and `compute_clean_tractor` on a `DataChunk` with the objects' predicted delays, as passed to `run_tractor_chunks` by `clean_tractor`.
 
 ## CLI
 

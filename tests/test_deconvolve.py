@@ -3,21 +3,33 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
 from astropy import units as u
+from capn_crunch import create_options_from_parser
+from casacore.tables import table
 from numpy import ma
 from numpy.typing import NDArray
 
 from jolly_roger.deconvolve import (
+    CleanTractorOptions,
     DelayCleanOptions,
+    DelayCleanStatistics,
     MissingCleanDependencyError,
+    clean_tractor,
+    compute_clean_tractor,
     compute_delay_clean,
     delay_clean_spectrum,
+    describe_band_edges,
+    describe_clean_line_limit,
+    describe_clean_run,
     estimate_visibility_noise,
 )
-from jolly_roger.tractor import DataChunk
+from jolly_roger.tractor import DataChunk, get_parser
+from jolly_roger.uvws import WDelays
 
 N_CHAN = 128
 CHANNEL_WIDTH_HZ = 2e6
@@ -259,3 +271,184 @@ def test_missing_rm_lite_is_explained(monkeypatch: pytest.MonkeyPatch) -> None:
             channel_width_hz=CHANNEL_WIDTH_HZ,
             field_delay_s=FIELD_DELAY_S,
         )
+
+
+def _w_delays(
+    object_delay_s: float, n_rows: int, elevation_deg: list[float], guard_s: float = 0.0
+) -> WDelays:
+    """One baseline (0, 1) whose object sits at a fixed delay, one row per time"""
+    return WDelays(
+        object_name="sun",
+        w_delays=np.full((1, n_rows), object_delay_s) * u.s,
+        b_map={(0, 1): 0},
+        time_map={float(t) * u.s: t for t in range(n_rows)},
+        elevation=np.array(elevation_deg) * u.deg,
+        guard_region=np.full((1, n_rows), guard_s) * u.s if guard_s else None,
+    )
+
+
+def test_compute_clean_tractor_cleans_only_rows_with_the_object_up() -> None:
+    data_chunk = _chunk([150e-9, 150e-9])
+    original = data_chunk.masked_data.data.copy()
+    w_delays = _w_delays(150e-9, n_rows=2, elevation_deg=[20.0, -10.0])
+
+    result = compute_clean_tractor(
+        data_chunk=data_chunk,
+        clean_tractor_options=CleanTractorOptions(
+            field_delay_ns=FIELD_DELAY_S * 1e9, visibility_noise=SIGMA
+        ),
+        w_delays_list=[w_delays],
+    )
+
+    assert result.data_chunk is not None
+    cleaned = result.data_chunk.masked_data.data
+    # The object is above the elevation cut in row 0 only
+    assert _rms(cleaned[0, :, 0] - original[0, :, 0]) > 1.0
+    np.testing.assert_array_equal(cleaned[1], original[1])
+
+
+def test_compute_clean_tractor_widens_the_field_by_the_guard() -> None:
+    """With a guard band reaching past the object, the object is kept. Only its
+    faint wings beyond the guard band are subtracted."""
+    data_chunk = _chunk([150e-9])
+    w_delays = _w_delays(150e-9, n_rows=1, elevation_deg=[20.0], guard_s=200e-9)
+
+    result = compute_clean_tractor(
+        data_chunk=data_chunk,
+        clean_tractor_options=CleanTractorOptions(
+            field_delay_ns=FIELD_DELAY_S * 1e9, visibility_noise=SIGMA
+        ),
+        w_delays_list=[w_delays],
+    )
+
+    assert result.data_chunk is not None
+    subtracted = result.data_chunk.masked_data.data - data_chunk.masked_data.data
+    # The object has rms 10
+    assert _rms(subtracted) < 0.1
+
+
+def test_compute_clean_tractor_skips_autocorrelations() -> None:
+    data_chunk = replace(_chunk([150e-9]), ant_2=np.zeros(1, dtype=np.int64))
+    w_delays = _w_delays(150e-9, n_rows=1, elevation_deg=[20.0])
+
+    result = compute_clean_tractor(
+        data_chunk=data_chunk,
+        clean_tractor_options=CleanTractorOptions(visibility_noise=SIGMA),
+        w_delays_list=[w_delays],
+    )
+
+    assert result.nothing_to_do
+
+
+def test_statistics_and_descriptions() -> None:
+    statistics = DelayCleanStatistics()
+    compute_delay_clean(
+        data_chunk=_chunk([150e-9, 55e-9]),
+        field_delay_s=FIELD_DELAY_S,
+        visibility_noise=SIGMA,
+        statistics=statistics,
+    )
+    options = CleanTractorOptions(target_objects=("sun", "moon"))
+
+    assert statistics.spectra == 4
+    assert statistics.rows_flagged == 1
+    assert len(statistics.edge_residuals) == 4
+
+    run = describe_clean_run(statistics, options)
+    assert "4 spectra where sun, moon was above the elevation cut" in run
+    assert "1 rows were flagged" in run
+
+    band_edges = describe_band_edges(statistics)
+    assert band_edges is not None
+    assert "8 channels at each end of the band" in band_edges
+    assert describe_band_edges(DelayCleanStatistics()) is None
+
+    # 3 sqrt(288) / 1.06 = 48
+    assert "48/n times the noise" in describe_clean_line_limit(288, 3.0)
+
+
+def test_statistics_count_spectra_without_a_noise_estimate() -> None:
+    data_chunk = _chunk([150e-9])
+    data_chunk.masked_data.mask[:, ::20, :] = True
+    statistics = DelayCleanStatistics()
+
+    compute_delay_clean(
+        data_chunk=data_chunk, field_delay_s=FIELD_DELAY_S, statistics=statistics
+    )
+
+    assert statistics.noise_not_estimated == 2
+    assert "2 spectra were left unchanged" in describe_clean_run(
+        statistics, CleanTractorOptions()
+    )
+
+
+def test_short_spectrum_has_no_band_edge_residual() -> None:
+    weights = np.zeros(N_CHAN)
+    weights[:20] = 1.0
+
+    result = delay_clean_spectrum(
+        values=_field() + _noise(7),
+        weights=weights,
+        channel_width_hz=CHANNEL_WIDTH_HZ,
+        field_delay_s=FIELD_DELAY_S,
+        visibility_noise=SIGMA,
+    )
+
+    assert result.edge_residual is None
+    assert result.mid_residual is None
+
+
+def test_clean_tractor_records_history(ms_example: Path) -> None:
+    # The test measurement set is fully flagged, so unflag it to have CLEAN run
+    with table(str(ms_example), readonly=False, ack=False) as tab:
+        tab.putcol("FLAG", np.zeros_like(tab.getcol("FLAG")))
+    with table(str(Path(ms_example) / "HISTORY"), ack=False) as tab:
+        before = tab.nrows()
+
+    result = clean_tractor(
+        ms_path=Path(ms_example),
+        clean_tractor_options=CleanTractorOptions(
+            output_column="CLEANED_DATA",
+            visibility_noise=1.0,
+            # Clean every row, wherever the Sun is in this observation
+            elevation_cut_deg=-90.0,
+            ignore_nyquist_zone=1000,
+        ),
+    )
+
+    assert result.statistics is not None
+    assert result.statistics.spectra > 0
+    with table(str(ms_example), ack=False) as tab:
+        assert "CLEANED_DATA" in tab.colnames()
+    with table(str(Path(ms_example) / "HISTORY"), ack=False) as tab:
+        assert tab.nrows() > before
+        assert set(tab.getcol("ORIGIN")[before:]) == {"jolly_tractor clean"}
+
+
+def test_clean_tractor_makes_plots(ms_example: Path) -> None:
+    result = clean_tractor(
+        ms_path=Path(ms_example),
+        clean_tractor_options=CleanTractorOptions(make_plots=True, number_of_plots=1),
+    )
+
+    assert result.output_plots
+    assert all(path.exists() for path in result.output_plots)
+
+
+def test_clean_subcommand_options() -> None:
+    args = get_parser().parse_args(
+        ["clean", "example.ms", "--visibility-noise", "0.5", "--field-delay-ns", "20"]
+    )
+    options = create_options_from_parser(
+        parser_namespace=args, options_class=CleanTractorOptions
+    )
+
+    assert args.mode == "clean"
+    assert options.visibility_noise == 0.5
+    assert options.field_delay_ns == 20
+    # The guard band is on unless the flag turns it off
+    assert options.guard_field
+    args = get_parser().parse_args(["clean", "example.ms", "--guard-field"])
+    assert not create_options_from_parser(
+        parser_namespace=args, options_class=CleanTractorOptions
+    ).guard_field
