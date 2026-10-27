@@ -480,10 +480,13 @@ def test_tractor_reports_kernel_and_history(ms_example) -> None:
 
     assert results.kernel_summary is not None
     assert results.kernel_summary.effective_width_s == 10e-9
+    assert results.line_impacts is not None
+    assert list(results.line_impacts) == ["sun"]
     after = _history_rows(ms_example)
-    assert len(after) == len(before) + 1
-    assert after[-1]["ORIGIN"] == "jolly_tractor tukey"
-    assert after[-1]["MESSAGE"].startswith("Delay notch: removes about 10 ns")
+    assert len(after) == len(before) + 2
+    assert all(row["ORIGIN"] == "jolly_tractor tukey" for row in after[-2:])
+    assert after[-2]["MESSAGE"].startswith("Delay notch: removes about 10 ns")
+    assert after[-1]["MESSAGE"].startswith("Spectral-line impact of nulling sun")
 
 
 def test_tractor_dry_run_leaves_history(ms_example) -> None:

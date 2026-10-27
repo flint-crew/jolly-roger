@@ -30,6 +30,11 @@ from jolly_roger.baselines import (
 )
 from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
 from jolly_roger.history import add_history, dataclass_to_app_params
+from jolly_roger.lines import (
+    LineImpactSummary,
+    describe_line_impact,
+    summarise_line_impact,
+)
 from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
 from jolly_roger.response import (
@@ -1120,6 +1125,8 @@ class TukeyTractorResults:
     """The output plots that were created, if any"""
     kernel_summary: TukeyKernelSummary | None = None
     """The convolution over frequency equivalent to the notch that was applied"""
+    line_impacts: dict[str, LineImpactSummary] | None = None
+    """The largest effect on spectral lines of nulling each object, keyed by object name"""
 
 
 def compute_auto_taper_widths(
@@ -1198,6 +1205,95 @@ def report_tukey_kernel(
             "one over the bandwidth), so it removes little or nothing. Consider --auto-size."
         )
     return summary
+
+
+def report_line_impact(
+    open_ms_tables: OpenMSTables,
+    tukey_tractor_options: TukeyTractorOptions,
+    w_delays_list: list[WDelays],
+    kernel_summary: TukeyKernelSummary,
+) -> dict[str, LineImpactSummary]:
+    """Predict, from geometry alone, the largest effect on spectral lines of
+    nulling each object, and log it.
+
+    A visibility is counted as modified when the object is above the elevation
+    cut, within the allowed Nyquist zone, and no notch of any object meets the
+    field (those visibilities are flagged instead). Tests on the data themselves
+    (``compare_to_field``, ``object_minimum_flux``) may leave further visibilities
+    untouched, so the prediction is an upper bound.
+
+    Args:
+        open_ms_tables (OpenMSTables): Collection of MS tables to inspect
+        tukey_tractor_options (TukeyTractorOptions): The final (e.g. auto-sized) taper options
+        w_delays_list (list[WDelays]): The delays of each nulled object
+        kernel_summary (TukeyKernelSummary): The notch's equivalent kernel
+
+    Returns:
+        dict[str, LineImpactSummary]: The summary for each object, keyed by name
+    """
+    freq_chan = np.atleast_1d(open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze())
+    channel_width_hz = (
+        float(np.abs(np.mean(np.diff(freq_chan)))) if len(freq_chan) > 1 else 0.0
+    )
+    half_period_s = 0.5 / channel_width_hz if channel_width_hz > 0 else np.inf
+    outer_s = tukey_tractor_options.outer_width_ns * 1e-9
+
+    sidelobes = tukey_tractor_options.nth_sidelobe_null or 0
+    notch_offsets_s = [0.0] + [
+        sign * get_delay_of_nth_sidelobe(n=n, sinc_width=outer_s * u.s).to("s").value
+        for sign in (1, -1)
+        for n in range(1, sidelobes + 1)
+    ]
+
+    active: list[NDArray[np.bool_]] = []
+    nearest_notch_s: list[NDArray[np.floating[Any]]] = []
+    flagged: NDArray[np.bool_] | None = None
+    for w_delays in w_delays_list:
+        object_s = w_delays.w_delays.to("s").value
+        guard_s = (
+            w_delays.guard_region.to("s").value
+            if w_delays.guard_region is not None
+            else np.zeros_like(object_s)
+        )
+        above = (
+            w_delays.elevation.to("deg").value
+            >= tukey_tractor_options.elevation_cut_deg
+        )[None, :]
+        in_zone = (
+            calculate_nyquist_zone(values=object_s, upper_limit=half_period_s)
+            <= tukey_tractor_options.ignore_nyquist_zone
+        )
+        notches_s = np.abs(
+            symmetric_domain_wrap(
+                values=object_s[None, ...] + np.array(notch_offsets_s)[:, None, None],
+                upper_limit=half_period_s,
+            )
+        )
+        is_active = above & in_zone
+        # Matches compute_tukey_taper: a notch reaching the field's protected
+        # region flags the visibility instead of filtering it
+        meets_field = np.any(notches_s < 2 * outer_s + guard_s[None, ...], axis=0)
+        flagged_here = is_active & meets_field
+        flagged = flagged_here if flagged is None else flagged | flagged_here
+        active.append(is_active)
+        nearest_notch_s.append(np.min(notches_s, axis=0))
+
+    summaries: dict[str, LineImpactSummary] = {}
+    for w_delays, is_active, nearest_s in zip(
+        w_delays_list, active, nearest_notch_s, strict=True
+    ):
+        modified = is_active if flagged is None else is_active & ~flagged
+        summary = summarise_line_impact(
+            delay_separation_s=nearest_s[modified],
+            effective_width_s=kernel_summary.effective_width_s,
+            channel_width_hz=channel_width_hz,
+            reference_frequency_hz=float(np.mean(freq_chan)),
+            number_of_notches=kernel_summary.number_of_notches,
+        )
+        logger.info(describe_line_impact(w_delays.object_name, summary))
+        summaries[w_delays.object_name] = summary
+
+    return summaries
 
 
 def write_back_results(
@@ -1353,6 +1449,13 @@ def tukey_tractor(
         "Sanity check failed, incorrect dimensionality returned"
     )
 
+    line_impacts = report_line_impact(
+        open_ms_tables=open_ms_tables,
+        tukey_tractor_options=tukey_tractor_options,
+        w_delays_list=w_delays_list,
+        kernel_summary=kernel_summary,
+    )
+
     if not tukey_tractor_options.dry_run:
         pool: None | ThreadPoolExecutor = None
         if tukey_tractor_options.max_workers > 1:
@@ -1452,7 +1555,13 @@ def tukey_tractor(
     if not tukey_tractor_options.dry_run:
         add_history(
             ms_path=open_ms_tables.ms_path,
-            messages=[describe_tukey_kernel(kernel_summary)],
+            messages=[
+                describe_tukey_kernel(kernel_summary),
+                *(
+                    describe_line_impact(name, summary)
+                    for name, summary in line_impacts.items()
+                ),
+            ],
             origin="jolly_tractor tukey",
             app_params=dataclass_to_app_params(tukey_tractor_options),
         )
@@ -1462,6 +1571,7 @@ def tukey_tractor(
         output_column=tukey_tractor_options.output_column,
         output_plots=plot_paths,
         kernel_summary=kernel_summary,
+        line_impacts=line_impacts,
     )
 
 
