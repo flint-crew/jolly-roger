@@ -456,3 +456,41 @@ def test_compute_tukey_multi_taper_sidelobes_with_skipped_object() -> None:
         with_sidelobes.data_chunk.masked_data.filled(0),
         main_lobe.data_chunk.masked_data.filled(0),
     )
+
+
+def _history_rows(ms_path: Path) -> list[dict[str, str]]:
+    with table(str(ms_path / "HISTORY"), ack=False) as tab:
+        return [
+            {
+                "ORIGIN": tab.getcell("ORIGIN", row),
+                "MESSAGE": tab.getcell("MESSAGE", row),
+            }
+            for row in range(tab.nrows())
+        ]
+
+
+def test_tractor_reports_kernel_and_history(ms_example) -> None:
+    """A run records the equivalent kernel in its results and in HISTORY"""
+    before = _history_rows(ms_example)
+
+    results = tukey_tractor(
+        ms_path=Path(ms_example),
+        tukey_tractor_options=TukeyTractorOptions(output_column="JACKS_DATA"),
+    )
+
+    assert results.kernel_summary is not None
+    assert results.kernel_summary.effective_width_s == 10e-9
+    after = _history_rows(ms_example)
+    assert len(after) == len(before) + 1
+    assert after[-1]["ORIGIN"] == "jolly_tractor tukey"
+    assert after[-1]["MESSAGE"].startswith("Delay notch: removes about 10 ns")
+
+
+def test_tractor_dry_run_leaves_history(ms_example) -> None:
+    """A dry run does not modify the HISTORY table"""
+    before = _history_rows(ms_example)
+    tukey_tractor(
+        ms_path=Path(ms_example),
+        tukey_tractor_options=TukeyTractorOptions(dry_run=True),
+    )
+    assert _history_rows(ms_example) == before
