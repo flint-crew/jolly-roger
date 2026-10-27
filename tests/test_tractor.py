@@ -516,9 +516,8 @@ def test_run_tractor_chunks_applies_chunk_func(ms_example) -> None:
             data_chunk=replace(data_chunk, masked_data=data_chunk.masked_data * 2),
         )
 
-    timing = run_tractor_chunks(setup=setup, chunk_func=double, tractor_options=options)
+    run_tractor_chunks(setup=setup, chunk_func=double, tractor_options=options)
     setup.open_ms_tables.close()
 
-    assert timing.number_of_channels > 0
     with table(str(ms_example), ack=False) as tab:
         np.testing.assert_allclose(tab.getcol("DOUBLED_DATA"), 2 * tab.getcol("DATA"))

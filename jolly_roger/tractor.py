@@ -1367,6 +1367,111 @@ def write_back_results(
         logger.debug("No updating of weights")
 
 
+def tukey_tractor(
+    ms_path: Path,
+    tukey_tractor_options: TukeyTractorOptions,
+) -> TukeyTractorResults:
+    """Iterate row-wise over a specified measurement set and
+    apply a tukey taper operation to the delay data. Iteration
+    is performed based on a chunk size, indicating the number
+    of rows to read in at a time.
+
+    Full description of options are outlined in `TukeyTaperOptions`.
+
+    Args:
+        ms_path (Path): The MS to be modified.
+        tukey_tractor_options (TukeyTractorOptions): The settings to use during the taper, and measurement set to apply them to.
+
+    Returns:
+        TukeyTractorResults: Representative information of the tapering process
+    """
+    log_jolly_roger_version()
+    log_dataclass_attributes(
+        to_log=tukey_tractor_options, class_name="TukeyTaperOptions"
+    )
+
+    if (
+        not tukey_tractor_options.auto_size
+        and tukey_tractor_options.nth_sidelobe_null is not None
+    ):
+        logger.warning(
+            "nth_sidelobe_null is only used in auto_size mode. Since auto_size is False, nth_sidelobe_null will be ignored."
+        )
+        tukey_tractor_options = tukey_tractor_options.with_options(
+            nth_sidelobe_null=None,  # type: ignore[arg-type]
+        )
+
+    setup = prepare_tractor(ms_path=ms_path, tractor_options=tukey_tractor_options)
+    open_ms_tables = setup.open_ms_tables
+    w_delays_list = setup.w_delays_list
+
+    if tukey_tractor_options.auto_size:
+        tukey_tractor_options = _set_auto_taper_widths(
+            open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
+        )
+
+    kernel_summary = report_tukey_kernel(
+        open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
+    )
+
+    line_impacts = report_line_impact(
+        open_ms_tables=open_ms_tables,
+        tukey_tractor_options=tukey_tractor_options,
+        w_delays_list=w_delays_list,
+        kernel_summary=kernel_summary,
+    )
+
+    if not tukey_tractor_options.dry_run:
+        partial_compute_func = partial(
+            compute_tukey_multi_taper,
+            tukey_tractor_options=tukey_tractor_options,
+            w_delays_list=w_delays_list,
+        )
+        run_tractor_chunks(
+            setup=setup,
+            chunk_func=partial_compute_func,
+            tractor_options=tukey_tractor_options,
+        )
+
+    plot_paths: list[Path] | None
+    if tukey_tractor_options.make_plots:
+        plot_paths = make_plot_results(
+            open_ms_tables=open_ms_tables,
+            data_column=tukey_tractor_options.data_column,
+            output_column=tukey_tractor_options.output_column,
+            w_delays=w_delays_list,
+            reverse_baselines=tukey_tractor_options.reverse_baselines,
+            outer_width_ns=tukey_tractor_options.outer_width_ns,
+            max_baselines=tukey_tractor_options.number_of_plots,
+        )
+
+        logger.info(f"Made {len(plot_paths)} output plots")
+    else:
+        plot_paths = None
+
+    if not tukey_tractor_options.dry_run:
+        add_history(
+            ms_path=open_ms_tables.ms_path,
+            messages=[
+                describe_tukey_kernel(kernel_summary),
+                *(
+                    describe_line_impact(name, summary)
+                    for name, summary in line_impacts.items()
+                ),
+            ],
+            origin="jolly_tractor tukey",
+            app_params=dataclass_to_app_params(tukey_tractor_options),
+        )
+
+    return TukeyTractorResults(
+        ms_path=open_ms_tables.ms_path,
+        output_column=tukey_tractor_options.output_column,
+        output_plots=plot_paths,
+        kernel_summary=kernel_summary,
+        line_impacts=line_impacts,
+    )
+
+
 @dataclass
 class TractorSetup:
     """Everything a tractor needs before it walks the measurement set"""
@@ -1445,23 +1550,11 @@ def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSe
     )
 
 
-@dataclass(frozen=True)
-class ChunkLoopTiming:
-    """Timing of a pass over the measurement set"""
-
-    runtime_s: float
-    """Total time, in seconds"""
-    compute_s: float
-    """Time spent in the chunk function, in seconds"""
-    number_of_channels: int
-    """Number of channels in the data"""
-
-
 def run_tractor_chunks(
     setup: TractorSetup,
     chunk_func: Callable[[DataChunk], TaperedChunkResult],
     tractor_options: TractorOptions,
-) -> ChunkLoopTiming:
+) -> None:
     """Read the measurement set in chunks of rows, pass each chunk to
     ``chunk_func``, and write the results back. Shared by every tractor:
     ``chunk_func`` decides how the data are modified.
@@ -1470,11 +1563,11 @@ def run_tractor_chunks(
         setup (TractorSetup): Open tables and write-back settings from ``prepare_tractor``
         chunk_func (Callable[[DataChunk], TaperedChunkResult]): Modifies one chunk of rows
         tractor_options (TractorOptions): The shared tractor options
-
-    Returns:
-        ChunkLoopTiming: How long the pass took
     """
     open_ms_tables = setup.open_ms_tables
+    weight_columns = setup.weight_columns
+    write_back_required = setup.write_back_required
+
     pool: None | ThreadPoolExecutor = None
     if tractor_options.max_workers > 1:
         logger.info(
@@ -1482,45 +1575,56 @@ def run_tractor_chunks(
         )
         pool = ThreadPoolExecutor(max_workers=tractor_options.max_workers)
 
-    logger.info(f"Incremental data flushes {setup.write_back_required=}")
+    logger.info(f"Incremental data flushes {write_back_required=}")
     start = time()
-    compute_s = 0.0
+    total_tukey_time_s = 0.0
     with tqdm(total=len(open_ms_tables.main_table), desc="Rows") as pbar:
         for data_chunk_tuple in get_multiple_data_chunks(
             open_ms_tables=open_ms_tables,
             chunk_size=tractor_options.chunk_size,
             data_column=tractor_options.data_column,
             number_of_chunks=tractor_options.max_workers,
-            weight_columns=setup.weight_columns,
+            weight_columns=weight_columns,
         ):
-            start_compute = time()
-            chunk_results: list[TaperedChunkResult] = []
+            start_tukey = time()
+            taper_data_and_flags: list[TaperedChunkResult] = []
             if len(data_chunk_tuple) == 1:
-                chunk_results = [chunk_func(data_chunk_tuple[0])]
+                taper_results = chunk_func(data_chunk_tuple[0])
+                taper_data_and_flags = [taper_results]
             else:
                 assert pool is not None, f"{pool=}, and should not be None"
-                # The list collects all results in order.
-                chunk_results = list(pool.map(chunk_func, data_chunk_tuple))
-            compute_s += time() - start_compute
+                # This creates an iterator that will return objects as they are completed,
+                # but breaks timing stats. Not a clear increase of throughput in (brief) testing
+                # taper_data_and_flags = pool.map(chunk_func, data_chunk_tuple)
 
-            # Write back serially, in the order the chunks were read
-            for chunk_result in chunk_results:
+                # The list collects all results in order.
+                taper_data_and_flags = list(pool.map(chunk_func, data_chunk_tuple))
+
+            end_tukey = time()
+            total_tukey_time_s += end_tukey - start_tukey
+
+            # Iterate over the result set in a serial manner. Note that depending on
+            # how the .map is called in max_workers>1 case this could be a generator
+            # for taper_data_chunk, flags_to_apply in taper_data_and_flags:
+            taper_chunk_result: TaperedChunkResult
+            for taper_chunk_result in taper_data_and_flags:
                 write_back_results(
                     open_ms_tables=open_ms_tables,
-                    taper_chunk_result=chunk_result,
+                    taper_chunk_result=taper_chunk_result,
                     tukey_tractor_options=tractor_options,
-                    write_back_required=setup.write_back_required,
+                    write_back_required=write_back_required,
                     pbar=pbar,
                 )
 
-    runtime_s = time() - start
+    stop = time()
+    runtime_s = stop - start
     assert data_chunk_tuple[-1] is not None, "data_chunk is not formed correctly"
-    number_of_channels = len(data_chunk_tuple[-1].freq_chan)
     logger.info(
-        f"Processed {len(open_ms_tables.main_table)} rows by {number_of_channels} chans in {runtime_s:0.2f}s"
+        f"Tapered {len(tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(data_chunk_tuple[-1].freq_chan)} chans in {runtime_s:0.2f}s"
     )
+
     logger.info(
-        f"Nulling time: {compute_s:0.2f}s, reading/writing: {runtime_s - compute_s:0.2f}s"
+        f"Nulling time: {total_tukey_time_s:0.2f}s, reading/writing: {runtime_s - total_tukey_time_s:0.2f}s"
     )
     if tractor_options.max_workers > 1:
         logger.info(
@@ -1530,116 +1634,6 @@ def run_tractor_chunks(
     if isinstance(pool, ThreadPoolExecutor):
         logger.info("Closing thread pool...")
         pool.shutdown()
-
-    return ChunkLoopTiming(
-        runtime_s=runtime_s,
-        compute_s=compute_s,
-        number_of_channels=number_of_channels,
-    )
-
-
-def tukey_tractor(
-    ms_path: Path,
-    tukey_tractor_options: TukeyTractorOptions,
-) -> TukeyTractorResults:
-    """Iterate row-wise over a specified measurement set and
-    apply a tukey taper operation to the delay data. Iteration
-    is performed based on a chunk size, indicating the number
-    of rows to read in at a time.
-
-    Full description of options are outlined in `TukeyTaperOptions`.
-
-    Args:
-        ms_path (Path): The MS to be modified.
-        tukey_tractor_options (TukeyTractorOptions): The settings to use during the taper, and measurement set to apply them to.
-
-    Returns:
-        TukeyTractorResults: Representative information of the tapering process
-    """
-    log_jolly_roger_version()
-    log_dataclass_attributes(
-        to_log=tukey_tractor_options, class_name="TukeyTaperOptions"
-    )
-
-    if (
-        not tukey_tractor_options.auto_size
-        and tukey_tractor_options.nth_sidelobe_null is not None
-    ):
-        logger.warning(
-            "nth_sidelobe_null is only used in auto_size mode. Since auto_size is False, nth_sidelobe_null will be ignored."
-        )
-        tukey_tractor_options = tukey_tractor_options.with_options(
-            nth_sidelobe_null=None,  # type: ignore[arg-type]
-        )
-
-    setup = prepare_tractor(ms_path=ms_path, tractor_options=tukey_tractor_options)
-    open_ms_tables = setup.open_ms_tables
-    w_delays_list = setup.w_delays_list
-
-    if tukey_tractor_options.auto_size:
-        tukey_tractor_options = _set_auto_taper_widths(
-            open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
-        )
-
-    kernel_summary = report_tukey_kernel(
-        open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
-    )
-
-    line_impacts = report_line_impact(
-        open_ms_tables=open_ms_tables,
-        tukey_tractor_options=tukey_tractor_options,
-        w_delays_list=w_delays_list,
-        kernel_summary=kernel_summary,
-    )
-
-    if not tukey_tractor_options.dry_run:
-        run_tractor_chunks(
-            setup=setup,
-            chunk_func=partial(
-                compute_tukey_multi_taper,
-                tukey_tractor_options=tukey_tractor_options,
-                w_delays_list=w_delays_list,
-            ),
-            tractor_options=tukey_tractor_options,
-        )
-
-    plot_paths: list[Path] | None
-    if tukey_tractor_options.make_plots:
-        plot_paths = make_plot_results(
-            open_ms_tables=open_ms_tables,
-            data_column=tukey_tractor_options.data_column,
-            output_column=tukey_tractor_options.output_column,
-            w_delays=w_delays_list,
-            reverse_baselines=tukey_tractor_options.reverse_baselines,
-            outer_width_ns=tukey_tractor_options.outer_width_ns,
-            max_baselines=tukey_tractor_options.number_of_plots,
-        )
-
-        logger.info(f"Made {len(plot_paths)} output plots")
-    else:
-        plot_paths = None
-
-    if not tukey_tractor_options.dry_run:
-        add_history(
-            ms_path=open_ms_tables.ms_path,
-            messages=[
-                describe_tukey_kernel(kernel_summary),
-                *(
-                    describe_line_impact(name, summary)
-                    for name, summary in line_impacts.items()
-                ),
-            ],
-            origin="jolly_tractor tukey",
-            app_params=dataclass_to_app_params(tukey_tractor_options),
-        )
-
-    return TukeyTractorResults(
-        ms_path=open_ms_tables.ms_path,
-        output_column=tukey_tractor_options.output_column,
-        output_plots=plot_paths,
-        kernel_summary=kernel_summary,
-        line_impacts=line_impacts,
-    )
 
 
 def get_parser() -> ArgumentParser:
