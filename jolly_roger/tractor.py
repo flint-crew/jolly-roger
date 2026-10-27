@@ -1082,6 +1082,8 @@ class TukeyTractorOptions(BaseOptions):
     """The name of the WEIGHT-like column. If None when rewrite is True the WEIGHT-like column will be searched for. Defaults to None."""
     guard_field: bool = False
     """If True derive a region around the delay=0 spectrum to protect the field-of-view/"""
+    dish_diameter_m: float | None = None
+    """Dish diameter in metres used to derive the nominal field of view (e.g. for guard_field), overriding DISH_DIAMETER in the measurement set's ANTENNA table. If None the ANTENNA table is used."""
     guard_field_fraction: float = 0.1
     """The attenuation level of the main lobe to guard to, and should be in the range (0, 1). Values closer to zero correspond to a larger field-of-view, and hence a larger guard band in delay space. """
     object_minimum_flux: float | None = None
@@ -1247,7 +1249,11 @@ def tukey_tractor(
         )
 
     # acquire all the tables necessary to get unit information and data from
-    open_ms_tables = get_open_ms_tables(ms_path=ms_path, read_only=False)
+    open_ms_tables = get_open_ms_tables(
+        ms_path=ms_path,
+        read_only=False,
+        dish_diameter_m=tukey_tractor_options.dish_diameter_m,
+    )
 
     if tukey_tractor_options.auto_size:
         tukey_tractor_options = _set_auto_taper_widths(

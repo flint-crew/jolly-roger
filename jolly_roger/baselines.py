@@ -156,6 +156,11 @@ def get_nominal_fov(
     assert len(unique_diameter) == 1, (
         f"{len(unique_diameter)} dish sizes found, which is not reasonable"
     )
+    if unique_diameter[0] <= 0:
+        logger.warning(
+            f"DISH_DIAMETER of {unique_diameter[0]} m, so the field-of-view is unbounded. Set --dish-diameter-m."
+        )
+        return np.inf * u.rad
 
     fov = (1.02 * longest_lambda / (unique_diameter[0] * u.m)).decompose() * u.rad
     logger.info(f"Nominal field-of-view (FWHM) is {fov.to('deg'):.3f}")
@@ -166,28 +171,40 @@ def get_nominal_fov(
 def _get_nominal_fov(
     spw_table: table,
     antenna_table: table,
+    dish_diameter_m: float | None = None,
 ) -> u.Quantity:
     """Read CHAN_FREQ/DISH_DIAMETER from open tables and derive the nominal FoV.
 
     Args:
         spw_table (table): The spectral window table of the MS
         antenna_table (table): The antenna table of the MS
+        dish_diameter_m (float | None, optional): A dish diameter, in m, overriding DISH_DIAMETER of the antenna table. Defaults to None.
 
     Returns:
         u.Quantity: The nominal radial field-of-view
     """
+    dish_diameter = antenna_table.getcol("DISH_DIAMETER")
+    if dish_diameter_m is not None:
+        logger.info(
+            f"Using a dish diameter of {dish_diameter_m} m in place of DISH_DIAMETER {np.unique(dish_diameter)} m"
+        )
+        dish_diameter = np.array([dish_diameter_m])
+
     return get_nominal_fov(
         chan_freq=spw_table.getcol("CHAN_FREQ"),
-        dish_diameter=antenna_table.getcol("DISH_DIAMETER"),
+        dish_diameter=dish_diameter,
     )
 
 
-def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
+def get_open_ms_tables(
+    ms_path: Path, read_only: bool = True, dish_diameter_m: float | None = None
+) -> OpenMSTables:
     """Open up the set of MS table and sub-tables necessary for tractoring.
 
     Args:
         ms_path (Path): The path to the measurement set
         read_only (bool, optional): Whether to open in a read-only mode. Defaults to True.
+        dish_diameter_m (float | None, optional): A dish diameter, in m, overriding DISH_DIAMETER when deriving the nominal field-of-view. Defaults to None.
 
     Returns:
         OpenMSTables: Set of open table references
@@ -200,7 +217,11 @@ def get_open_ms_tables(ms_path: Path, read_only: bool = True) -> OpenMSTables:
     phase_dir = _get_phase_dir_for_field_id(
         ms_table=main_table, field_table=field_table
     )
-    nominal_fov = _get_nominal_fov(spw_table=spw_table, antenna_table=antenna_table)
+    nominal_fov = _get_nominal_fov(
+        spw_table=spw_table,
+        antenna_table=antenna_table,
+        dish_diameter_m=dish_diameter_m,
+    )
     # TODO: Get the data without auto-correlations e.g.
     # no_auto_main_table = taql(
     #     "select from $main_table where ANTENNA1 != ANTENNA2",

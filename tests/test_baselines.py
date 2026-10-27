@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import astropy.units as u
 import numpy as np
 import pytest
 from astropy.constants import c as speed_of_light
+from casacore.tables import table
 
 from jolly_roger.baselines import (
     beam_fraction_to_radius,
     get_baselines,
     get_nominal_fov,
+    get_open_ms_tables,
     get_phase_dir,
 )
 
@@ -89,3 +93,27 @@ def test_get_nominal_fov() -> None:
         (1.02 * (speed_of_light / (1.0e9 * u.Hz)) / (12.0 * u.m)).decompose().value
     )
     assert np.isclose(fov.to("rad").value, expected)
+
+
+def test_get_nominal_fov_zero_diameter() -> None:
+    """A dish diameter of zero has an unbounded field of view, without dividing by zero"""
+    fov = get_nominal_fov(
+        chan_freq=np.linspace(800e6, 1100e6, 8), dish_diameter=np.zeros(4)
+    )
+    assert np.isinf(fov.value)
+
+
+def test_get_open_ms_tables_dish_diameter_override(ms_example: Path) -> None:
+    """The dish diameter of the measurement set may be overridden"""
+    with table(str(ms_example / "SPECTRAL_WINDOW"), ack=False) as tab:
+        lowest_freq = np.min(tab.getcol("CHAN_FREQ")) * u.Hz
+
+    with get_open_ms_tables(ms_path=ms_example) as from_ms:
+        ms_fov = from_ms.nominal_fov
+    with get_open_ms_tables(ms_path=ms_example, dish_diameter_m=6.0) as overridden:
+        fov = overridden.nominal_fov
+
+    expected = (1.02 * (speed_of_light / lowest_freq) / (6.0 * u.m)).decompose() * u.rad
+    assert fov.to(u.rad).value == pytest.approx(expected.value)
+    # ASKAP dishes are 12 m, so halving the diameter doubles the field of view
+    assert fov.to(u.rad).value == pytest.approx(2 * ms_fov.to(u.rad).value)
