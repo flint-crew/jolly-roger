@@ -217,7 +217,10 @@ def _chunk(object_delays_s: list[float]) -> DataChunk:
 
 
 def test_compute_delay_clean_on_chunk() -> None:
-    data_chunk = _chunk([150e-9, 55e-9])
+    data_chunk = _chunk([150e-9, 55e-9, 150e-9])
+    # A fully flagged row is passed through unchanged
+    data_chunk.masked_data.mask[2] = True
+    flagged_row = data_chunk.masked_data.data[2].copy()
 
     result = compute_delay_clean(
         data_chunk=data_chunk,
@@ -242,6 +245,8 @@ def test_compute_delay_clean_on_chunk() -> None:
     assert not result.flags[0, :40].any()
     # Existing flags are kept
     assert result.flags[0, 40:46].all()
+    assert result.flags[2].all()
+    np.testing.assert_array_equal(cleaned.data[2], flagged_row)
 
 
 def test_missing_rm_lite_is_explained(monkeypatch: pytest.MonkeyPatch) -> None:
