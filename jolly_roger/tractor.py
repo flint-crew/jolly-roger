@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -1054,15 +1054,12 @@ def compute_tukey_multi_taper(
     )
 
 
-class TukeyTractorOptions(BaseOptions):
-    """Options to describe the tukey taper to apply"""
+class TractorOptions(BaseOptions):
+    """Options shared by every tractor: what to read and write, which objects to
+    null, how to chunk the measurement set, and how to protect the field"""
 
     target_objects: tuple[str, ...] = ("sun",)
     """The target object to apply the delay towards."""
-    outer_width_ns: float = 10
-    """The start of the tapering in nanoseconds"""
-    tukey_width_ns: float = 10
-    """The width of the tapered region in nanoseconds"""
     data_column: str = "DATA"
     """The visibility column to modify"""
     output_column: str = "CORRECTED_DATA"
@@ -1089,12 +1086,6 @@ class TukeyTractorOptions(BaseOptions):
     """Flip the sign of UVWs (required for LOFAR)"""
     max_workers: int = 1
     """The number of compute processes to establish. Each process gets chunk_size of rows. If max_worker==1 all work is performed in main thread."""
-    compare_to_field: float | None = None
-    """Compare the source brightness in delay space to the field. If the source is fainter than the field multiplied by this factor, do not taper. Defaults to None."""
-    auto_size: bool = False
-    """Automatically size the outer width of the tukey taper based on the data"""
-    nth_sidelobe_null: int | None = None
-    """Null up to the N'th sidelobe. Only used in auto_size mode. Defaults to None."""
     reweight: bool = False
     """Attempt to identify a WEIGHT-like column and rescale to indicate modified data. Defaults to False."""
     weight_column: str | None = None
@@ -1105,6 +1096,21 @@ class TukeyTractorOptions(BaseOptions):
     """Dish diameter in metres used to derive the nominal field of view (e.g. for guard_field), overriding DISH_DIAMETER in the measurement set's ANTENNA table. If None the ANTENNA table is used."""
     guard_field_fraction: float = 0.1
     """The attenuation level of the main lobe to guard to, and should be in the range (0, 1). Values closer to zero correspond to a larger field-of-view, and hence a larger guard band in delay space. """
+
+
+class TukeyTractorOptions(TractorOptions):
+    """Options to describe the tukey taper to apply"""
+
+    outer_width_ns: float = 10
+    """The start of the tapering in nanoseconds"""
+    tukey_width_ns: float = 10
+    """The width of the tapered region in nanoseconds"""
+    compare_to_field: float | None = None
+    """Compare the source brightness in delay space to the field. If the source is fainter than the field multiplied by this factor, do not taper. Defaults to None."""
+    auto_size: bool = False
+    """Automatically size the outer width of the tukey taper based on the data"""
+    nth_sidelobe_null: int | None = None
+    """Null up to the N'th sidelobe. Only used in auto_size mode. Defaults to None."""
     object_minimum_flux: float | None = None
     """The minimum absolute flux an object should have (as measured in delay space in Jy) for it to be nulled"""
     peak_shift_search: bool = False
@@ -1299,7 +1305,7 @@ def report_line_impact(
 def write_back_results(
     open_ms_tables: OpenMSTables,
     taper_chunk_result: TaperedChunkResult,
-    tukey_tractor_options: TukeyTractorOptions,
+    tukey_tractor_options: TractorOptions,
     write_back_required: bool,
     pbar: tqdm | None = None,
 ) -> None:
@@ -1361,6 +1367,177 @@ def write_back_results(
         logger.debug("No updating of weights")
 
 
+@dataclass
+class TractorSetup:
+    """Everything a tractor needs before it walks the measurement set"""
+
+    open_ms_tables: OpenMSTables
+    """Open handles to the measurement set and its sub-tables"""
+    w_delays_list: list[WDelays]
+    """The delays of each object to null"""
+    weight_columns: Sequence[str] | None
+    """WEIGHT-like columns to read and rescale, if any"""
+    write_back_required: bool
+    """Whether every chunk has to be written, e.g. a new and empty output column"""
+
+
+def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSetup:
+    """Open the measurement set, prepare the output column and predict the delay
+    of each object to null. Shared by every tractor.
+
+    Args:
+        ms_path (Path): The measurement set to process
+        tractor_options (TractorOptions): The shared tractor options
+
+    Returns:
+        TractorSetup: Open tables, object delays and write-back settings
+    """
+    # acquire all the tables necessary to get unit information and data from
+    open_ms_tables = get_open_ms_tables(
+        ms_path=ms_path,
+        read_only=False,
+        dish_diameter_m=tractor_options.dish_diameter_m,
+    )
+
+    weight_columns: Sequence[str] | None = select_weight_columns(
+        ms_path=ms_path, weight_column=tractor_options.weight_column
+    )
+
+    write_back_required: bool = True
+    if not tractor_options.dry_run:
+        # Data will need to be written back to the MS after each chunk if the
+        # output column has not data
+        write_back_required = add_output_column(
+            tab=open_ms_tables.main_table,
+            output_column=tractor_options.output_column,
+            data_column=tractor_options.data_column,
+            overwrite=tractor_options.overwrite,
+            copy_column_data=tractor_options.copy_column_data,
+        )
+
+    # Calculate the guard field region used to derieve the appropriate delay window
+    radial_fov: u.Quantity | None = None
+    if tractor_options.guard_field:
+        radial_fov = beam_fraction_to_radius(
+            fraction=tractor_options.guard_field_fraction,
+            field_of_view=open_ms_tables.nominal_fov,
+        )
+
+    # Generate the delay for all baselines and time steps. Reuse the already-open
+    # tables so the MS is not opened a second time.
+    w_delays_list = get_object_delay_from_tables(
+        open_ms_tables=open_ms_tables,
+        phase_dir=open_ms_tables.phase_dir,
+        object_name=tractor_options.target_objects,
+        reverse_baselines=tractor_options.reverse_baselines,
+        flip_uvw_sign=tractor_options.flip_uvw_sign,
+        radial_fov=radial_fov,
+    )
+    assert all(len(w_delays.w_delays.shape) == 2 for w_delays in w_delays_list), (
+        "Sanity check failed, incorrect dimensionality returned"
+    )
+
+    return TractorSetup(
+        open_ms_tables=open_ms_tables,
+        w_delays_list=w_delays_list,
+        weight_columns=weight_columns,
+        write_back_required=write_back_required,
+    )
+
+
+@dataclass(frozen=True)
+class ChunkLoopTiming:
+    """Timing of a pass over the measurement set"""
+
+    runtime_s: float
+    """Total time, in seconds"""
+    compute_s: float
+    """Time spent in the chunk function, in seconds"""
+    number_of_channels: int
+    """Number of channels in the data"""
+
+
+def run_tractor_chunks(
+    setup: TractorSetup,
+    chunk_func: Callable[[DataChunk], TaperedChunkResult],
+    tractor_options: TractorOptions,
+) -> ChunkLoopTiming:
+    """Read the measurement set in chunks of rows, pass each chunk to
+    ``chunk_func``, and write the results back. Shared by every tractor:
+    ``chunk_func`` decides how the data are modified.
+
+    Args:
+        setup (TractorSetup): Open tables and write-back settings from ``prepare_tractor``
+        chunk_func (Callable[[DataChunk], TaperedChunkResult]): Modifies one chunk of rows
+        tractor_options (TractorOptions): The shared tractor options
+
+    Returns:
+        ChunkLoopTiming: How long the pass took
+    """
+    open_ms_tables = setup.open_ms_tables
+    pool: None | ThreadPoolExecutor = None
+    if tractor_options.max_workers > 1:
+        logger.info(
+            f"Starting {tractor_options.max_workers} compute workers. Be mindful of {tractor_options.chunk_size=}"
+        )
+        pool = ThreadPoolExecutor(max_workers=tractor_options.max_workers)
+
+    logger.info(f"Incremental data flushes {setup.write_back_required=}")
+    start = time()
+    compute_s = 0.0
+    with tqdm(total=len(open_ms_tables.main_table), desc="Rows") as pbar:
+        for data_chunk_tuple in get_multiple_data_chunks(
+            open_ms_tables=open_ms_tables,
+            chunk_size=tractor_options.chunk_size,
+            data_column=tractor_options.data_column,
+            number_of_chunks=tractor_options.max_workers,
+            weight_columns=setup.weight_columns,
+        ):
+            start_compute = time()
+            chunk_results: list[TaperedChunkResult] = []
+            if len(data_chunk_tuple) == 1:
+                chunk_results = [chunk_func(data_chunk_tuple[0])]
+            else:
+                assert pool is not None, f"{pool=}, and should not be None"
+                # The list collects all results in order.
+                chunk_results = list(pool.map(chunk_func, data_chunk_tuple))
+            compute_s += time() - start_compute
+
+            # Write back serially, in the order the chunks were read
+            for chunk_result in chunk_results:
+                write_back_results(
+                    open_ms_tables=open_ms_tables,
+                    taper_chunk_result=chunk_result,
+                    tukey_tractor_options=tractor_options,
+                    write_back_required=setup.write_back_required,
+                    pbar=pbar,
+                )
+
+    runtime_s = time() - start
+    assert data_chunk_tuple[-1] is not None, "data_chunk is not formed correctly"
+    number_of_channels = len(data_chunk_tuple[-1].freq_chan)
+    logger.info(
+        f"Processed {len(open_ms_tables.main_table)} rows by {number_of_channels} chans in {runtime_s:0.2f}s"
+    )
+    logger.info(
+        f"Nulling time: {compute_s:0.2f}s, reading/writing: {runtime_s - compute_s:0.2f}s"
+    )
+    if tractor_options.max_workers > 1:
+        logger.info(
+            f"Used {tractor_options.max_workers} workers with a {tractor_options.chunk_size} chunk size"
+        )
+
+    if isinstance(pool, ThreadPoolExecutor):
+        logger.info("Closing thread pool...")
+        pool.shutdown()
+
+    return ChunkLoopTiming(
+        runtime_s=runtime_s,
+        compute_s=compute_s,
+        number_of_channels=number_of_channels,
+    )
+
+
 def tukey_tractor(
     ms_path: Path,
     tukey_tractor_options: TukeyTractorOptions,
@@ -1395,12 +1572,9 @@ def tukey_tractor(
             nth_sidelobe_null=None,  # type: ignore[arg-type]
         )
 
-    # acquire all the tables necessary to get unit information and data from
-    open_ms_tables = get_open_ms_tables(
-        ms_path=ms_path,
-        read_only=False,
-        dish_diameter_m=tukey_tractor_options.dish_diameter_m,
-    )
+    setup = prepare_tractor(ms_path=ms_path, tractor_options=tukey_tractor_options)
+    open_ms_tables = setup.open_ms_tables
+    w_delays_list = setup.w_delays_list
 
     if tukey_tractor_options.auto_size:
         tukey_tractor_options = _set_auto_taper_widths(
@@ -1411,44 +1585,6 @@ def tukey_tractor(
         open_ms_tables=open_ms_tables, tukey_tractor_options=tukey_tractor_options
     )
 
-    weight_columns: Sequence[str] | None = select_weight_columns(
-        ms_path=ms_path, weight_column=tukey_tractor_options.weight_column
-    )
-
-    write_back_required: bool = True
-    if not tukey_tractor_options.dry_run:
-        # Data will need to be written back to the MS after each chunk if the
-        # output column has not data
-        write_back_required = add_output_column(
-            tab=open_ms_tables.main_table,
-            output_column=tukey_tractor_options.output_column,
-            data_column=tukey_tractor_options.data_column,
-            overwrite=tukey_tractor_options.overwrite,
-            copy_column_data=tukey_tractor_options.copy_column_data,
-        )
-
-    # Calculate the guard field region used to derieve the appropriate delay window
-    radial_fov: u.Quantity | None = None
-    if tukey_tractor_options.guard_field:
-        radial_fov = beam_fraction_to_radius(
-            fraction=tukey_tractor_options.guard_field_fraction,
-            field_of_view=open_ms_tables.nominal_fov,
-        )
-
-    # Generate the delay for all baselines and time steps. Reuse the already-open
-    # tables so the MS is not opened a second time.
-    w_delays_list = get_object_delay_from_tables(
-        open_ms_tables=open_ms_tables,
-        phase_dir=open_ms_tables.phase_dir,
-        object_name=tukey_tractor_options.target_objects,
-        reverse_baselines=tukey_tractor_options.reverse_baselines,
-        flip_uvw_sign=tukey_tractor_options.flip_uvw_sign,
-        radial_fov=radial_fov,
-    )
-    assert all(len(w_delays.w_delays.shape) == 2 for w_delays in w_delays_list), (
-        "Sanity check failed, incorrect dimensionality returned"
-    )
-
     line_impacts = report_line_impact(
         open_ms_tables=open_ms_tables,
         tukey_tractor_options=tukey_tractor_options,
@@ -1457,84 +1593,15 @@ def tukey_tractor(
     )
 
     if not tukey_tractor_options.dry_run:
-        pool: None | ThreadPoolExecutor = None
-        if tukey_tractor_options.max_workers > 1:
-            logger.info(
-                f"Starting {tukey_tractor_options.max_workers} compute workers. Be mindful of {tukey_tractor_options.chunk_size=}"
-            )
-            pool = ThreadPoolExecutor(max_workers=tukey_tractor_options.max_workers)
-
-        # This could be offloaded to some other function if we end up
-        # havig multiple modes
-        partial_compute_func = partial(
-            compute_tukey_multi_taper,
-            tukey_tractor_options=tukey_tractor_options,
-            w_delays_list=w_delays_list,
+        run_tractor_chunks(
+            setup=setup,
+            chunk_func=partial(
+                compute_tukey_multi_taper,
+                tukey_tractor_options=tukey_tractor_options,
+                w_delays_list=w_delays_list,
+            ),
+            tractor_options=tukey_tractor_options,
         )
-
-        logger.info(f"Incremental data flushes {write_back_required=}")
-        start = time()
-        total_tukey_time_s = 0.0
-        with tqdm(total=len(open_ms_tables.main_table), desc="Rows") as pbar:
-            for data_chunk_tuple in get_multiple_data_chunks(
-                open_ms_tables=open_ms_tables,
-                chunk_size=tukey_tractor_options.chunk_size,
-                data_column=tukey_tractor_options.data_column,
-                number_of_chunks=tukey_tractor_options.max_workers,
-                weight_columns=weight_columns,
-            ):
-                start_tukey = time()
-                taper_data_and_flags: list[TaperedChunkResult] = []
-                if len(data_chunk_tuple) == 1:
-                    taper_results = partial_compute_func(
-                        data_chunk=data_chunk_tuple[0],
-                    )
-                    taper_data_and_flags = [taper_results]
-                else:
-                    assert pool is not None, f"{pool=}, and should not be None"
-                    # This creates an iterator that will return objects as they are completed,
-                    # but breaks timing stats. Not a clear increase of throughput in (brief) testing
-                    # taper_data_and_flags = pool.map(partial_compute_func, data_chunk_tuple)
-
-                    # The list collects all results in order.
-                    taper_data_and_flags = list(
-                        pool.map(partial_compute_func, data_chunk_tuple)
-                    )
-
-                end_tukey = time()
-                total_tukey_time_s += end_tukey - start_tukey
-
-                # Iterate over the result set in a serial manner. Note that depending on
-                # how the .map is called in max_workers>1 case this could be a generator
-                # for taper_data_chunk, flags_to_apply in taper_data_and_flags:
-                taper_chunk_result: TaperedChunkResult
-                for taper_chunk_result in taper_data_and_flags:
-                    write_back_results(
-                        open_ms_tables=open_ms_tables,
-                        taper_chunk_result=taper_chunk_result,
-                        tukey_tractor_options=tukey_tractor_options,
-                        write_back_required=write_back_required,
-                        pbar=pbar,
-                    )
-
-        stop = time()
-        runtime_s = stop - start
-        assert data_chunk_tuple[-1] is not None, "data_chunk is not formed correctly"
-        logger.info(
-            f"Tapered {len(tukey_tractor_options.target_objects)} targets over {len(open_ms_tables.main_table)} rows by {len(data_chunk_tuple[-1].freq_chan)} chans in {runtime_s:0.2f}s"
-        )
-
-        logger.info(
-            f"Nulling time: {total_tukey_time_s:0.2f}s, reading/writing: {runtime_s - total_tukey_time_s:0.2f}s"
-        )
-        if tukey_tractor_options.max_workers > 1:
-            logger.info(
-                f"Used {tukey_tractor_options.max_workers} workers with a {tukey_tractor_options.chunk_size} chunk size"
-            )
-
-        if isinstance(pool, ThreadPoolExecutor):
-            logger.info("Closing thread pool...")
-            pool.shutdown()
 
     plot_paths: list[Path] | None
     if tukey_tractor_options.make_plots:

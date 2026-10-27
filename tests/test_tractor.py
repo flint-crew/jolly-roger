@@ -3,6 +3,7 @@ all are important in their own way"""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -15,11 +16,15 @@ from numpy.typing import NDArray
 from jolly_roger.delays import data_to_delay_time
 from jolly_roger.tractor import (
     DataChunk,
+    TaperedChunkResult,
+    TractorOptions,
     TukeyTractorOptions,
     apply_roll_for_taper,
     compute_tukey_multi_taper,
     find_idx_of_closest_delay,
     make_search_window,
+    prepare_tractor,
+    run_tractor_chunks,
     tukey_tractor,
 )
 from jolly_roger.uvws import WDelays
@@ -497,3 +502,23 @@ def test_tractor_dry_run_leaves_history(ms_example) -> None:
         tukey_tractor_options=TukeyTractorOptions(dry_run=True),
     )
     assert _history_rows(ms_example) == before
+
+
+def test_run_tractor_chunks_applies_chunk_func(ms_example) -> None:
+    """The shared chunk loop writes back whatever the chunk function returns"""
+    options = TractorOptions(output_column="DOUBLED_DATA", max_workers=2, chunk_size=50)
+    setup = prepare_tractor(ms_path=Path(ms_example), tractor_options=options)
+
+    def double(data_chunk: DataChunk) -> TaperedChunkResult:
+        return TaperedChunkResult(
+            chunk_size=data_chunk.chunk_size,
+            update_data=True,
+            data_chunk=replace(data_chunk, masked_data=data_chunk.masked_data * 2),
+        )
+
+    timing = run_tractor_chunks(setup=setup, chunk_func=double, tractor_options=options)
+    setup.open_ms_tables.close()
+
+    assert timing.number_of_channels > 0
+    with table(str(ms_example), ack=False) as tab:
+        np.testing.assert_allclose(tab.getcol("DOUBLED_DATA"), 2 * tab.getcol("DATA"))
