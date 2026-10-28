@@ -438,8 +438,6 @@ def compute_delay_clean(
 class CleanTractorOptions(TractorOptions):
     """Options for removing objects by CLEAN in delay"""
 
-    guard_field: bool = True
-    """Protect the field's delay range, sized from the field of view on each baseline, in addition to field_delay_ns. On by default, as CLEAN subtracts everything outside it; on the command line the flag turns it off."""
     field_delay_ns: float = 10.0
     """Half-width of the field's delay range in nanoseconds, before the guard band is added. Emission inside it is never subtracted."""
     visibility_noise: float | None = None
@@ -533,7 +531,7 @@ def describe_clean_run(
 ) -> str:
     """A plain description of a delay CLEAN run, for logs and the HISTORY table"""
     objects = ", ".join(clean_tractor_options.target_objects)
-    guard = " plus the guard band" if clean_tractor_options.guard_field else ""
+    guard = "" if clean_tractor_options.no_guard_field else " plus the guard band"
     noise = (
         f"the noise was given as {clean_tractor_options.visibility_noise:.3g}"
         if clean_tractor_options.visibility_noise is not None

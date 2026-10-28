@@ -446,12 +446,12 @@ def test_clean_subcommand_options() -> None:
     assert args.mode == "clean"
     assert options.visibility_noise == 0.5
     assert options.field_delay_ns == 20
-    # The guard band is on unless the flag turns it off
-    assert options.guard_field
-    args = get_parser().parse_args(["clean", "example.ms", "--guard-field"])
-    assert not create_options_from_parser(
+    # The guard band is on unless turned off
+    assert not options.no_guard_field
+    args = get_parser().parse_args(["clean", "example.ms", "--no-guard-field"])
+    assert create_options_from_parser(
         parser_namespace=args, options_class=CleanTractorOptions
-    ).guard_field
+    ).no_guard_field
 
 
 def test_cli_runs_clean(monkeypatch: pytest.MonkeyPatch) -> None:
