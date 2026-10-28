@@ -139,7 +139,6 @@ def test_tractor_run1(ms_example) -> None:
 
     tukey_tractor_options = TukeyTractorOptions(
         auto_size=True,
-        guard_field=True,
         object_minimum_flux=0.05,
         output_column=new_column,
     )
@@ -165,7 +164,6 @@ def test_tractor_run2(ms_example) -> None:
 
     tukey_tractor_options = TukeyTractorOptions(
         auto_size=True,
-        guard_field=True,
         object_minimum_flux=0.05,
         output_column=new_column,
         make_plots=True,
