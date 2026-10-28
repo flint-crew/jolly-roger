@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy import ndimage, signal, stats
 
 from jolly_roger.history import add_history, dataclass_to_app_params
 from jolly_roger.logging import logger
@@ -138,9 +139,6 @@ def estimate_visibility_noise(
     Returns:
         float | None: The noise, or None if no run of channels is long enough
     """
-    # scipy is installed with rm-lite, in the clean extra
-    from scipy import ndimage, signal, stats  # noqa: PLC0415
-
     runs, _ = ndimage.label(np.asarray(weights) > 0)
     amplitudes = []
     for run in ndimage.find_objects(runs):

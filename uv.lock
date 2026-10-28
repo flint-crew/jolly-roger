@@ -923,14 +923,14 @@ dependencies = [
     { name = "numpy" },
     { name = "pydantic" },
     { name = "python-casacore" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
 clean = [
     { name = "rm-lite" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 
 [package.dev-dependencies]
@@ -967,7 +967,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2" },
     { name = "python-casacore", specifier = ">=3.6.0" },
     { name = "rm-lite", marker = "extra == 'clean'", specifier = "==2026.10.0" },
-    { name = "scipy", marker = "extra == 'clean'", specifier = ">=1.10" },
+    { name = "scipy", specifier = ">=1.10" },
     { name = "tqdm", specifier = ">=4.67.3" },
 ]
 provides-extras = ["clean"]
