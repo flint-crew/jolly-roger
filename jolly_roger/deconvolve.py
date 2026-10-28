@@ -16,15 +16,30 @@ from the visibilities; the field is cleaned at the same time but left in place.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+import threading
+from dataclasses import dataclass, field, replace
+from functools import partial
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import ndimage, signal, stats
 
+from jolly_roger.history import add_history, dataclass_to_app_params
 from jolly_roger.logging import logger
-from jolly_roger.tractor import DataChunk, TaperedChunkResult
+from jolly_roger.tractor import (
+    DataChunk,
+    TaperedChunkResult,
+    TractorOptions,
+    _get_baseline_time_indicies,
+    make_plot_results,
+    prepare_tractor,
+    run_tractor_chunks,
+)
+from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
+from jolly_roger.uvws import WDelays
+from jolly_roger.wrap import calculate_nyquist_zone
 
 
 class MissingCleanDependencyError(ImportError):
@@ -74,6 +89,10 @@ class DelayCleanResult:
     """Noise in the delay spectrum (per real or imaginary part) used to set the mask and threshold"""
     reaches_field: bool
     """Whether subtracted emission lies just outside the field's delay range, so the object and field may overlap"""
+    edge_residual: float | None = None
+    """Residual after CLEAN in the channels at each end of the band, as a multiple of the noise"""
+    mid_residual: float | None = None
+    """Residual after CLEAN in the remaining channels, as a multiple of the noise"""
 
 
 def delay_axis(
@@ -166,6 +185,31 @@ def _reaches_field(
     peak_outside = float(np.max(per_resolution[outside_field]))
     edge_peak = float(np.max(per_resolution[edge], initial=0.0))
     return edge_peak > max(floor, fraction * peak_outside)
+
+
+EDGE_CHANNELS = 8
+"""Number of used channels at each end of the band whose residual is reported separately"""
+
+
+def _residual_by_band_position(
+    residual: NDArray[np.complexfloating],
+    used: NDArray[np.bool_],
+    noise: float,
+) -> tuple[float | None, float | None]:
+    """RMS of the residual after CLEAN at the band edges and mid-band, as a
+    multiple of the noise. A cut-off at the band edges leaves emission there
+    that CLEAN does not remove, so the edges are reported apart."""
+    used_channels = np.flatnonzero(used)
+    if len(used_channels) < 4 * EDGE_CHANNELS or noise <= 0:
+        return None, None
+    edge = np.r_[used_channels[:EDGE_CHANNELS], used_channels[-EDGE_CHANNELS:]]
+    mid = used_channels[EDGE_CHANNELS:-EDGE_CHANNELS]
+    # The noise is per real or imaginary part, so complex noise has rms noise * sqrt(2)
+    noise_rms = noise * np.sqrt(2)
+    return (
+        float(np.sqrt(np.mean(np.abs(residual[edge]) ** 2)) / noise_rms),
+        float(np.sqrt(np.mean(np.abs(residual[mid]) ** 2)) / noise_rms),
+    )
 
 
 def _model_to_values(
@@ -265,13 +309,51 @@ def delay_clean_spectrum(
     model_values = _model_to_values(
         np.where(outside_field, model, 0), number_of_channels
     )
+    edge_residual, mid_residual = _residual_by_band_position(
+        residual=values - _model_to_values(model, number_of_channels),
+        used=weights > 0,
+        noise=visibility_noise,
+    )
 
     return DelayCleanResult(
         model=model_values,
         iterations=result.iter_count,
         delay_noise=delay_noise,
         reaches_field=reaches_field,
+        edge_residual=edge_residual,
+        mid_residual=mid_residual,
     )
+
+
+@dataclass
+class DelayCleanStatistics:
+    """Running totals over the spectra cleaned in a run. Safe to share
+    between the threads that process chunks."""
+
+    spectra: int = 0
+    """Spectra passed to CLEAN"""
+    noise_not_estimated: int = 0
+    """Spectra left unchanged because no run of channels was long enough to estimate the noise"""
+    rows_flagged: int = 0
+    """Rows flagged because the subtracted emission reached the field"""
+    edge_residuals: list[float] = field(default_factory=list)
+    """Residual at the band edges, as a multiple of the noise, of each spectrum"""
+    mid_residuals: list[float] = field(default_factory=list)
+    """Residual mid-band, as a multiple of the noise, of each spectrum"""
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def record(self, results: list[DelayCleanResult], rows_flagged: int) -> None:
+        """Add the results of one chunk"""
+        with self._lock:
+            self.spectra += len(results)
+            self.rows_flagged += rows_flagged
+            for result in results:
+                if result.edge_residual is None or result.mid_residual is None:
+                    if result.delay_noise == 0:
+                        self.noise_not_estimated += 1
+                    continue
+                self.edge_residuals.append(result.edge_residual)
+                self.mid_residuals.append(result.mid_residual)
 
 
 def compute_delay_clean(
@@ -279,6 +361,8 @@ def compute_delay_clean(
     field_delay_s: float | NDArray[np.floating],
     options: DelayCleanOptions | None = None,
     visibility_noise: float | None = None,
+    active_rows: NDArray[np.bool_] | None = None,
+    statistics: DelayCleanStatistics | None = None,
 ) -> TaperedChunkResult:
     """Remove emission outside the field's delay range from every row and
     polarisation of a chunk with CLEAN in delay. Rows where the subtracted
@@ -289,6 +373,8 @@ def compute_delay_clean(
         field_delay_s (float | NDArray[np.floating]): Half-width of the field's delay range, in seconds, for all rows or for each row
         options (DelayCleanOptions | None, optional): CLEAN settings. Defaults to None (the defaults).
         visibility_noise (float | None, optional): Noise of one visibility, per real or imaginary part. If None it is estimated from each spectrum. Defaults to None.
+        active_rows (NDArray[np.bool_] | None, optional): Rows to clean. Others are passed through unchanged. Defaults to None (all rows).
+        statistics (DelayCleanStatistics | None, optional): Totals to add this chunk's results to. Defaults to None.
 
     Returns:
         TaperedChunkResult: The cleaned visibilities and any new flags
@@ -305,9 +391,14 @@ def compute_delay_clean(
         np.asarray(field_delay_s, dtype=float), (number_of_rows,)
     )
 
+    rows_to_clean = (
+        np.ones(number_of_rows, dtype=bool) if active_rows is None else active_rows
+    )
+
     rows_reaching_field = np.zeros(number_of_rows, dtype=bool)
+    results: list[DelayCleanResult] = []
     with quiet_logs(logging.WARNING):
-        for row in range(number_of_rows):
+        for row in np.flatnonzero(rows_to_clean):
             for pol in range(number_of_pols):
                 weights = (~flags[row, :, pol]).astype(float)
                 if not weights.any():
@@ -322,7 +413,10 @@ def compute_delay_clean(
                 )
                 data[row, :, pol] -= result.model
                 rows_reaching_field[row] |= result.reaches_field
+                results.append(result)
 
+    if statistics is not None:
+        statistics.record(results, rows_flagged=int(rows_reaching_field.sum()))
     if rows_reaching_field.any():
         logger.info(
             f"Flagging {rows_reaching_field.sum()} of {number_of_rows} rows where the object reaches the field in delay"
@@ -338,4 +432,250 @@ def compute_delay_clean(
         ),
         update_flags=bool(rows_reaching_field.any()),
         flags=new_flags,
+    )
+
+
+class CleanTractorOptions(TractorOptions):
+    """Options for removing objects by CLEAN in delay"""
+
+    field_delay_ns: float = 10.0
+    """Half-width of the field's delay range in nanoseconds, before the guard band is added. Emission inside it is never subtracted."""
+    visibility_noise: float | None = None
+    """Noise of one visibility, per real or imaginary part, in the units of the data. If None it is estimated from each spectrum."""
+    threshold_sigma: float = 3.0
+    """CLEAN stops when the residual falls below this many times the noise"""
+    mask_sigma: float = 5.0
+    """The CLEAN mask grows into delays brighter than this many times the noise"""
+
+
+def _active_rows(
+    data_chunk: DataChunk,
+    w_delays_list: list[WDelays],
+    clean_tractor_options: CleanTractorOptions,
+) -> tuple[NDArray[np.bool_], NDArray[np.floating]]:
+    """Rows where any object is above the elevation cut and within the allowed
+    Nyquist zone, and the field's delay range of each row in seconds"""
+    freq_hz = data_chunk.freq_chan.to("Hz").value
+    half_period_s = 0.5 / abs(float(np.mean(np.diff(freq_hz))))
+    cross = data_chunk.ant_1 != data_chunk.ant_2
+
+    active = np.zeros(len(data_chunk.ant_1), dtype=bool)
+    field_delay_s = np.full(
+        len(data_chunk.ant_1), clean_tractor_options.field_delay_ns * 1e-9
+    )
+    for index, w_delays in enumerate(w_delays_list):
+        baseline_idx, time_idx = _get_baseline_time_indicies(w_delays, data_chunk)
+        object_s = w_delays.w_delays[baseline_idx, time_idx].to("s").value
+        above = (
+            w_delays.elevation[time_idx].to("deg").value
+            >= clean_tractor_options.elevation_cut_deg
+        )
+        in_zone = (
+            calculate_nyquist_zone(values=object_s, upper_limit=half_period_s)
+            <= clean_tractor_options.ignore_nyquist_zone
+        )
+        active |= above & in_zone
+        # The guard band depends only on the baseline, so is the same for every object
+        if index == 0 and w_delays.guard_region is not None:
+            field_delay_s = (
+                field_delay_s
+                + w_delays.guard_region[baseline_idx, time_idx].to("s").value
+            )
+    return active & cross, field_delay_s
+
+
+def compute_clean_tractor(
+    data_chunk: DataChunk,
+    clean_tractor_options: CleanTractorOptions,
+    w_delays_list: list[WDelays],
+    statistics: DelayCleanStatistics | None = None,
+) -> TaperedChunkResult:
+    """CLEAN the rows of a chunk where an object to null is above the
+    elevation cut, and subtract the emission outside the field's delay range.
+
+    Args:
+        data_chunk (DataChunk): The visibilities, shaped (row, channel, polarisation)
+        clean_tractor_options (CleanTractorOptions): The CLEAN settings
+        w_delays_list (list[WDelays]): The delays of each object to null, and the guard band
+        statistics (DelayCleanStatistics | None, optional): Totals to add this chunk's results to. Defaults to None.
+
+    Returns:
+        TaperedChunkResult: The cleaned visibilities and any new flags
+    """
+    active, field_delay_s = _active_rows(
+        data_chunk=data_chunk,
+        w_delays_list=w_delays_list,
+        clean_tractor_options=clean_tractor_options,
+    )
+    if not active.any():
+        return TaperedChunkResult(
+            chunk_size=data_chunk.chunk_size,
+            nothing_to_do=True,
+            data_chunk=data_chunk,
+        )
+    return compute_delay_clean(
+        data_chunk=data_chunk,
+        field_delay_s=field_delay_s,
+        options=DelayCleanOptions(
+            mask_sigma=clean_tractor_options.mask_sigma,
+            threshold_sigma=clean_tractor_options.threshold_sigma,
+        ),
+        visibility_noise=clean_tractor_options.visibility_noise,
+        active_rows=active,
+        statistics=statistics,
+    )
+
+
+def describe_clean_run(
+    statistics: DelayCleanStatistics, clean_tractor_options: CleanTractorOptions
+) -> str:
+    """A plain description of a delay CLEAN run, for logs and the HISTORY table"""
+    objects = ", ".join(clean_tractor_options.target_objects)
+    guard = "" if clean_tractor_options.no_guard_field else " plus the guard band"
+    noise = (
+        f"the noise was given as {clean_tractor_options.visibility_noise:.3g}"
+        if clean_tractor_options.visibility_noise is not None
+        else "the noise was estimated from each spectrum"
+    )
+    skipped = (
+        f" {statistics.noise_not_estimated} spectra were left unchanged because too few consecutive channels were unflagged to estimate the noise."
+        if statistics.noise_not_estimated
+        else ""
+    )
+    return (
+        f"Delay CLEAN: removed emission outside the field's delay range "
+        f"(+/-{clean_tractor_options.field_delay_ns:g} ns{guard}) from "
+        f"{statistics.spectra} spectra where {objects} was above the elevation "
+        f"cut; {noise}. {statistics.rows_flagged} rows were flagged because the "
+        f"subtracted emission reached the field.{skipped}"
+    )
+
+
+def describe_band_edges(statistics: DelayCleanStatistics) -> str | None:
+    """A plain description of the residual left at the band edges, or None
+    if no spectrum was long enough to measure it"""
+    if not statistics.edge_residuals:
+        return None
+    edge = np.asarray(statistics.edge_residuals)
+    mid = np.asarray(statistics.mid_residuals)
+    return (
+        f"Delay CLEAN residual: in the {EDGE_CHANNELS} channels at each end of "
+        f"the band it is a median {np.median(edge):.2g} times the noise (95% of "
+        f"spectra below {np.percentile(edge, 95):.2g}), against "
+        f"{np.median(mid):.2g} in the rest of the band. Values well above 1 "
+        "mean emission is left where the band cuts it off."
+    )
+
+
+def describe_clean_line_limit(number_of_channels: int, threshold_sigma: float) -> str:
+    """The brightness above which spectral lines in the field are partly
+    subtracted by delay CLEAN.
+
+    A Gaussian line of peak S and width (FWHM) of n channels spreads over
+    delay with a peak of about 1.06 S n / N in a spectrum of N channels, while
+    CLEAN stops at threshold_sigma times the delay noise, sigma / sqrt(N). So
+    lines are partly subtracted once S / sigma exceeds about
+    threshold_sigma sqrt(N) / (1.06 n).
+    """
+    one_channel = threshold_sigma * np.sqrt(number_of_channels) / 1.06
+    return (
+        "Spectral lines in the field are partly subtracted by delay CLEAN when "
+        f"their peak exceeds about {one_channel:.0f}/n times the noise per "
+        f"channel, for a line n channels wide (FWHM): {one_channel:.0f} times "
+        f"for 1 channel, {one_channel / 10:.0f} times for 10 channels."
+    )
+
+
+@dataclass
+class CleanTractorResults:
+    """Summary of a delay CLEAN run"""
+
+    ms_path: Path
+    """Path to the measurement set that was modified"""
+    output_column: str
+    """The column holding the cleaned visibilities"""
+    output_plots: list[Path] | None = None
+    """The output plots that were created, if any"""
+    statistics: DelayCleanStatistics | None = None
+    """Totals over the spectra that were cleaned. None for a dry run."""
+
+
+def clean_tractor(
+    ms_path: Path, clean_tractor_options: CleanTractorOptions
+) -> CleanTractorResults:
+    """Remove objects outside the field from a measurement set with CLEAN in
+    delay. Only rows where an object is above the elevation cut are cleaned.
+
+    Args:
+        ms_path (Path): The measurement set to modify
+        clean_tractor_options (CleanTractorOptions): The settings to use
+
+    Returns:
+        CleanTractorResults: A summary of the run
+    """
+    # Fail before touching the measurement set if rm-lite is missing
+    _import_minor_loop()
+    log_jolly_roger_version()
+    log_dataclass_attributes(
+        to_log=clean_tractor_options, class_name="CleanTractorOptions"
+    )
+
+    setup = prepare_tractor(ms_path=ms_path, tractor_options=clean_tractor_options)
+    open_ms_tables = setup.open_ms_tables
+
+    number_of_channels = len(
+        np.atleast_1d(open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze())
+    )
+    line_limit = describe_clean_line_limit(
+        number_of_channels=number_of_channels,
+        threshold_sigma=clean_tractor_options.threshold_sigma,
+    )
+    logger.info(line_limit)
+
+    statistics: DelayCleanStatistics | None = None
+    if not clean_tractor_options.dry_run:
+        statistics = DelayCleanStatistics()
+        run_tractor_chunks(
+            setup=setup,
+            chunk_func=partial(
+                compute_clean_tractor,
+                clean_tractor_options=clean_tractor_options,
+                w_delays_list=setup.w_delays_list,
+                statistics=statistics,
+            ),
+            tractor_options=clean_tractor_options,
+        )
+
+    plot_paths: list[Path] | None = None
+    if clean_tractor_options.make_plots:
+        plot_paths = make_plot_results(
+            open_ms_tables=open_ms_tables,
+            data_column=clean_tractor_options.data_column,
+            output_column=clean_tractor_options.output_column,
+            w_delays=setup.w_delays_list,
+            reverse_baselines=clean_tractor_options.reverse_baselines,
+            outer_width_ns=clean_tractor_options.field_delay_ns,
+            max_baselines=clean_tractor_options.number_of_plots,
+        )
+        logger.info(f"Made {len(plot_paths)} output plots")
+
+    if statistics is not None:
+        messages = [describe_clean_run(statistics, clean_tractor_options), line_limit]
+        band_edges = describe_band_edges(statistics)
+        if band_edges is not None:
+            messages.append(band_edges)
+        for message in messages:
+            logger.info(message)
+        add_history(
+            ms_path=open_ms_tables.ms_path,
+            messages=messages,
+            origin="jolly_tractor clean",
+            app_params=dataclass_to_app_params(clean_tractor_options),
+        )
+
+    return CleanTractorResults(
+        ms_path=open_ms_tables.ms_path,
+        output_column=clean_tractor_options.output_column,
+        output_plots=plot_paths,
+        statistics=statistics,
     )
