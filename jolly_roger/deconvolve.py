@@ -92,23 +92,6 @@ def delay_axis(
     return np.fft.fftshift(np.fft.fftfreq(size, d=abs(channel_width_hz)))
 
 
-def _blackman_harris(size: int) -> NDArray[np.floating]:
-    """Four-term Blackman-Harris window, whose sidelobes are 92 dB down"""
-    phase = 2 * np.pi * np.arange(size) / max(size - 1, 1)
-    return (
-        0.35875
-        - 0.48829 * np.cos(phase)
-        + 0.14128 * np.cos(2 * phase)
-        - 0.01168 * np.cos(3 * phase)
-    )
-
-
-def _unflagged_segments(used: NDArray[np.bool_]) -> list[tuple[int, int]]:
-    """Start and end (exclusive) of each run of consecutive used channels"""
-    edges = np.flatnonzero(np.diff(np.concatenate([[0], used.astype(int), [0]])))
-    return list(zip(edges[::2].tolist(), edges[1::2].tolist(), strict=True))
-
-
 def estimate_visibility_noise(
     values: NDArray[np.complexfloating],
     weights: NDArray[np.floating],
@@ -136,18 +119,28 @@ def estimate_visibility_noise(
     Returns:
         float | None: The noise, or None if no run of channels is long enough
     """
+    # scipy is installed with rm-lite, in the clean extra
+    from scipy import ndimage, signal, stats  # noqa: PLC0415
+
+    runs, _ = ndimage.label(np.asarray(weights) > 0)
     amplitudes = []
-    for start, end in _unflagged_segments(np.asarray(weights) > 0):
-        if end - start < min_segment_channels:
+    for run in ndimage.find_objects(runs):
+        segment = values[run[0]]
+        if len(segment) < min_segment_channels:
             continue
-        window = _blackman_harris(end - start)
-        spectrum = np.fft.fft(values[start:end] * window)
+        # Four-term Blackman-Harris window, whose sidelobes are 92 dB down
+        # (Harris 1978, Proc. IEEE 66, 51), so that bright emission does not
+        # spread across the delay axis from the ends of the run
+        window = signal.windows.blackmanharris(len(segment))
+        spectrum = np.fft.fft(segment * window)
         amplitudes.append(np.abs(spectrum) / np.sqrt(np.sum(window**2)))
     if not amplitudes:
         return None
-    # For a Rayleigh distribution the quantile q is sigma * sqrt(-2 ln(1 - q))
-    rayleigh_quantile = np.sqrt(-2 * np.log(1 - quantile))
-    return float(np.quantile(np.concatenate(amplitudes), quantile) / rayleigh_quantile)
+    # The amplitude of complex Gaussian noise with sigma per real or imaginary
+    # part follows a Rayleigh distribution with scale sigma
+    return float(
+        np.quantile(np.concatenate(amplitudes), quantile) / stats.rayleigh.ppf(quantile)
+    )
 
 
 def _reaches_field(
