@@ -36,3 +36,13 @@ def test_sb47138_tukey(ms_sb47138: Path) -> None:
     # The Sun crosses the field in delay on ak01-ak04 after sunrise
     assert flagged[ant_2 == 3].sum() == 83
     assert not flagged[ant_2 != 3].any()
+
+
+def test_sb47138_ak01_ak04_contents(ms_sb47138_ak01_ak04: Path) -> None:
+    with table(str(ms_sb47138_ak01_ak04), ack=False) as tab:
+        baselines = set(
+            zip(tab.getcol("ANTENNA1"), tab.getcol("ANTENNA2"), strict=True)
+        )
+        n_rows = tab.nrows()
+    assert baselines == {(0, 3)}
+    assert n_rows == 784

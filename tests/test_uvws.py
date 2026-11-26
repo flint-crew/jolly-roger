@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from importlib.resources import as_file, files
 from pathlib import Path
 
 import astropy.units as u
@@ -146,8 +145,7 @@ def test_uvw_flagger_applies_flags(ms_example: Path) -> None:
 def _load_sb56289_uvw() -> dict[str, np.ndarray]:
     """Rows of ASKAP SB56289 (RACS_1041+18, beam 10) with the UVWs written by the
     correlator, for three timesteps"""
-    resource = files("jolly_roger.data").joinpath("tests", "sb56289_uvw.npz")
-    with as_file(resource) as path, np.load(path) as arr:
+    with np.load(Path(__file__).parent / "data" / "sb56289_uvw.npz") as arr:
         return dict(arr)
 
 

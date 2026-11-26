@@ -15,7 +15,7 @@ repos:
     rev: "v6.0.0"
     hooks:
       - id: check-added-large-files
-        exclude: ^jolly_roger/data/tests/sb47138_sunrise\.ms\.zip$
+        exclude: ^tests/data/sb47138_.*\.ms\.zip$
       - id: check-case-conflict
       - id: check-merge-conflict
       - id: check-symlinks
