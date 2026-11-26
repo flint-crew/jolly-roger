@@ -34,7 +34,9 @@ def test_sb47138_tukey(ms_sb47138: Path) -> None:
     assert before.shape == after.shape
     assert not np.allclose(before, after)
     # The Sun crosses the field in delay on ak01-ak04 after sunrise
-    assert flagged[ant_2 == 3].sum() == 83
+    # Every row with the Sun above the elevation cut: its notch overlaps the
+    # field's protected range throughout
+    assert flagged[ant_2 == 3].sum() == 120
     assert not flagged[ant_2 != 3].any()
 
 
