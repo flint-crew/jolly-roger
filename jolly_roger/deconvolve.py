@@ -641,7 +641,7 @@ def describe_clean_run(
 ) -> str:
     """A plain description of a delay CLEAN run, for logs and the HISTORY table"""
     objects = ", ".join(clean_tractor_options.target_objects)
-    guard = "" if clean_tractor_options.no_guard_field else " plus the guard band"
+    guard = " plus the guard band" if clean_tractor_options.guard_field else ""
     noise = (
         f"the noise was given as {clean_tractor_options.visibility_noise:.3g}"
         if clean_tractor_options.visibility_noise is not None

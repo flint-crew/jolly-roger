@@ -50,7 +50,7 @@ def test_tukey_options_keep_cli_fields():
         "nth_sidelobe_null",
         "reweight",
         "weight_column",
-        "no_guard_field",
+        "guard_field",
         "dish_diameter_m",
         "guard_field_fraction",
         "object_minimum_flux",
@@ -63,23 +63,24 @@ def test_tukey_options_keep_cli_fields():
 
 
 def test_field_is_guarded_by_default():
-    assert not TukeyTractorOptions().no_guard_field
-    assert TukeyTractorOptions(no_guard_field=True).no_guard_field
+    assert TukeyTractorOptions().guard_field
+    assert not TukeyTractorOptions(guard_field=False).guard_field
 
 
-def test_guard_field_was_replaced():
-    """The old guard_field option is rejected with an explanation"""
-    with pytest.raises(ValidationError, match="replaced by no_guard_field"):
-        TukeyTractorOptions(guard_field=True)  # type: ignore[call-arg]
-
-
-def test_no_guard_field_flag():
+def test_guard_field_flags():
+    """Booleans have a --name / --no-name pair of flags"""
     parser = add_options_to_parser(
         parser=ArgumentParser(), options_class=TukeyTractorOptions
     )
 
-    assert not parser.parse_args([]).no_guard_field
-    assert parser.parse_args(["--no-guard-field"]).no_guard_field
+    def parse(*flags: str) -> TukeyTractorOptions:
+        return create_options_from_parser(
+            parser.parse_args(list(flags)), options_class=TukeyTractorOptions
+        )
+
+    assert parse().guard_field
+    assert parse("--guard-field").guard_field
+    assert not parse("--no-guard-field").guard_field
 
 
 def test_rate_filter_flags():

@@ -18,7 +18,6 @@ from astropy.time import Time
 from capn_crunch import BaseOptions, add_options_to_parser, create_options_from_parser
 from casacore.tables import makecoldesc, table, taql
 from numpy.typing import NDArray
-from pydantic import model_validator
 from tqdm.auto import tqdm
 
 from jolly_roger.baselines import (
@@ -1187,25 +1186,12 @@ class TractorOptions(BaseOptions):
     """Attempt to identify a WEIGHT-like column and rescale to indicate modified data. Defaults to False."""
     weight_column: str | None = None
     """The name of the WEIGHT-like column. If None when rewrite is True the WEIGHT-like column will be searched for. Defaults to None."""
-    no_guard_field: bool = False
-    """Do not protect a region around delay=0 sized from the field of view. By default it is protected."""
+    guard_field: bool = True
+    """Protect a region around delay=0 sized from the field of view"""
     dish_diameter_m: float | None = None
     """Dish diameter in metres used to derive the nominal field of view (e.g. for the guard region), overriding DISH_DIAMETER in the measurement set's ANTENNA table. If None the ANTENNA table is used."""
     guard_field_fraction: float = 0.1
     """The attenuation level of the main lobe to guard to, and should be in the range (0, 1). Values closer to zero correspond to a larger field-of-view, and hence a larger guard band in delay space. """
-
-    @model_validator(mode="before")
-    @classmethod
-    def _replaced_guard_field(cls, data: Any) -> Any:
-        """Explain that ``guard_field`` was replaced, rather than only rejecting it"""
-        if isinstance(data, dict) and "guard_field" in data:
-            msg = (
-                "guard_field was replaced by no_guard_field, and the field is now "
-                "protected by default. Remove guard_field, or set no_guard_field=True "
-                "to turn the protection off."
-            )
-            raise ValueError(msg)
-        return data
 
 
 class RateFilterOptions(BaseOptions):
@@ -1697,7 +1683,7 @@ def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSe
 
     # Calculate the guard field region used to derieve the appropriate delay window
     radial_fov: u.Quantity | None = None
-    if not tractor_options.no_guard_field:
+    if tractor_options.guard_field:
         if open_ms_tables.nominal_fov is None:
             msg = (
                 "Guarding the field needs the field-of-view, but the measurement set "
