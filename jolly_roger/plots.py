@@ -80,6 +80,7 @@ def plot_baseline_comparison_data(
     output_path: Path,
     w_delays: WDelays | list[WDelays] | None = None,
     outer_width_ns: float | None = None,
+    delay_rate: bool = False,
 ) -> Path:
     """Make a comparison figure showing the before and after the nulling process,
     including an examination spectral axis and the formed delay spectrum.
@@ -94,6 +95,7 @@ def plot_baseline_comparison_data(
         output_path (Path): The location that the figure will be saved to
         w_delays (WDelays | list[WDelays] | None, optional): Delays corresponding to objects that have been nulled. Defaults to None.
         outer_width_ns (float | None, optional): The taper size. Defaults to None.
+        delay_rate (bool, optional): Add a row in fringe rate and delay, with the path of each object and the field's guard region. Defaults to False.
 
     Returns:
         Path: Path to the saved figure
@@ -144,9 +146,12 @@ def plot_baseline_comparison_data(
 
         # The elevation curve (ax2) has different units to ax1/3
         # so we can't share the y-axis
-        fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(
-            2, 3, figsize=(18, 10), sharex=True, sharey=False
-        )
+        n_rows = 3 if delay_rate else 2
+        fig, axes = plt.subplots(n_rows, 3, figsize=(18, 5 * n_rows), sharey=False)
+        # The first two rows share the time axis
+        for ax in axes[:2].flat[1:]:
+            ax.sharex(axes[0, 0])
+        (ax1, ax2, ax3), (ax4, ax5, ax6) = axes[0], axes[1]
         im = ax1.pcolormesh(
             before_baseline_data.time,
             before_baseline_data.freq_chan,
@@ -324,6 +329,16 @@ def plot_baseline_comparison_data(
             ylabel="Delay / ns",
         )
 
+        if delay_rate:
+            _plot_delay_rate_row(
+                fig=fig,
+                axes=axes[2],
+                before_baseline_data=before_baseline_data,
+                after_baseline_data=after_baseline_data,
+                w_delays=w_delays,
+                outer_width_ns=outer_width_ns,
+            )
+
         fig.suptitle(
             f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}"
         )
@@ -391,26 +406,16 @@ def _plot_object_path(
         )
 
 
-def plot_baseline_delay_rate_comparison(
+def _plot_delay_rate_row(
+    fig: plt.Figure,
+    axes: NDArray[Any],
     before_baseline_data: BaselineData,
     after_baseline_data: BaselineData,
-    output_path: Path,
-    w_delays: list[WDelays] | None = None,
-    outer_width_ns: float | None = None,
-) -> Path:
-    """A baseline before and after nulling, in fringe rate and delay over the
-    whole observation, with the path of each object and the field's guard region
-
-    Args:
-        before_baseline_data (BaselineData): The baseline before nulling
-        after_baseline_data (BaselineData): The baseline after nulling
-        output_path (Path): Where to save the figure
-        w_delays (list[WDelays] | None, optional): The objects nulled. Defaults to None.
-        outer_width_ns (float | None, optional): The notch's outer width. Defaults to None.
-
-    Returns:
-        Path: The saved figure
-    """
+    w_delays: list[WDelays] | None,
+    outer_width_ns: float | None,
+) -> None:
+    """Before and after nulling in fringe rate and delay over the whole
+    observation, with the path of each object and the field's guard region between"""
     before = data_to_delay_rate(before_baseline_data)
     after = data_to_delay_rate(after_baseline_data)
     delay_ns = before.delay.to("ns").value
@@ -418,7 +423,7 @@ def plot_baseline_delay_rate_comparison(
     freq_hz = before_baseline_data.freq_chan.to("Hz").value
     nu_low, nu_high = float(freq_hz.min()), float(freq_hz.max())
 
-    fig, (ax_before, ax_map, ax_after) = plt.subplots(1, 3, figsize=(18, 5))
+    ax_before, ax_map, ax_after = axes
     amplitudes = [
         np.abs((delay_rate.delay_rate[..., 0] + delay_rate.delay_rate[..., -1]) / 2)
         for delay_rate in (before, after)
@@ -501,13 +506,6 @@ def plot_baseline_delay_rate_comparison(
         ylabel="Delay / ns",
         title="Objects and field",
     )
-    fig.suptitle(
-        f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2} (delay-rate)"
-    )
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
-    return output_path
 
 
 def plot_rate_filter_segment(

@@ -5,7 +5,6 @@ from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
-from itertools import combinations
 from pathlib import Path
 from time import time
 from typing import Any, cast
@@ -37,10 +36,7 @@ from jolly_roger.lines import (
     summarise_line_impact,
 )
 from jolly_roger.logging import logger
-from jolly_roger.plots import (
-    plot_baseline_comparison_data,
-    plot_baseline_delay_rate_comparison,
-)
+from jolly_roger.plots import plot_baseline_comparison_data
 from jolly_roger.rates import (
     RateFilterPayload,
     RateFilterRun,
@@ -476,7 +472,6 @@ def make_plot_results(
     output_column: str,
     target: str | None = None,
     w_delays: WDelays | list[WDelays] | None = None,
-    reverse_baselines: bool = False,
     outer_width_ns: float | None = None,
     max_baselines: int = 10,
     delay_rate: bool = False,
@@ -489,10 +484,9 @@ def make_plot_results(
         output_column (str): The output 'after' data
         target (str): Object nulling was directed towards
         w_delays (WDelays | None, optional): Description of a track through delay space. If ``None`` some plotting will be skipped. Defaults to None.
-        reverse_baselines (bool, optional): Needed in some circumstances should antenna ordering in MS be different. Defaults to False.
         outer_width_ns (float | None, optional): Size, in nanoseconds, of the tukey taper. Defaults to None.
         max_baselines (int, optional): The maximum number of baseline plots to create. Defaults to 10.
-        delay_rate (bool, optional): Also plot each baseline in fringe rate and delay. Defaults to False.
+        delay_rate (bool, optional): Add a row in fringe rate and delay to each baseline's plot. Defaults to False.
 
     Returns:
         list[Path]: Collection of paths to use
@@ -503,16 +497,19 @@ def make_plot_results(
     output_dir = open_ms_tables.ms_path.parent / "plots"
     output_dir.mkdir(exist_ok=True, parents=True)
 
-    n_ant = len(np.unique(open_ms_tables.main_table.getcol("ANTENNA1")))
-    b_idx = np.array(list(combinations(range(n_ant), 2)))
-
-    logger.info(f"MS contains {n_ant} antennas ({len(b_idx)} baselines)")
+    # The cross-correlations present, in the measurement set's own ordering
+    pairs = np.stack(
+        [
+            open_ms_tables.main_table.getcol("ANTENNA1"),
+            open_ms_tables.main_table.getcol("ANTENNA2"),
+        ],
+        axis=1,
+    )
+    b_idx = np.unique(pairs[pairs[:, 0] != pairs[:, 1]], axis=0)
+    logger.info(f"MS contains {len(b_idx)} baselines")
 
     b_idx = b_idx[:max_baselines]
     logger.info(f"Plotting {len(b_idx)} baselines")
-
-    if reverse_baselines:
-        b_idx = b_idx[:, ::-1]
 
     for baseline, (ant_1, ant_2) in enumerate(b_idx):
         logger.info(f"Plotting baseline={baseline + 1}")
@@ -562,22 +559,10 @@ def make_plot_results(
             output_path=output_path,
             w_delays=w_delays,
             outer_width_ns=outer_width_ns,
+            delay_rate=delay_rate,
         )
         logger.info(f"Have written {output_path=}")
         output_paths.append(plot_path)
-
-        if delay_rate:
-            output_paths.append(
-                plot_baseline_delay_rate_comparison(
-                    before_baseline_data=before_baseline_data,
-                    after_baseline_data=after_baseline_data,
-                    output_path=output_path.with_name(
-                        output_path.name.replace("comparison", "delay_rate_comparison")
-                    ),
-                    w_delays=[w_delays] if isinstance(w_delays, WDelays) else w_delays,
-                    outer_width_ns=outer_width_ns,
-                )
-            )
 
     return output_paths
 
@@ -1629,7 +1614,6 @@ def tukey_tractor(
             data_column=tukey_tractor_options.data_column,
             output_column=tukey_tractor_options.output_column,
             w_delays=w_delays_list,
-            reverse_baselines=tukey_tractor_options.reverse_baselines,
             outer_width_ns=tukey_tractor_options.outer_width_ns,
             max_baselines=tukey_tractor_options.number_of_plots,
             delay_rate=tukey_tractor_options.rate_filter,

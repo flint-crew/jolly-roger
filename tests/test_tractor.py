@@ -6,13 +6,15 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from casacore.tables import table
+from casacore.tables import table, taql
 from numpy import ma
 from numpy.typing import NDArray
 
+from jolly_roger.baselines import get_open_ms_tables
 from jolly_roger.delays import data_to_delay_time
 from jolly_roger.rates import RowUpdate
 from jolly_roger.tractor import (
@@ -23,6 +25,7 @@ from jolly_roger.tractor import (
     apply_roll_for_taper,
     compute_tukey_multi_taper,
     find_idx_of_closest_delay,
+    make_plot_results,
     make_search_window,
     prepare_tractor,
     run_tractor_chunks,
@@ -505,7 +508,8 @@ def test_tractor_rate_filter_records_history(ms_example) -> None:
     assert _history_rows(ms_example)[-1]["MESSAGE"].startswith("Delay-rate filter:")
 
 
-def test_tractor_rate_filter_makes_delay_rate_plots(ms_example) -> None:
+def test_tractor_rate_filter_adds_delay_rate_row(ms_example) -> None:
+    """With rate filtering the comparison plot gains a fringe rate and delay row"""
     results = tukey_tractor(
         ms_path=Path(ms_example),
         tukey_tractor_options=TukeyTractorOptions(
@@ -516,9 +520,12 @@ def test_tractor_rate_filter_makes_delay_rate_plots(ms_example) -> None:
         ),
     )
     assert results.output_plots is not None
-    names = [path.name for path in results.output_plots]
-    assert any(name.endswith("_delay_rate_comparison.png") for name in names)
-    assert all(path.exists() for path in results.output_plots)
+    assert len(results.output_plots) == 1
+    assert results.output_plots[0].exists()
+    figure = plt.gcf()
+    rate_axes = [ax for ax in figure.axes if ax.get_xlabel() == "Fringe rate / mHz"]
+    assert len(rate_axes) == 3
+    plt.close(figure)
 
 
 def test_tractor_dry_run_leaves_history(ms_example) -> None:
@@ -575,3 +582,20 @@ def test_write_row_updates(ms_example) -> None:
     assert np.all(data[rows] == 7 + 1j)
     assert not flags[rows].any()
     assert flags[4].all()
+
+
+def test_make_plot_results_single_baseline(ms_example, tmp_path) -> None:
+    """Baselines are taken from the rows present, so a measurement set with
+    one baseline is plotted"""
+    single = tmp_path / "single.ms"
+    taql(
+        f"SELECT FROM {ms_example} WHERE ANTENNA1=0 AND ANTENNA2=1 GIVING {single} AS PLAIN"
+    )
+    open_ms_tables = get_open_ms_tables(ms_path=single)
+    paths = make_plot_results(
+        open_ms_tables=open_ms_tables, data_column="DATA", output_column="DATA"
+    )
+    open_ms_tables.close()
+    assert len(paths) == 1
+    assert "_0_1_" in paths[0].name
+    assert paths[0].exists()
