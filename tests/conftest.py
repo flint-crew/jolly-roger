@@ -48,7 +48,7 @@ def ms_example(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def ms_sb47138(tmp_path: Path) -> Path:
-    """30 minutes of SB47138 around sunrise: ak01 to ak06, ak07 and ak32"""
+    """30 minutes of SB47138 around sunrise: ak01 to ak04, ak06, ak07 and ak32"""
     resource = files("jolly_roger.data").joinpath("tests", "sb47138_sunrise.ms.zip")
     with as_file(resource) as archive:
         shutil.unpack_archive(archive, tmp_path)
