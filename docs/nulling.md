@@ -70,6 +70,32 @@ jolly_tractor clean my.ms --target-objects sun --output-column CORRECTED_DATA
 
 `delay_clean_spectrum` works on one spectrum, `delay_clean_spectra` on a stack of spectra that share their channel weights, `compute_delay_clean` on a `DataChunk`, and `compute_clean_tractor` on a `DataChunk` with the objects' predicted delays, as passed to `run_tractor_chunks` by `clean_tractor`.
 
+### Performance
+
+CLEAN costs about 100 times the notch. Throughput in spectra (one row and polarisation) per second, for 288 channels with two bright objects outside the field, on 4 cores:
+
+| | 1 worker | 2 workers | 4 workers |
+|---|---|---|---|
+| `clean` | 450 | 840 | 1200–1370 |
+| `tukey` | 37,000–45,000 | 62,000–70,000 | 94,000–118,000 |
+
+- Use `--max-workers` up to the number of cores. Chunk size does not change throughput, so set `--chunk-size` for memory; there must be at least `--max-workers` chunks for the workers to be used.
+- Cost grows in proportion to the number of channels: 148 spectra per second at 2592 channels on 4 workers.
+- For a measurement set the size of the bundled test set (2000 rows) reading and writing dominate, and `clean` and `tukey` both take 7–9 s.
+
+Settings that trade quality for speed, with the residual (cleaned minus true, over the noise) on the same data, 4 workers:
+
+| setting | spectra/s | residual |
+|---|---|---|
+| defaults | 1300 | 0.38 |
+| `gain=0.3` | 1430 | 0.37 |
+| `oversample=2` | 1590 | 0.67 |
+| `--threshold-sigma 5 --mask-sigma 8` | 1830 | 0.52 |
+| `gain=0.3`, `oversample=2` | 2490 | 0.64 |
+| `tukey` (for comparison) | 27,000 | 10.2 |
+
+`gain` and `oversample` are set through `DelayCleanOptions` in Python.
+
 ## Delay CLEAN (Python interface)
 
 `jolly_roger.deconvolve` removes bright objects outside the field by CLEAN in delay, as an alternative to the notch. It needs the optional `rm-lite` dependency: `pip install 'jolly-roger[clean]'`.
