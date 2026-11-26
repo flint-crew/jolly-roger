@@ -3,7 +3,7 @@ from __future__ import annotations
 from argparse import ArgumentParser
 
 import pytest
-from capn_crunch import add_options_to_parser
+from capn_crunch import add_options_to_parser, create_options_from_parser
 from pydantic import ValidationError
 
 from jolly_roger.tractor import TractorOptions, TukeyTractorOptions
@@ -56,6 +56,7 @@ def test_tukey_options_keep_cli_fields():
         "object_minimum_flux",
         "peak_shift_search",
         "peak_shift_search_width_ns",
+        "rate_filter",
     }
     assert set(TractorOptions.model_fields) < set(TukeyTractorOptions.model_fields)
     assert "outer_width_ns" not in TractorOptions.model_fields
@@ -79,3 +80,16 @@ def test_no_guard_field_flag():
 
     assert not parser.parse_args([]).no_guard_field
     assert parser.parse_args(["--no-guard-field"]).no_guard_field
+
+
+def test_rate_filter_flags():
+    parser = add_options_to_parser(
+        parser=ArgumentParser(), options_class=TukeyTractorOptions
+    )
+
+    assert not parser.parse_args([]).rate_filter
+    options = create_options_from_parser(
+        parser.parse_args(["--rate-filter"]),
+        options_class=TukeyTractorOptions,
+    )
+    assert options.rate_filter

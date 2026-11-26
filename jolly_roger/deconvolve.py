@@ -763,7 +763,6 @@ def clean_tractor(
             data_column=clean_tractor_options.data_column,
             output_column=clean_tractor_options.output_column,
             w_delays=setup.w_delays_list,
-            reverse_baselines=clean_tractor_options.reverse_baselines,
             outer_width_ns=clean_tractor_options.field_delay_ns,
             max_baselines=clean_tractor_options.number_of_plots,
         )
