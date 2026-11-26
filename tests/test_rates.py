@@ -197,19 +197,8 @@ def test_accumulator_partial_trail_flushed() -> None:
     assert segment.core_rows.tolist() == [1, 2]
 
 
-def test_accumulator_releases_on_gap_in_seconds() -> None:
-    """A step in time much longer than the integration ends a segment, even
-    when the time index does not skip (e.g. between scans)"""
-    accumulator = SegmentAccumulator()
-    time_s = T0_S + DT_S * np.array([0, 1, 2, 30, 31, 32])
-    released = _update(accumulator, _bools("111111"), time_s=time_s)
-    released += flush_segment_accumulator(accumulator)
-
-    assert [seg.rows for seg in released] == [[0, 1, 2], [3, 4, 5]]
-
-
 def test_accumulator_releases_on_given_gap_in_seconds() -> None:
-    """A given largest step in time is used from the first pair of rows"""
+    """A step in time with no skipped index, e.g. between scans"""
     accumulator = SegmentAccumulator(max_time_gap_s=1.5 * DT_S)
     time_s = T0_S + DT_S * np.array([0, 5, 6, 7])
     released = _update(accumulator, _bools("1111"), time_s=time_s)

@@ -1,25 +1,4 @@
-"""Collect the rows of each baseline that delay-rate filtering can recover.
-
-The delay notch flags a row when an object's delay is too close to the
-field's to separate the two in delay. Many of those rows can still be
-separated in fringe rate: over a run of consecutive timesteps the object and
-the field move differently in delay, so a two-dimensional (delay and
-fringe-rate) filter can remove the object while keeping the field.
-
-A measurement set is read in time-ordered chunks of rows from many
-baselines, and the timesteps of one baseline that need such a filter may span
-several chunks. ``update_segment_accumulator`` therefore keeps, for each
-baseline, the run of consecutive rows that are
-
-- flagged by the delay notch (``delay_contaminated``), and
-- recoverable: every object near the field in delay is separated from the
-  field in fringe rate,
-
-and releases the run as a ``ContaminatedSegment`` once it ends: when the
-baseline next sees a row that is not flagged, a row that is not recoverable,
-a gap in time, or ``max_timesteps`` rows. ``flush_segment_accumulator``
-releases whatever remains at the end of the measurement set.
-"""
+"""Delay-rate filtering of rows the delay notch flags"""
 
 from __future__ import annotations
 
@@ -29,9 +8,6 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-
-GAP_FACTOR = 1.5
-"""A step in time of more than this many integrations ends a segment"""
 
 
 @dataclass
@@ -48,10 +24,9 @@ class _Row:
 
 @dataclass
 class ContaminatedSegment:
-    """The consecutive timesteps of a baseline to filter in delay and fringe
-    rate. Core rows are those flagged by the delay notch. Pad rows are clean
-    neighbouring timesteps that only improve the fringe-rate resolution and
-    are never written back."""
+    """Consecutive rows of a baseline to filter in delay-rate. Core rows were
+    flagged by the delay notch. Pad rows are clean neighbours that are never
+    written back."""
 
     ant_1: int
     """The first antenna of the baseline"""
@@ -123,37 +98,24 @@ class _BaselineState:
     """The time index of the last row seen"""
     last_time_mjd: float | None = None
     """The time of the last row seen, MJD in seconds"""
-    time_step_s: float | None = None
-    """The smallest step in time seen between consecutive rows, in seconds"""
 
 
 @dataclass
 class SegmentAccumulator:
-    """Collect, for each baseline, the consecutive rows that delay-rate
-    filtering can recover, and release them as a segment once the run ends.
-    Rows are consumed by ``update_segment_accumulator``.
-
-    Each row is one of:
-    - clean: not flagged by the delay notch
-    - recoverable: flagged by the delay notch, and every object near the field in delay is separated from it in fringe rate
-    - not recoverable: flagged by the delay notch, and some object is near the field in both delay and fringe rate
-
-    A segment is released when its baseline sees a clean row (after
-    ``pad_timesteps`` trailing clean rows have been collected), a row that is
-    not recoverable, a gap in time, or ``max_timesteps`` core rows. Up to
-    ``pad_timesteps`` clean rows before a segment are added in front of it.
-    """
+    """Per-baseline collection of recoverable rows. A segment is released on
+    a clean row (after ``pad_timesteps`` trailing rows), an unrecoverable row,
+    a gap in time, or ``max_timesteps`` core rows."""
 
     max_timesteps: int | None = 256
-    """The most core rows of a segment before it is released. Bounds memory: each baseline being collected holds up to (``max_timesteps`` + 2 ``pad_timesteps``) rows of channels x polarisations x 16 bytes. If None there is no limit."""
+    """The most core rows of a segment. Bounds memory. If None there is no limit."""
     pad_timesteps: int = 0
     """The number of clean rows either side of a segment to include as padding"""
     max_time_gap_s: float | None = None
-    """The largest step in time between consecutive rows of a baseline within a segment, in seconds, e.g. ``GAP_FACTOR`` times the integration time. If None it is ``GAP_FACTOR`` times the smallest step seen so far on that baseline, which misses a gap between the first two rows. A row that skips a time index also ends a segment."""
+    """The largest step in time within a segment, in seconds. If None only a skipped time index is a gap."""
     states: dict[tuple[int, int], _BaselineState] = field(default_factory=dict)
     """The tracking of each baseline, keyed by (ANTENNA1, ANTENNA2)"""
     doubly_contaminated_rows: int = 0
-    """Count of rows flagged by the delay notch that could not be recovered because an object is near the field in fringe rate as well"""
+    """Rows flagged by the delay notch that are not separable in delay-rate either"""
 
 
 @dataclass
@@ -175,9 +137,9 @@ class RateFilterPayload:
     original_masked_data: np.ma.MaskedArray
     """The visibilities before any delay tapering, shape (row, chan, pol)"""
     delay_contaminated: NDArray[np.bool_]
-    """Rows flagged by the delay notch because an object is too close to the field in delay"""
+    """Rows flagged by the delay notch"""
     recoverable: NDArray[np.bool_]
-    """Rows flagged by the delay notch where every object near the field in delay is separated from it in fringe rate"""
+    """Flagged rows where every object is separable from the field in delay-rate"""
     original_weights: dict[str, NDArray[np.floating[Any]]] | None = None
     """The weights before any scaling"""
 
@@ -198,21 +160,14 @@ def _is_time_gap(
     time_mjd: float,
     max_time_gap_s: float | None,
 ) -> bool:
-    """Whether a row does not directly follow the previous row of its
-    baseline: it skips a time index, or the step in time is larger than
-    ``max_time_gap_s`` (or, if None, ``GAP_FACTOR`` times the smallest step
-    seen so far on the baseline). Updates the smallest step seen."""
+    """Whether a row does not directly follow the previous row of its baseline"""
     if state.last_time_idx is None or state.last_time_mjd is None:
         return False
-    step_s = time_mjd - state.last_time_mjd
-    if not 0 < time_idx - state.last_time_idx <= 1 or step_s <= 0:
+    if time_idx - state.last_time_idx != 1:
         return True
-    if state.time_step_s is None or step_s < state.time_step_s:
-        state.time_step_s = step_s
-    limit_s = (
-        GAP_FACTOR * state.time_step_s if max_time_gap_s is None else max_time_gap_s
+    return (
+        max_time_gap_s is not None and time_mjd - state.last_time_mjd > max_time_gap_s
     )
-    return step_s > limit_s
 
 
 def update_segment_accumulator(
@@ -222,7 +177,7 @@ def update_segment_accumulator(
 
     Args:
         accumulator (SegmentAccumulator): The per-baseline collection of rows, updated in place
-        payload (RateFilterPayload): The rows, and whether each is flagged by the delay notch and recoverable
+        payload (RateFilterPayload): The rows, and whether each is flagged and recoverable
 
     Returns:
         list[ContaminatedSegment]: Segments that have been released and are ready to filter
