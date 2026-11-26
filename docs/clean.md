@@ -8,7 +8,7 @@ jolly_tractor clean my.ms --target-objects sun --output-column CORRECTED_DATA
 
 ## Example
 
-The example below runs `clean` on the same 30 minutes of ASKAP data as the [notch example](nulling_example.ipynb). The figures are made from the data each time the documentation is built.
+The example below runs `clean` on the same 30 minutes of an ASKAP EMU observation as the [notch example](nulling_example.ipynb). The figures are made from the data each time the documentation is built.
 
 ```{toctree}
 :maxdepth: 1

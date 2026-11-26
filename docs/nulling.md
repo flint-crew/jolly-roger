@@ -13,9 +13,9 @@ Brief testing suggests that smaller batch sizes is preferable over larger when u
 
 ## Example
 
-The nulling approach can be accessed through `jolly_tractor`. The example below runs it on 30 minutes of ASKAP data around sunrise, nulling the Sun, and shows the before and after for each baseline. The figures are made from the data each time the documentation is built.
+`jolly_tractor tukey` applies the notch. The example below nulls the Sun in 30 minutes of an ASKAP EMU observation around sunrise, and shows each baseline before and after. The figures are made from the data each time the documentation is built.
 
-The dashed line in the middle panel is the delay of the Sun as derived from the geometry of the array, with the length of each dash showing its Nyquist zone (how aliased the object appears in delay). Nulling is skipped beyond `--ignore-nyquist-zone`, typically on longer baselines. Where the object's delay meets the field's guard region the timestep is flagged, as the two can not be separated in delay; `--rate-filter` can recover many of these rows.
+The dashed line in the middle panel is the Sun's delay, predicted from the array geometry. The length of each dash shows the Nyquist zone, i.e. how many times the object's delay wraps round the delay axis. Objects beyond `--ignore-nyquist-zone` are not nulled, which is typical on longer baselines. Where the object's delay comes within the field's guard region the two cannot be separated in delay, so the timestep is flagged; `--rate-filter` can recover many of these rows.
 
 ```{toctree}
 :maxdepth: 1
@@ -48,12 +48,12 @@ The nulling can be used from Python without the CLI, either on a measurement set
 
 ## Delay-rate filtering
 
-`jolly_tractor tukey --rate-filter` recovers rows the notch flags because an object is too close to the field in delay, when the object is separated from the field in fringe rate.
+`jolly_tractor tukey --rate-filter` recovers rows that the notch flags because an object is too close to the field in delay, provided the object is separated from the field in fringe rate.
 
-- Consecutive flagged rows of each baseline, plus clean rows either side, are filtered together in delay and fringe rate. The object's delay track and fringe-rate band are removed; the field's region, sized from the same field of view as the delay guard band, is kept.
+- Consecutive flagged rows of each baseline, plus clean rows either side, are filtered together in delay and fringe rate. The region around each object's delay track and fringe-rate band is removed. The field's region, sized from the same field of view as the delay guard band, is kept.
 - A row is recovered only if the object left in it is comparable to what the notch leaves on rows it does not flag. Rows near the ends of a run without clean neighbours, or that fail this check, stay flagged.
-- Each run is filtered in segments long enough to separate every object from the field in fringe rate, which depends on the baseline, the objects' fringe rates, the frequencies and the integration time. A segment is released at twice the duration its rows need; long runs are split into overlapping segments, so no row is left at a segment end.
-- With `--make-plots`, each baseline's comparison plot gains a third row in fringe rate and delay, and up to `--number-of-plots` filtered segments are plotted with the region removed and the field's box.
+- Each run is filtered in segments long enough to separate every object from the field in fringe rate. The length needed depends on the baseline, the objects' fringe rates, the frequencies and the integration time, and each segment lasts twice that. Long runs are split into overlapping segments, so no recovered row is at the end of a segment.
+- With `--make-plots`, each baseline's comparison plot has a third row, in fringe rate and delay, and up to `--number-of-plots` filtered segments are plotted with the region the filter removes and the field's guard region.
 
 From arrays, `make_rate_filter_run`, `update_rate_filter` and `flush_rate_filter` (`jolly_roger.rates`) run the filter over chunks, and `filter_segment` filters one baseline's rows.
 
