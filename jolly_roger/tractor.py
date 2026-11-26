@@ -38,6 +38,13 @@ from jolly_roger.lines import (
 )
 from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
+from jolly_roger.rates import (
+    RateFilterPayload,
+    RowUpdate,
+    SegmentRateFilter,
+    describe_rate_filter,
+    separable_in_rate,
+)
 from jolly_roger.response import (
     calculate_expected_sinc_width,
     get_delay_of_nth_sidelobe,
@@ -593,6 +600,8 @@ class TaperResult:
     """The fupdated flags"""
     delay_time: DelayTime | None = None
     """The delay_time taper was constructede against"""
+    delay_contaminated: NDArray[np.bool_] | None = None
+    """Rows flagged because the notch meets the field"""
 
 
 def find_idx_of_closest_delay(x: u.Quantity, object_delays: u.Quantity) -> NDArray[int]:
@@ -889,6 +898,7 @@ def compute_tukey_taper(
         update_flags=np.any(flags_to_return),
         flags=flags_to_return,
         delay_time=delay_time,
+        delay_contaminated=intersecting_taper,
     )
 
 
@@ -938,6 +948,55 @@ class TaperedChunkResult:
     """Indicates whether data should be written back to the MS"""
     weights: dict[str, NDArray[np.floating[Any]]] | None = None
     """The scaled weights that should be written back to the MS. The key is the column name and the mapped values are the corresponding scaled weights. If None nothing to write back."""
+    rate_payload: RateFilterPayload | None = None
+    """Rows for delay-rate filtering. None unless rate filtering."""
+
+
+def make_rate_filter_payload(
+    data_chunk: DataChunk,
+    original_masked_data: np.ma.MaskedArray,
+    w_delays_list: list[WDelays],
+    object_contaminated: list[NDArray[np.bool_]],
+) -> RateFilterPayload:
+    """The rows of a chunk the delay notch flags, and which are candidate by delay-rate filtering
+
+    Args:
+        data_chunk (DataChunk): The chunk, before nulling
+        original_masked_data (np.ma.MaskedArray): The visibilities and flags before nulling
+        w_delays_list (list[WDelays]): The delays of each object to null
+        object_contaminated (list[NDArray[np.bool_]]): Rows each object's notch flags
+
+    Returns:
+        RateFilterPayload: The rows, as needed by ``SegmentRateFilter``
+    """
+    n_rows = len(data_chunk.ant_1)
+    baseline_idx, time_idx = _get_baseline_time_indicies(
+        w_delays=w_delays_list[0], data_chunk=data_chunk
+    )
+    freq_hz = np.atleast_1d(data_chunk.freq_chan.to("Hz").value)
+    delay_contaminated = np.zeros(n_rows, dtype=bool)
+    candidate = np.ones(n_rows, dtype=bool)
+    for w_delays, contaminated in zip(w_delays_list, object_contaminated, strict=True):
+        delay_contaminated |= contaminated
+        candidate &= ~contaminated | separable_in_rate(
+            w_delays=w_delays,
+            baseline_idx=baseline_idx,
+            time_idx=time_idx,
+            freq_hz=freq_hz,
+        )
+    cross = data_chunk.ant_1 != data_chunk.ant_2
+    return RateFilterPayload(
+        rows=data_chunk.row_start + np.arange(n_rows),
+        ant_1=np.asarray(data_chunk.ant_1),
+        ant_2=np.asarray(data_chunk.ant_2),
+        time_mjds=np.asarray(data_chunk.time_mjds, dtype=float),
+        baseline_idx=baseline_idx,
+        time_idx=time_idx,
+        original_masked_data=original_masked_data,
+        delay_contaminated=delay_contaminated & cross,
+        candidate=candidate & delay_contaminated & cross,
+        original_weights=data_chunk.weights,
+    )
 
 
 def compute_tukey_multi_taper(
@@ -946,6 +1005,9 @@ def compute_tukey_multi_taper(
     w_delays_list: list[WDelays],
 ) -> TaperedChunkResult:
     chunk_size = data_chunk.chunk_size
+    original_masked_data = data_chunk.masked_data
+    n_rows = len(data_chunk.ant_1)
+    object_contaminated = [np.zeros(n_rows, dtype=bool) for _ in w_delays_list]
 
     outer_width = tukey_tractor_options.outer_width_ns * 1e-9 * u.s
 
@@ -953,7 +1015,7 @@ def compute_tukey_multi_taper(
     # to avoid unnecessary recomputes. Also why the for loop and not list comphrension
     delay_time: DelayTime | None = None
     taper_results = []
-    for w_delays in w_delays_list:
+    for object_index, w_delays in enumerate(w_delays_list):
         taper_result = compute_tukey_taper(
             data_chunk=data_chunk,
             tukey_tractor_options=tukey_tractor_options,
@@ -964,6 +1026,8 @@ def compute_tukey_multi_taper(
         # delay_time, and should not discard the one formed for an earlier object
         if taper_result.delay_time is not None:
             delay_time = taper_result.delay_time
+        if taper_result.delay_contaminated is not None:
+            object_contaminated[object_index] |= taper_result.delay_contaminated
         taper_results.append(taper_result)
 
         if (
@@ -988,13 +1052,29 @@ def compute_tukey_multi_taper(
                 )
                 if taper_result.delay_time is not None:
                     delay_time = taper_result.delay_time
+                if taper_result.delay_contaminated is not None:
+                    object_contaminated[object_index] |= taper_result.delay_contaminated
                 taper_results.append(taper_result)
+
+    rate_payload = (
+        make_rate_filter_payload(
+            data_chunk=data_chunk,
+            original_masked_data=original_masked_data,
+            w_delays_list=w_delays_list,
+            object_contaminated=object_contaminated,
+        )
+        if tukey_tractor_options.rate_filter
+        else None
+    )
 
     # Handle all the cases. If all data chunks showed nothing to do we can
     # return early and provide the original data back to the caller.
     if all(not taper_result.attached_payload for taper_result in taper_results):
         return TaperedChunkResult(
-            chunk_size=chunk_size, nothing_to_do=True, data_chunk=data_chunk
+            chunk_size=chunk_size,
+            nothing_to_do=True,
+            data_chunk=data_chunk,
+            rate_payload=rate_payload,
         )
 
     # Throw away objects that are unnecessary in subsequent stages
@@ -1052,6 +1132,7 @@ def compute_tukey_multi_taper(
         flags=combined_flags,
         update_weights=update_weights,
         weights=scaled_weights,
+        rate_payload=rate_payload,
     )
 
 
@@ -1112,7 +1193,16 @@ class TractorOptions(BaseOptions):
         return data
 
 
-class TukeyTractorOptions(TractorOptions):
+class RateFilterOptions(BaseOptions):
+    """Options for delay-rate filtering, shared by the tractors"""
+
+    rate_filter: bool = False
+    """Recover rows flagged by the delay notch by filtering in delay-rate where the object is separable from the field"""
+    rate_filter_max_timesteps: int = 256
+    """The most rows per baseline filtered together. Bounds memory."""
+
+
+class TukeyTractorOptions(TractorOptions, RateFilterOptions):
     """Options to describe the tukey taper to apply"""
 
     outer_width_ns: float = 10
@@ -1381,6 +1471,46 @@ def write_back_results(
         logger.debug("No updating of weights")
 
 
+def make_segment_rate_filter(
+    open_ms_tables: OpenMSTables,
+    tukey_tractor_options: TukeyTractorOptions,
+    w_delays_list: list[WDelays],
+) -> SegmentRateFilter:
+    """Delay-rate filter with the notch's delay widths, covering any nulled sidelobes
+
+    Args:
+        open_ms_tables (OpenMSTables): The open measurement set
+        tukey_tractor_options (TukeyTractorOptions): The notch settings, after any auto-sizing
+        w_delays_list (list[WDelays]): The delays of each object to null
+
+    Returns:
+        SegmentRateFilter: The filter for ``run_tractor_chunks``
+    """
+    outer_width_s = tukey_tractor_options.outer_width_ns * 1e-9
+    delay_width_s = outer_width_s
+    if tukey_tractor_options.nth_sidelobe_null is not None:
+        delay_width_s = (
+            get_delay_of_nth_sidelobe(
+                n=tukey_tractor_options.nth_sidelobe_null, sinc_width=outer_width_s
+            )
+            .to("s")
+            .value
+            + outer_width_s
+        )
+    return SegmentRateFilter(
+        w_delays_list=w_delays_list,
+        freq_hz=np.atleast_1d(
+            open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze()
+        ).astype(float),
+        delay_width_s=delay_width_s,
+        delay_roll_off_s=tukey_tractor_options.tukey_width_ns * 1e-9,
+        field_delay_s=outer_width_s,
+        elevation_cut_deg=tukey_tractor_options.elevation_cut_deg,
+        ignore_nyquist_zone=tukey_tractor_options.ignore_nyquist_zone,
+        max_timesteps=tukey_tractor_options.rate_filter_max_timesteps,
+    )
+
+
 def tukey_tractor(
     ms_path: Path,
     tukey_tractor_options: TukeyTractorOptions,
@@ -1435,7 +1565,14 @@ def tukey_tractor(
         kernel_summary=kernel_summary,
     )
 
+    segment_filter: SegmentRateFilter | None = None
     if not tukey_tractor_options.dry_run:
+        if tukey_tractor_options.rate_filter:
+            segment_filter = make_segment_rate_filter(
+                open_ms_tables=open_ms_tables,
+                tukey_tractor_options=tukey_tractor_options,
+                w_delays_list=w_delays_list,
+            )
         partial_compute_func = partial(
             compute_tukey_multi_taper,
             tukey_tractor_options=tukey_tractor_options,
@@ -1445,7 +1582,14 @@ def tukey_tractor(
             setup=setup,
             chunk_func=partial_compute_func,
             tractor_options=tukey_tractor_options,
+            segment_filter=segment_filter,
         )
+        if segment_filter is not None:
+            rate_message = describe_rate_filter(
+                segment_filter.summary,
+                segment_filter.accumulator.doubly_contaminated_rows,
+            )
+            logger.info(rate_message)
 
     plot_paths: list[Path] | None
     if tukey_tractor_options.make_plots:
@@ -1472,6 +1616,7 @@ def tukey_tractor(
                     describe_line_impact(name, summary)
                     for name, summary in line_impacts.items()
                 ),
+                *([rate_message] if segment_filter is not None else []),
             ],
             origin="jolly_tractor tukey",
             app_params=dataclass_to_app_params(tukey_tractor_options),
@@ -1564,10 +1709,34 @@ def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSe
     )
 
 
+def write_row_updates(
+    open_ms_tables: OpenMSTables,
+    updates: list[RowUpdate],
+    output_column: str,
+) -> None:
+    """Write rows recovered by delay-rate filtering
+
+    Args:
+        open_ms_tables (OpenMSTables): The open measurement set
+        updates (list[RowUpdate]): The recovered rows
+        output_column (str): The column the modified visibilities are written to
+    """
+    for update in updates:
+        selected = open_ms_tables.main_table.selectrows(update.rows.tolist())
+        try:
+            selected.putcol(columnname=output_column, value=update.data)
+            selected.putcol(columnname="FLAG", value=update.flags)
+            for name, weights in (update.weights or {}).items():
+                selected.putcol(columnname=name, value=weights)
+        finally:
+            selected.close()
+
+
 def run_tractor_chunks(
     setup: TractorSetup,
     chunk_func: Callable[[DataChunk], TaperedChunkResult],
     tractor_options: TractorOptions,
+    segment_filter: SegmentRateFilter | None = None,
 ) -> None:
     """Read the measurement set in chunks of rows, pass each chunk to
     ``chunk_func``, and write the results back. Shared by every tractor:
@@ -1577,6 +1746,7 @@ def run_tractor_chunks(
         setup (TractorSetup): Open tables and write-back settings from ``prepare_tractor``
         chunk_func (Callable[[DataChunk], TaperedChunkResult]): Modifies one chunk of rows
         tractor_options (TractorOptions): The shared tractor options
+        segment_filter (SegmentRateFilter | None, optional): Delay-rate filter fed each result's ``rate_payload``. Defaults to None.
     """
     open_ms_tables = setup.open_ms_tables
     weight_columns = setup.weight_columns
@@ -1629,6 +1799,22 @@ def run_tractor_chunks(
                     write_back_required=write_back_required,
                     pbar=pbar,
                 )
+                if (
+                    segment_filter is not None
+                    and taper_chunk_result.rate_payload is not None
+                ):
+                    write_row_updates(
+                        open_ms_tables=open_ms_tables,
+                        updates=segment_filter.update(taper_chunk_result.rate_payload),
+                        output_column=tractor_options.output_column,
+                    )
+
+        if segment_filter is not None:
+            write_row_updates(
+                open_ms_tables=open_ms_tables,
+                updates=segment_filter.flush(),
+                output_column=tractor_options.output_column,
+            )
 
     stop = time()
     runtime_s = stop - start

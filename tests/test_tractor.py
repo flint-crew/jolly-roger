@@ -14,6 +14,7 @@ from numpy import ma
 from numpy.typing import NDArray
 
 from jolly_roger.delays import data_to_delay_time
+from jolly_roger.rates import RowUpdate
 from jolly_roger.tractor import (
     DataChunk,
     TaperedChunkResult,
@@ -26,6 +27,7 @@ from jolly_roger.tractor import (
     prepare_tractor,
     run_tractor_chunks,
     tukey_tractor,
+    write_row_updates,
 )
 from jolly_roger.uvws import WDelays
 
@@ -492,6 +494,17 @@ def test_tractor_reports_kernel_and_history(ms_example) -> None:
     assert after[-1]["MESSAGE"].startswith("Spectral-line impact of nulling sun")
 
 
+def test_tractor_rate_filter_records_history(ms_example) -> None:
+    """A run with the rate filter adds its summary to HISTORY"""
+    tukey_tractor(
+        ms_path=Path(ms_example),
+        tukey_tractor_options=TukeyTractorOptions(
+            output_column="JACKS_DATA", rate_filter=True
+        ),
+    )
+    assert _history_rows(ms_example)[-1]["MESSAGE"].startswith("Delay-rate filter:")
+
+
 def test_tractor_dry_run_leaves_history(ms_example) -> None:
     """A dry run does not modify the HISTORY table"""
     before = _history_rows(ms_example)
@@ -519,3 +532,30 @@ def test_run_tractor_chunks_applies_chunk_func(ms_example) -> None:
 
     with table(str(ms_example), ack=False) as tab:
         np.testing.assert_allclose(tab.getcol("DOUBLED_DATA"), 2 * tab.getcol("DATA"))
+
+
+def test_write_row_updates(ms_example) -> None:
+    """Scattered rows are written to the output column and flags"""
+    options = TractorOptions(output_column="JACKS_DATA", copy_column_data=True)
+    setup = prepare_tractor(ms_path=Path(ms_example), tractor_options=options)
+    shape = setup.open_ms_tables.main_table.getcell("DATA", 0).shape
+    rows = np.array([3, 10, 11])
+    write_row_updates(
+        open_ms_tables=setup.open_ms_tables,
+        updates=[
+            RowUpdate(
+                rows=rows,
+                data=np.full((3, *shape), 7 + 1j, dtype=complex),
+                flags=np.zeros((3, *shape), dtype=bool),
+            )
+        ],
+        output_column=options.output_column,
+    )
+    setup.open_ms_tables.close()
+
+    with table(str(ms_example), ack=False) as tab:
+        data = tab.getcol("JACKS_DATA")
+        flags = tab.getcol("FLAG")
+    assert np.all(data[rows] == 7 + 1j)
+    assert not flags[rows].any()
+    assert flags[4].all()

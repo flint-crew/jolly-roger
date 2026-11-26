@@ -50,6 +50,16 @@ The nulling can be used from Python without the CLI, either on a measurement set
 
 `TractorOptions` holds the options shared by every nulling method (columns, chunking, workers, plots, the field's guard band); `TukeyTractorOptions` adds the notch settings.
 
+## Delay-rate filtering
+
+`jolly_tractor tukey --rate-filter` recovers rows the notch flags because an object is too close to the field in delay, when the object is separated from the field in fringe rate.
+
+- Consecutive flagged rows of each baseline, plus clean rows either side, are filtered together in delay and fringe rate. The object's delay track and fringe-rate band are removed; the field's region, sized from the same field of view as the delay guard band, is kept.
+- A row is recovered only if the object left in it is comparable to what the notch leaves on rows it does not flag. Rows near the ends of a run without clean neighbours, or that fail this check, stay flagged.
+- `--rate-filter-max-timesteps` caps the rows of a baseline filtered together, which bounds memory.
+
+`SegmentRateFilter` (`jolly_roger.rates`) runs the filter from arrays, and `filter_segment` filters one baseline's rows.
+
 ## CLI
 
 
