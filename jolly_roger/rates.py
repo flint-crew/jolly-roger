@@ -579,153 +579,188 @@ class RateFilterSummary:
     not_separable: int = 0
 
 
-class SegmentRateFilter:
-    """Recover rows flagged by the delay notch by filtering each baseline's
-    consecutive rows in delay-rate. Feed chunks in row order with ``update``,
-    then call ``flush``.
+@dataclass(frozen=True)
+class RateFilterSettings:
+    """What delay-rate filtering needs to know of the notch and the objects"""
+
+    w_delays_list: list[WDelays]
+    """The delays of each object to null"""
+    freq_hz: NDArray[np.floating[Any]]
+    """Frequency of each channel, in Hz"""
+    delay_width_s: float
+    """Half-width removed around each object's delay track, in seconds"""
+    delay_roll_off_s: float
+    """Roll-off in delay, in seconds"""
+    field_delay_s: float
+    """Half-width of the field's delays before the guard band, in seconds"""
+    elevation_cut_deg: float
+    """Objects below this elevation are not nulled"""
+    ignore_nyquist_zone: int
+    """Objects beyond this Nyquist zone are not nulled"""
+    pad_timesteps: int = 16
+    """Clean rows either side of a segment"""
+
+
+@dataclass
+class RateFilterRun:
+    """The state of delay-rate filtering over a measurement set"""
+
+    settings: RateFilterSettings
+    accumulator: SegmentAccumulator
+    summary: RateFilterSummary = field(default_factory=RateFilterSummary)
+
+
+def make_rate_filter_run(
+    settings: RateFilterSettings,
+    max_timesteps: int | None,
+    max_gap_steps: float = 1.5,
+) -> RateFilterRun:
+    """Start delay-rate filtering, feeding chunks in row order to ``update_rate_filter``
 
     Args:
-        w_delays_list (list[WDelays]): The delays of each object to null
-        freq_hz (NDArray[np.floating[Any]]): Frequency of each channel, in Hz
-        delay_width_s (float): Half-width removed around each object's delay track, in seconds
-        delay_roll_off_s (float): Roll-off in delay, in seconds
-        field_delay_s (float): Half-width of the field's delays before the guard band, in seconds
-        elevation_cut_deg (float): Objects below this elevation are not nulled
-        ignore_nyquist_zone (int): Objects beyond this Nyquist zone are not nulled
+        settings (RateFilterSettings): The notch and object settings
         max_timesteps (int | None): The most candidates per segment
-        pad_timesteps (int, optional): Clean rows either side of a segment. Defaults to 16.
         max_gap_steps (float, optional): A step in time of more than this many integrations ends a segment. Defaults to 1.5.
-    """
 
-    def __init__(
-        self,
-        w_delays_list: list[WDelays],
-        freq_hz: NDArray[np.floating[Any]],
-        delay_width_s: float,
-        delay_roll_off_s: float,
-        field_delay_s: float,
-        elevation_cut_deg: float,
-        ignore_nyquist_zone: int,
-        max_timesteps: int | None,
-        pad_timesteps: int = 16,
-        max_gap_steps: float = 1.5,
-    ) -> None:
-        self.w_delays_list = w_delays_list
-        self.freq_hz = np.asarray(freq_hz, dtype=float)
-        self.delay_width_s = delay_width_s
-        self.delay_roll_off_s = delay_roll_off_s
-        self.field_delay_s = field_delay_s
-        self.elevation_cut_deg = elevation_cut_deg
-        self.ignore_nyquist_zone = ignore_nyquist_zone
-        self.pad_timesteps = pad_timesteps
-        self.rates = [get_w_rates(w).to("").value for w in w_delays_list]
-        time_s = _time_map_to_seconds(w_delays_list[0].time_map)
-        self.accumulator = SegmentAccumulator(
+    Returns:
+        RateFilterRun: The empty state
+    """
+    time_s = _time_map_to_seconds(settings.w_delays_list[0].time_map)
+    return RateFilterRun(
+        settings=settings,
+        accumulator=SegmentAccumulator(
             max_timesteps=max_timesteps,
-            pad_timesteps=pad_timesteps,
+            pad_timesteps=settings.pad_timesteps,
             max_time_gap_s=max_gap_steps * float(np.median(np.diff(time_s)))
             if len(time_s) > 1
             else None,
+        ),
+    )
+
+
+def segment_geometry(
+    segment: CandidateSegment, settings: RateFilterSettings
+) -> SegmentGeometry:
+    """Predicted delays and rates of the objects and the field over a segment"""
+    baseline = segment.baseline_idx
+    time_idx = np.asarray(segment.time_idx)
+    half_period_s = 0.5 / abs(float(np.mean(np.diff(settings.freq_hz))))
+    delays, rates, active = [], [], []
+    for w_delays in settings.w_delays_list:
+        delay = w_delays.w_delays[baseline, time_idx].to("s").value
+        elevation = w_delays.elevation[time_idx].to("deg").value
+        zone = calculate_nyquist_zone(values=delay, upper_limit=half_period_s)
+        delays.append(delay)
+        rates.append(get_w_rates(w_delays)[baseline, time_idx].to("").value)
+        active.append(
+            (elevation >= settings.elevation_cut_deg)
+            & (zone <= settings.ignore_nyquist_zone)
         )
-        self.summary = RateFilterSummary()
+    first = settings.w_delays_list[0]
+    no_guard = np.zeros(len(time_idx))
+    return SegmentGeometry(
+        object_names=tuple(w.object_name for w in settings.w_delays_list),
+        object_delay_s=np.array(delays),
+        object_rate=np.array(rates),
+        object_active=np.array(active),
+        field_delay_s=settings.field_delay_s
+        + (
+            no_guard
+            if first.guard_region is None
+            else first.guard_region[baseline, time_idx].to("s").value
+        ),
+        field_rate=no_guard
+        if first.rate_guard_region is None
+        else first.rate_guard_region[baseline, time_idx].to("").value,
+    )
 
-    def update(self, payload: RateFilterPayload) -> list[RowUpdate]:
-        """Add a chunk, returning the rows recovered from segments that end in it"""
-        return self._filter_all(update_segment_accumulator(self.accumulator, payload))
 
-    def flush(self) -> list[RowUpdate]:
-        """Filter the segments still being collected"""
-        return self._filter_all(flush_segment_accumulator(self.accumulator))
+def filter_candidate_segment(
+    segment: CandidateSegment,
+    settings: RateFilterSettings,
+    summary: RateFilterSummary,
+) -> RowUpdate | None:
+    """Filter one segment, returning the rows it recovers, if any
 
-    def _filter_all(self, segments: list[CandidateSegment]) -> list[RowUpdate]:
-        updates = [self.filter(segment) for segment in segments]
-        return [update for update in updates if update is not None]
+    Args:
+        segment (CandidateSegment): The candidates and pad rows of one baseline
+        settings (RateFilterSettings): The notch and object settings
+        summary (RateFilterSummary): Row counts, updated in place
 
-    def geometry(self, segment: CandidateSegment) -> SegmentGeometry:
-        """Predicted delays and rates of the objects and the field over a segment"""
-        baseline = segment.baseline_idx
-        time_idx = np.asarray(segment.time_idx)
-        half_period_s = 0.5 / abs(float(np.mean(np.diff(self.freq_hz))))
-        delays, rates, active = [], [], []
-        for w_delays, w_rates in zip(self.w_delays_list, self.rates, strict=True):
-            delay = w_delays.w_delays[baseline, time_idx].to("s").value
-            elevation = w_delays.elevation[time_idx].to("deg").value
-            zone = calculate_nyquist_zone(values=delay, upper_limit=half_period_s)
-            delays.append(delay)
-            rates.append(w_rates[baseline, time_idx])
-            active.append(
-                (elevation >= self.elevation_cut_deg)
-                & (zone <= self.ignore_nyquist_zone)
-            )
-        first = self.w_delays_list[0]
-        no_guard = np.zeros(len(time_idx))
-        return SegmentGeometry(
-            object_names=tuple(w.object_name for w in self.w_delays_list),
-            object_delay_s=np.array(delays),
-            object_rate=np.array(rates),
-            object_active=np.array(active),
-            field_delay_s=self.field_delay_s
-            + (
-                no_guard
-                if first.guard_region is None
-                else first.guard_region[baseline, time_idx].to("s").value
-            ),
-            field_rate=no_guard
-            if first.rate_guard_region is None
-            else first.rate_guard_region[baseline, time_idx].to("").value,
+    Returns:
+        RowUpdate | None: The recovered rows, or None if there are none
+    """
+    n_candidates = segment.n_candidates
+    result = filter_segment(
+        data=np.array(segment.data),
+        flags=np.array(segment.mask),
+        is_pad=np.array(segment.is_pad),
+        time_s=np.array(segment.time_mjds),
+        freq_hz=settings.freq_hz,
+        geometry=segment_geometry(segment, settings),
+        delay_width_s=settings.delay_width_s,
+        delay_roll_off_s=settings.delay_roll_off_s,
+        roll_off_rows=settings.pad_timesteps,
+    )
+    if result.outcome == SegmentOutcome.TOO_SHORT:
+        summary.too_short += n_candidates
+    elif result.outcome == SegmentOutcome.NOT_SEPARABLE:
+        summary.not_separable += n_candidates
+    if result.outcome != SegmentOutcome.FILTERED:
+        return None
+    assert result.data is not None
+    assert result.recovered is not None
+    assert result.removed_fraction is not None
+
+    recovered = result.recovered
+    summary.recovered += int(recovered.sum())
+    summary.rejected += n_candidates - int(recovered.sum())
+    if not recovered.any():
+        return None
+
+    weights = None
+    if segment.weights is not None:
+        weights = scale_multiple_weights(
+            taper=1.0 - result.removed_fraction[recovered][..., None],
+            weights={
+                name: np.array(values)[recovered]
+                for name, values in segment.weights.items()
+            },
         )
-
-    def filter(self, segment: CandidateSegment) -> RowUpdate | None:
-        """Filter one segment, returning the rows it recovers, if any"""
-        n_candidates = segment.n_candidates
-        result = filter_segment(
-            data=np.array(segment.data),
-            flags=np.array(segment.mask),
-            is_pad=np.array(segment.is_pad),
-            time_s=np.array(segment.time_mjds),
-            freq_hz=self.freq_hz,
-            geometry=self.geometry(segment),
-            delay_width_s=self.delay_width_s,
-            delay_roll_off_s=self.delay_roll_off_s,
-            roll_off_rows=self.pad_timesteps,
-        )
-        if result.outcome == SegmentOutcome.TOO_SHORT:
-            self.summary.too_short += n_candidates
-        elif result.outcome == SegmentOutcome.NOT_SEPARABLE:
-            self.summary.not_separable += n_candidates
-        if result.outcome != SegmentOutcome.FILTERED:
-            return None
-        assert result.data is not None
-        assert result.recovered is not None
-        assert result.removed_fraction is not None
-
-        recovered = result.recovered
-        self.summary.recovered += int(recovered.sum())
-        self.summary.rejected += n_candidates - int(recovered.sum())
-        if not recovered.any():
-            return None
-
-        weights = None
-        if segment.weights is not None:
-            weights = scale_multiple_weights(
-                taper=1.0 - result.removed_fraction[recovered][..., None],
-                weights={
-                    name: np.array(values)[recovered]
-                    for name, values in segment.weights.items()
-                },
-            )
-        return RowUpdate(
-            rows=np.array(segment.rows)[recovered],
-            data=result.data[recovered],
-            flags=np.array(segment.mask)[recovered],
-            weights=weights,
-        )
+    return RowUpdate(
+        rows=np.array(segment.rows)[recovered],
+        data=result.data[recovered],
+        flags=np.array(segment.mask)[recovered],
+        weights=weights,
+    )
 
 
-def describe_rate_filter(
-    summary: RateFilterSummary, doubly_contaminated_rows: int
-) -> str:
+def _filter_segments(
+    run: RateFilterRun, segments: list[CandidateSegment]
+) -> list[RowUpdate]:
+    updates = [
+        filter_candidate_segment(segment, run.settings, run.summary)
+        for segment in segments
+    ]
+    return [update for update in updates if update is not None]
+
+
+def update_rate_filter(
+    run: RateFilterRun, payload: RateFilterPayload
+) -> list[RowUpdate]:
+    """Add a chunk, returning the rows recovered from segments that end in it"""
+    return _filter_segments(run, update_segment_accumulator(run.accumulator, payload))
+
+
+def flush_rate_filter(run: RateFilterRun) -> list[RowUpdate]:
+    """Filter the segments still being collected"""
+    return _filter_segments(run, flush_segment_accumulator(run.accumulator))
+
+
+def describe_rate_filter(run: RateFilterRun) -> str:
     """Summarise delay-rate filtering for the log and HISTORY"""
+    summary = run.summary
+    doubly_contaminated_rows = run.accumulator.doubly_contaminated_rows
     return (
         f"Delay-rate filter: recovered {summary.recovered} flagged rows; "
         f"left flagged {summary.rejected} failing the residual check, "

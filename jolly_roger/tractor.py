@@ -40,10 +40,14 @@ from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
 from jolly_roger.rates import (
     RateFilterPayload,
+    RateFilterRun,
+    RateFilterSettings,
     RowUpdate,
-    SegmentRateFilter,
     describe_rate_filter,
+    flush_rate_filter,
+    make_rate_filter_run,
     separable_in_rate,
+    update_rate_filter,
 )
 from jolly_roger.response import (
     calculate_expected_sinc_width,
@@ -967,7 +971,7 @@ def make_rate_filter_payload(
         object_contaminated (list[NDArray[np.bool_]]): Rows each object's notch flags
 
     Returns:
-        RateFilterPayload: The rows, as needed by ``SegmentRateFilter``
+        RateFilterPayload: The rows, as needed by ``update_rate_filter``
     """
     n_rows = len(data_chunk.ant_1)
     baseline_idx, time_idx = _get_baseline_time_indicies(
@@ -1471,11 +1475,11 @@ def write_back_results(
         logger.debug("No updating of weights")
 
 
-def make_segment_rate_filter(
+def make_tukey_rate_filter(
     open_ms_tables: OpenMSTables,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays_list: list[WDelays],
-) -> SegmentRateFilter:
+) -> RateFilterRun:
     """Delay-rate filter with the notch's delay widths, covering any nulled sidelobes
 
     Args:
@@ -1484,7 +1488,7 @@ def make_segment_rate_filter(
         w_delays_list (list[WDelays]): The delays of each object to null
 
     Returns:
-        SegmentRateFilter: The filter for ``run_tractor_chunks``
+        RateFilterRun: The state for ``run_tractor_chunks``
     """
     outer_width_s = tukey_tractor_options.outer_width_ns * 1e-9
     delay_width_s = outer_width_s
@@ -1497,7 +1501,7 @@ def make_segment_rate_filter(
             .value
             + outer_width_s
         )
-    return SegmentRateFilter(
+    settings = RateFilterSettings(
         w_delays_list=w_delays_list,
         freq_hz=np.atleast_1d(
             open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze()
@@ -1507,6 +1511,9 @@ def make_segment_rate_filter(
         field_delay_s=outer_width_s,
         elevation_cut_deg=tukey_tractor_options.elevation_cut_deg,
         ignore_nyquist_zone=tukey_tractor_options.ignore_nyquist_zone,
+    )
+    return make_rate_filter_run(
+        settings=settings,
         max_timesteps=tukey_tractor_options.rate_filter_max_timesteps,
     )
 
@@ -1565,10 +1572,10 @@ def tukey_tractor(
         kernel_summary=kernel_summary,
     )
 
-    segment_filter: SegmentRateFilter | None = None
+    rate_filter: RateFilterRun | None = None
     if not tukey_tractor_options.dry_run:
         if tukey_tractor_options.rate_filter:
-            segment_filter = make_segment_rate_filter(
+            rate_filter = make_tukey_rate_filter(
                 open_ms_tables=open_ms_tables,
                 tukey_tractor_options=tukey_tractor_options,
                 w_delays_list=w_delays_list,
@@ -1582,13 +1589,10 @@ def tukey_tractor(
             setup=setup,
             chunk_func=partial_compute_func,
             tractor_options=tukey_tractor_options,
-            segment_filter=segment_filter,
+            rate_filter=rate_filter,
         )
-        if segment_filter is not None:
-            rate_message = describe_rate_filter(
-                segment_filter.summary,
-                segment_filter.accumulator.doubly_contaminated_rows,
-            )
+        if rate_filter is not None:
+            rate_message = describe_rate_filter(rate_filter)
             logger.info(rate_message)
 
     plot_paths: list[Path] | None
@@ -1616,7 +1620,7 @@ def tukey_tractor(
                     describe_line_impact(name, summary)
                     for name, summary in line_impacts.items()
                 ),
-                *([rate_message] if segment_filter is not None else []),
+                *([rate_message] if rate_filter is not None else []),
             ],
             origin="jolly_tractor tukey",
             app_params=dataclass_to_app_params(tukey_tractor_options),
@@ -1736,7 +1740,7 @@ def run_tractor_chunks(
     setup: TractorSetup,
     chunk_func: Callable[[DataChunk], TaperedChunkResult],
     tractor_options: TractorOptions,
-    segment_filter: SegmentRateFilter | None = None,
+    rate_filter: RateFilterRun | None = None,
 ) -> None:
     """Read the measurement set in chunks of rows, pass each chunk to
     ``chunk_func``, and write the results back. Shared by every tractor:
@@ -1746,7 +1750,7 @@ def run_tractor_chunks(
         setup (TractorSetup): Open tables and write-back settings from ``prepare_tractor``
         chunk_func (Callable[[DataChunk], TaperedChunkResult]): Modifies one chunk of rows
         tractor_options (TractorOptions): The shared tractor options
-        segment_filter (SegmentRateFilter | None, optional): Delay-rate filter fed each result's ``rate_payload``. Defaults to None.
+        rate_filter (RateFilterRun | None, optional): Delay-rate filtering fed each result's ``rate_payload``. Defaults to None.
     """
     open_ms_tables = setup.open_ms_tables
     weight_columns = setup.weight_columns
@@ -1800,19 +1804,21 @@ def run_tractor_chunks(
                     pbar=pbar,
                 )
                 if (
-                    segment_filter is not None
+                    rate_filter is not None
                     and taper_chunk_result.rate_payload is not None
                 ):
                     write_row_updates(
                         open_ms_tables=open_ms_tables,
-                        updates=segment_filter.update(taper_chunk_result.rate_payload),
+                        updates=update_rate_filter(
+                            rate_filter, taper_chunk_result.rate_payload
+                        ),
                         output_column=tractor_options.output_column,
                     )
 
-        if segment_filter is not None:
+        if rate_filter is not None:
             write_row_updates(
                 open_ms_tables=open_ms_tables,
-                updates=segment_filter.flush(),
+                updates=flush_rate_filter(rate_filter),
                 output_column=tractor_options.output_column,
             )
 

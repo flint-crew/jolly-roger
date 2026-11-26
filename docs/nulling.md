@@ -58,7 +58,7 @@ The nulling can be used from Python without the CLI, either on a measurement set
 - A row is recovered only if the object left in it is comparable to what the notch leaves on rows it does not flag. Rows near the ends of a run without clean neighbours, or that fail this check, stay flagged.
 - `--rate-filter-max-timesteps` caps the rows of a baseline filtered together, which bounds memory.
 
-`SegmentRateFilter` (`jolly_roger.rates`) runs the filter from arrays, and `filter_segment` filters one baseline's rows.
+From arrays, `make_rate_filter_run`, `update_rate_filter` and `flush_rate_filter` (`jolly_roger.rates`) run the filter over chunks, and `filter_segment` filters one baseline's rows.
 
 ## CLI
 

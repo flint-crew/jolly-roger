@@ -9,13 +9,16 @@ from numpy.typing import NDArray
 from jolly_roger.rates import (
     CandidateSegment,
     RateFilterPayload,
+    RateFilterSettings,
     SegmentAccumulator,
     SegmentFilterResult,
     SegmentGeometry,
     SegmentOutcome,
-    SegmentRateFilter,
     filter_segment,
+    flush_rate_filter,
     flush_segment_accumulator,
+    make_rate_filter_run,
+    update_rate_filter,
     update_segment_accumulator,
 )
 from jolly_roger.tractor import (
@@ -405,14 +408,16 @@ def test_tukey_rate_filter_recovers_flagged_rows() -> None:
         rate_guard_region=np.full((1, n_rows), 2e-13) * u.dimensionless_unscaled,
     )
     options = TukeyTractorOptions(rate_filter=True)
-    rate_filter = SegmentRateFilter(
-        w_delays_list=[w_delays],
-        freq_hz=FREQ_HZ,
-        delay_width_s=options.outer_width_ns * 1e-9,
-        delay_roll_off_s=options.tukey_width_ns * 1e-9,
-        field_delay_s=options.outer_width_ns * 1e-9,
-        elevation_cut_deg=options.elevation_cut_deg,
-        ignore_nyquist_zone=options.ignore_nyquist_zone,
+    rate_filter = make_rate_filter_run(
+        settings=RateFilterSettings(
+            w_delays_list=[w_delays],
+            freq_hz=FREQ_HZ,
+            delay_width_s=options.outer_width_ns * 1e-9,
+            delay_roll_off_s=options.tukey_width_ns * 1e-9,
+            field_delay_s=options.outer_width_ns * 1e-9,
+            elevation_cut_deg=options.elevation_cut_deg,
+            ignore_nyquist_zone=options.ignore_nyquist_zone,
+        ),
         max_timesteps=options.rate_filter_max_timesteps,
     )
 
@@ -435,8 +440,8 @@ def test_tukey_rate_filter_recovers_flagged_rows() -> None:
         )
         assert result.rate_payload is not None
         flagged.append(result.rate_payload.delay_contaminated)
-        updates += rate_filter.update(result.rate_payload)
-    updates += rate_filter.flush()
+        updates += update_rate_filter(rate_filter, result.rate_payload)
+    updates += flush_rate_filter(rate_filter)
 
     flagged_rows = np.flatnonzero(np.concatenate(flagged))
     (update,) = updates
