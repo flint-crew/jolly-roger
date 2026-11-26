@@ -3,9 +3,9 @@
 Each visibility spectrum is transformed to delay with an FFT. Its delay spread
 function (the response to a point source) is the FFT of the channel weights, so
 it is known exactly, flags included. The dirty delay spectrum is deconvolved
-with a Hogbom CLEAN (``rm_lite.utils.clean.minor_loop``) over the whole delay
-axis, using a mask that grows from the brightest emission and a threshold set
-by the noise. Nothing about the size, structure or spectrum of the object is
+with a Hogbom CLEAN (``rm_lite.utils.clean.minor_loop_batch``) over the whole
+delay axis, using a mask that grows from the brightest emission and a threshold
+set by the noise. Nothing about the size, structure or spectrum of the object is
 assumed. Unless it is given, the noise is estimated from each spectrum (see
 ``estimate_visibility_noise``). Only the components outside the field's delay range are subtracted
 from the visibilities; the field is cleaned at the same time but left in place.
@@ -54,6 +54,9 @@ def _import_minor_loop() -> Any:
     except ImportError as error:
         msg = "Delay CLEAN needs rm-lite. Install it with: pip install 'jolly-roger[clean]'"
         raise MissingCleanDependencyError(msg) from error
+    if not hasattr(clean, "minor_loop_batch"):
+        msg = "Delay CLEAN needs rm-lite>=2026.11.0. Upgrade it with: pip install -U 'jolly-roger[clean]'"
+        raise MissingCleanDependencyError(msg)
     return clean, quiet_logs
 
 
@@ -139,24 +142,42 @@ def estimate_visibility_noise(
     Returns:
         float | None: The noise, or None if no run of channels is long enough
     """
+    noise = _estimate_visibility_noises(
+        values=np.asarray(values)[np.newaxis],
+        weights=weights,
+        min_segment_channels=min_segment_channels,
+        quantile=quantile,
+    )[0]
+    return None if np.isnan(noise) else float(noise)
+
+
+def _estimate_visibility_noises(
+    values: NDArray[np.complexfloating],
+    weights: NDArray[np.floating],
+    min_segment_channels: int = 32,
+    quantile: float = 0.25,
+) -> NDArray[np.floating]:
+    """``estimate_visibility_noise`` for each row of ``values``, which share ``weights``. NaN where it cannot be estimated."""
     runs, _ = ndimage.label(np.asarray(weights) > 0)
     amplitudes = []
     for run in ndimage.find_objects(runs):
-        segment = values[run[0]]
-        if len(segment) < min_segment_channels:
+        segment = values[:, run[0]]
+        if segment.shape[1] < min_segment_channels:
             continue
         # Four-term Blackman-Harris window, whose sidelobes are 92 dB down
         # (Harris 1978, Proc. IEEE 66, 51), so that bright emission does not
         # spread across the delay axis from the ends of the run
-        window = signal.windows.blackmanharris(len(segment))
-        spectrum = np.fft.fft(segment * window)
+        window = signal.windows.blackmanharris(segment.shape[1])
+        spectrum = np.fft.fft(segment * window, axis=-1)
         amplitudes.append(np.abs(spectrum) / np.sqrt(np.sum(window**2)))
     if not amplitudes:
-        return None
+        return np.full(len(values), np.nan)
     # The amplitude of complex Gaussian noise with sigma per real or imaginary
     # part follows a Rayleigh distribution with scale sigma
-    return float(
-        np.quantile(np.concatenate(amplitudes), quantile) / stats.rayleigh.ppf(quantile)
+    return np.asarray(
+        np.quantile(np.concatenate(amplitudes, axis=-1), quantile, axis=-1)
+        / stats.rayleigh.ppf(quantile),
+        dtype=float,
     )
 
 
@@ -215,9 +236,154 @@ def _residual_by_band_position(
 def _model_to_values(
     model: NDArray[np.complexfloating], number_of_channels: int
 ) -> NDArray[np.complexfloating]:
-    """Visibilities in each channel of CLEAN components on the oversampled delay axis"""
-    size = len(model)
-    return size * np.fft.ifft(np.fft.ifftshift(model))[:number_of_channels]
+    """Visibilities in each channel of CLEAN components on the oversampled delay
+    axis, the last axis of ``model``"""
+    size = model.shape[-1]
+    return (
+        size
+        * np.fft.ifft(np.fft.ifftshift(model, axes=-1), axis=-1)[
+            ..., :number_of_channels
+        ]
+    )
+
+
+def _no_clean_result(number_of_channels: int) -> DelayCleanResult:
+    """The result for a spectrum that is not cleaned: no weight or no noise"""
+    return DelayCleanResult(
+        model=np.zeros(number_of_channels, dtype=complex),
+        iterations=0,
+        delay_noise=0.0,
+        reaches_field=False,
+    )
+
+
+def delay_clean_spectra(
+    values: NDArray[np.complexfloating],
+    weights: NDArray[np.floating],
+    channel_width_hz: float,
+    field_delay_s: float | NDArray[np.floating],
+    options: DelayCleanOptions | None = None,
+    visibility_noise: float | NDArray[np.floating] | None = None,
+) -> list[DelayCleanResult]:
+    """CLEAN spectra that share their channel weights in one batch, as ``delay_clean_spectrum`` does each.
+
+    Args:
+        values (NDArray[np.complexfloating]): Visibilities, shaped (spectrum, channel), of regularly spaced channels
+        weights (NDArray[np.floating]): Weight of each channel, shared by every spectrum. Zero for flagged or excluded channels.
+        channel_width_hz (float): Channel width, in Hz
+        field_delay_s (float | NDArray[np.floating]): Half-width of the field's delay range, in seconds, for all spectra or for each. Emission within it is kept.
+        options (DelayCleanOptions | None, optional): CLEAN settings. Defaults to None (the defaults).
+        visibility_noise (float | NDArray[np.floating] | None, optional): Noise of one visibility, per real or imaginary part, at unit weight, for all spectra or for each. NaN means the noise is not known, so the spectrum is not cleaned. If None it is estimated from each spectrum with ``estimate_visibility_noise``. Defaults to None.
+
+    Returns:
+        list[DelayCleanResult]: The model to subtract and a summary of the CLEAN, for each spectrum. The model is zero where the noise could not be estimated.
+    """
+    clean, _ = _import_minor_loop()
+    options = options or DelayCleanOptions()
+
+    values = np.asarray(values)
+    if values.ndim != 2:
+        msg = f"values must be shaped (spectrum, channel), got {values.shape}"
+        raise ValueError(msg)
+    number_of_spectra, number_of_channels = values.shape
+    weights = np.asarray(weights, dtype=float)
+    if weights.shape != (number_of_channels,):
+        msg = f"weights must be shaped ({number_of_channels},), got {weights.shape}"
+        raise ValueError(msg)
+    field_delays = np.broadcast_to(
+        np.asarray(field_delay_s, dtype=float), (number_of_spectra,)
+    )
+
+    weight_sum = weights.sum()
+    if weight_sum <= 0:
+        return [_no_clean_result(number_of_channels) for _ in range(number_of_spectra)]
+
+    noise = (
+        _estimate_visibility_noises(values, weights)
+        if visibility_noise is None
+        else np.broadcast_to(
+            np.asarray(visibility_noise, dtype=float), (number_of_spectra,)
+        )
+    )
+    to_clean = np.flatnonzero(~np.isnan(noise))
+
+    results = [_no_clean_result(number_of_channels) for _ in range(number_of_spectra)]
+    if to_clean.size == 0:
+        return results
+    values_to_clean = values[to_clean]
+    noise = noise[to_clean]
+
+    size = options.oversample * number_of_channels
+    delays_s = delay_axis(number_of_channels, channel_width_hz, options.oversample)
+    weighted = np.where(weights > 0, values_to_clean, 0) * weights
+
+    dirty = np.fft.fftshift(np.fft.fft(weighted, n=size, axis=-1), axes=-1) / weight_sum
+    delay_spread_function = np.fft.fftshift(np.fft.fft(weights, n=size)) / weight_sum
+    # The delay axis is cyclic, so three periods give the shifted delay spread
+    # function rm-lite expects for every peak position
+    delay_spread_function = np.tile(delay_spread_function, 3)
+    index = np.arange(size, dtype=float)
+    index_double = np.arange(3 * size, dtype=float) - size
+
+    # Noise per delay sample, from the noise per visibility at unit weight
+    delay_noise = noise * np.sqrt(np.sum(weights**2)) / weight_sum
+
+    batch = clean.minor_loop_batch(
+        clean.MinorLoopBatchArrays(
+            resid_fdf_arr_mask=np.ma.masked_array(
+                dirty, mask=np.zeros(dirty.shape, dtype=bool)
+            ),
+            phi_arr_radm2=index,
+            phi_double_arr_radm2=index_double,
+            rmsf_arr=delay_spread_function,
+        ),
+        clean.MinorLoopBatchOptions(
+            max_iter=options.max_iter,
+            gain=options.gain,
+            mask_threshold=options.mask_sigma * delay_noise,
+            stopping_threshold=options.threshold_sigma * delay_noise,
+            update_mask=True,
+            noise=delay_noise,
+            # Chunks already run on the tractor's threads, and numba's
+            # workqueue layer aborts when launched from several threads
+            parallel=False,
+        ),
+    )
+    models = batch.model_fdf_arr
+
+    outside_field = np.abs(delays_s) > field_delays[to_clean, None]
+    model_values = _model_to_values(
+        np.where(outside_field, models, 0), number_of_channels
+    )
+    residuals = values_to_clean - _model_to_values(models, number_of_channels)
+    edge_s = options.field_edge_resolutions / (
+        number_of_channels * abs(channel_width_hz)
+    )
+
+    for position, spectrum in enumerate(to_clean):
+        reaches_field = _reaches_field(
+            model=models[position],
+            delays_s=delays_s,
+            field_delay_s=float(field_delays[spectrum]),
+            edge_s=edge_s,
+            oversample=options.oversample,
+            floor=options.mask_sigma * delay_noise[position],
+            fraction=options.field_edge_fraction,
+        )
+        edge_residual, mid_residual = _residual_by_band_position(
+            residual=residuals[position],
+            used=weights > 0,
+            noise=float(noise[position]),
+        )
+        results[spectrum] = DelayCleanResult(
+            model=model_values[position],
+            iterations=int(batch.iter_count_arr[position]),
+            delay_noise=float(delay_noise[position]),
+            reaches_field=reaches_field,
+            edge_residual=edge_residual,
+            mid_residual=mid_residual,
+        )
+    return results
 
 
 def delay_clean_spectrum(
@@ -242,87 +408,14 @@ def delay_clean_spectrum(
     Returns:
         DelayCleanResult: The model to subtract and a summary of the CLEAN. The model is zero if the noise could not be estimated.
     """
-    clean, _ = _import_minor_loop()
-    options = options or DelayCleanOptions()
-
-    number_of_channels = len(values)
-    weights = np.asarray(weights, dtype=float)
-    weight_sum = weights.sum()
-    if visibility_noise is None and weight_sum > 0:
-        visibility_noise = estimate_visibility_noise(values, weights)
-    if weight_sum <= 0 or visibility_noise is None:
-        return DelayCleanResult(
-            model=np.zeros(number_of_channels, dtype=complex),
-            iterations=0,
-            delay_noise=0.0,
-            reaches_field=False,
-        )
-
-    size = options.oversample * number_of_channels
-    delays_s = delay_axis(number_of_channels, channel_width_hz, options.oversample)
-    weighted = np.where(weights > 0, values, 0) * weights
-
-    dirty = np.fft.fftshift(np.fft.fft(weighted, n=size)) / weight_sum
-    delay_spread_function = np.fft.fftshift(np.fft.fft(weights, n=size)) / weight_sum
-    # The delay axis is cyclic, so three periods give the shifted delay spread
-    # function rm-lite expects for every peak position
-    delay_spread_function = np.tile(delay_spread_function, 3)
-    index = np.arange(size, dtype=float)
-    index_double = np.arange(3 * size, dtype=float) - size
-
-    # Noise per delay sample, from the noise per visibility at unit weight
-    delay_noise = visibility_noise * np.sqrt(np.sum(weights**2)) / weight_sum
-
-    result = clean.minor_loop(
-        clean.MinorLoopArrays(
-            resid_fdf_spectrum_mask=np.ma.masked_array(
-                dirty, mask=np.zeros(size, dtype=bool)
-            ),
-            phi_arr_radm2=index,
-            phi_double_arr_radm2=index_double,
-            rmsf_spectrum=delay_spread_function,
-            rmsf_fwhm=float(options.oversample),
-        ),
-        clean.MinorLoopOptions(
-            max_iter=options.max_iter,
-            gain=options.gain,
-            mask_threshold=options.mask_sigma * delay_noise,
-            stopping_threshold=options.threshold_sigma * delay_noise,
-            update_mask=True,
-            noise=delay_noise,
-        ),
-    )
-    model = result.model_fdf_spectrum
-
-    outside_field = np.abs(delays_s) > field_delay_s
-    reaches_field = _reaches_field(
-        model=model,
-        delays_s=delays_s,
+    return delay_clean_spectra(
+        values=np.asarray(values)[np.newaxis],
+        weights=weights,
+        channel_width_hz=channel_width_hz,
         field_delay_s=field_delay_s,
-        edge_s=options.field_edge_resolutions
-        / (number_of_channels * abs(channel_width_hz)),
-        oversample=options.oversample,
-        floor=options.mask_sigma * delay_noise,
-        fraction=options.field_edge_fraction,
-    )
-
-    model_values = _model_to_values(
-        np.where(outside_field, model, 0), number_of_channels
-    )
-    edge_residual, mid_residual = _residual_by_band_position(
-        residual=values - _model_to_values(model, number_of_channels),
-        used=weights > 0,
-        noise=visibility_noise,
-    )
-
-    return DelayCleanResult(
-        model=model_values,
-        iterations=result.iter_count,
-        delay_noise=delay_noise,
-        reaches_field=reaches_field,
-        edge_residual=edge_residual,
-        mid_residual=mid_residual,
-    )
+        options=options,
+        visibility_noise=visibility_noise,
+    )[0]
 
 
 @dataclass
@@ -395,25 +488,42 @@ def compute_delay_clean(
         np.ones(number_of_rows, dtype=bool) if active_rows is None else active_rows
     )
 
-    rows_reaching_field = np.zeros(number_of_rows, dtype=bool)
-    results: list[DelayCleanResult] = []
+    # Spectra with no weight are passed through and not counted
+    rows, pols = np.nonzero(
+        np.broadcast_to(rows_to_clean[:, None], (number_of_rows, number_of_pols))
+    )
+    weights = (~flags[rows, :, pols]).astype(float)
+    has_weight = weights.any(axis=1)
+    rows, pols, weights = rows[has_weight], pols[has_weight], weights[has_weight]
+    values = data[rows, :, pols]
+
+    # One batch per flag pattern, which fixes the delay spread function
+    results_by_spectrum: dict[int, DelayCleanResult] = {}
     with quiet_logs(logging.WARNING):
-        for row in np.flatnonzero(rows_to_clean):
-            for pol in range(number_of_pols):
-                weights = (~flags[row, :, pol]).astype(float)
-                if not weights.any():
-                    continue
-                result = delay_clean_spectrum(
-                    values=data[row, :, pol],
-                    weights=weights,
+        if len(rows):
+            patterns, group_of_spectrum = np.unique(
+                weights, axis=0, return_inverse=True
+            )
+            group_of_spectrum = group_of_spectrum.reshape(-1)
+            for group, pattern in enumerate(patterns):
+                members = np.flatnonzero(group_of_spectrum == group)
+                group_results = delay_clean_spectra(
+                    values=values[members],
+                    weights=pattern,
                     channel_width_hz=channel_width_hz,
-                    field_delay_s=float(field_delays[row]),
+                    field_delay_s=field_delays[rows[members]],
                     options=options,
                     visibility_noise=visibility_noise,
                 )
-                data[row, :, pol] -= result.model
-                rows_reaching_field[row] |= result.reaches_field
-                results.append(result)
+                results_by_spectrum.update(
+                    zip(members.tolist(), group_results, strict=True)
+                )
+
+    rows_reaching_field = np.zeros(number_of_rows, dtype=bool)
+    results = [results_by_spectrum[spectrum] for spectrum in range(len(rows))]
+    for row, pol, result in zip(rows, pols, results, strict=True):
+        data[row, :, pol] -= result.model
+        rows_reaching_field[row] |= result.reaches_field
 
     if statistics is not None:
         statistics.record(results, rows_flagged=int(rows_reaching_field.sum()))
