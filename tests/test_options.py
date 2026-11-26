@@ -51,6 +51,7 @@ def test_tukey_options_keep_cli_fields():
         "reweight",
         "weight_column",
         "guard_field",
+        "flag_overlap",
         "dish_diameter_m",
         "guard_field_fraction",
         "object_minimum_flux",

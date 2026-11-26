@@ -906,7 +906,8 @@ def compute_tukey_taper(
     # ] = 0.0
     # Update flags
     flags_to_return = np.zeros_like(data_chunk.masked_data.mask)
-    flags_to_return[intersecting_taper] = True
+    if tukey_tractor_options.flag_overlap:
+        flags_to_return[intersecting_taper] = True
     flags_to_return = (
         ~np.isfinite(data_chunk.masked_data.filled(np.nan)) | flags_to_return
     )
@@ -1202,6 +1203,8 @@ class TractorOptions(BaseOptions):
     """Protect a region around delay=0 sized from the field of view"""
     dish_diameter_m: float | None = None
     """Dish diameter in metres used to derive the nominal field of view (e.g. for the guard region), overriding DISH_DIAMETER in the measurement set's ANTENNA table. If None the ANTENNA table is used."""
+    flag_overlap: bool = True
+    """Flag rows where an object can not be separated from the field in delay. If False they are kept, with the object removed only outside the field's protected range."""
     guard_field_fraction: float = 0.1
     """The attenuation level of the main lobe to guard to, and should be in the range (0, 1). Values closer to zero correspond to a larger field-of-view, and hence a larger guard band in delay space. """
 
