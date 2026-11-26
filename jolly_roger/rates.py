@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -313,6 +314,10 @@ class SegmentFilterResult:
     """Candidates that passed the residual check"""
     removed_fraction: NDArray[np.floating[Any]] | None = None
     """Fraction of the rate axis removed at each delay, shape (row, delay)"""
+    removal: NDArray[np.floating[Any]] | None = None
+    """The region removed, shape (rate, delay) in FFT order"""
+    window: NDArray[np.floating[Any]] | None = None
+    """The time window applied to the rows"""
 
 
 def _roll_off(
@@ -522,7 +527,21 @@ def filter_segment(
         data=filtered,
         recovered=recovered,
         removed_fraction=np.broadcast_to(removed, (n_rows, n_chan)),
+        removal=removal,
+        window=window,
     )
+
+
+def segment_spectrum(
+    data: NDArray[np.complexfloating[Any]],
+    flags: NDArray[np.bool_],
+    window: NDArray[np.floating[Any]],
+    n_time: int,
+) -> NDArray[np.floating[Any]]:
+    """Stokes I amplitude of a windowed segment in fringe rate and delay, shape (rate, delay) in FFT order"""
+    weighted = np.where(flags, 0, data) * window[:, None, None]
+    spectrum = np.fft.fft2(weighted, s=(n_time, data.shape[1]), axes=(0, 1))
+    return np.abs(spectrum[..., 0] + spectrum[..., -1]) / 2
 
 
 def separable_in_rate(
@@ -577,6 +596,7 @@ class RateFilterSummary:
     rejected: int = 0
     too_short: int = 0
     not_separable: int = 0
+    plotted: int = 0
 
 
 @dataclass(frozen=True)
@@ -599,6 +619,10 @@ class RateFilterSettings:
     """Objects beyond this Nyquist zone are not nulled"""
     pad_timesteps: int = 16
     """Clean rows either side of a segment"""
+    plot_dir: Path | None = None
+    """Where to save segment plots. None for no plots."""
+    max_plots: int = 10
+    """The most segments to plot"""
 
 
 @dataclass
@@ -691,13 +715,14 @@ def filter_candidate_segment(
         RowUpdate | None: The recovered rows, or None if there are none
     """
     n_candidates = segment.n_candidates
+    geometry = segment_geometry(segment, settings)
     result = filter_segment(
         data=np.array(segment.data),
         flags=np.array(segment.mask),
         is_pad=np.array(segment.is_pad),
         time_s=np.array(segment.time_mjds),
         freq_hz=settings.freq_hz,
-        geometry=segment_geometry(segment, settings),
+        geometry=geometry,
         delay_width_s=settings.delay_width_s,
         delay_roll_off_s=settings.delay_roll_off_s,
         roll_off_rows=settings.pad_timesteps,
@@ -711,6 +736,19 @@ def filter_candidate_segment(
     assert result.data is not None
     assert result.recovered is not None
     assert result.removed_fraction is not None
+
+    if settings.plot_dir is not None and summary.plotted < settings.max_plots:
+        from jolly_roger.plots import plot_rate_filter_segment  # noqa: PLC0415
+
+        plot_rate_filter_segment(
+            segment=segment,
+            result=result,
+            geometry=geometry,
+            freq_hz=settings.freq_hz,
+            output_path=settings.plot_dir
+            / f"rate_filter_{segment.ant_1}_{segment.ant_2}_{segment.rows[0]}.png",
+        )
+        summary.plotted += 1
 
     recovered = result.recovered
     summary.recovered += int(recovered.sum())

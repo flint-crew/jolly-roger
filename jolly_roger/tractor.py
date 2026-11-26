@@ -37,7 +37,10 @@ from jolly_roger.lines import (
     summarise_line_impact,
 )
 from jolly_roger.logging import logger
-from jolly_roger.plots import plot_baseline_comparison_data
+from jolly_roger.plots import (
+    plot_baseline_comparison_data,
+    plot_baseline_delay_rate_comparison,
+)
 from jolly_roger.rates import (
     RateFilterPayload,
     RateFilterRun,
@@ -475,6 +478,7 @@ def make_plot_results(
     reverse_baselines: bool = False,
     outer_width_ns: float | None = None,
     max_baselines: int = 10,
+    delay_rate: bool = False,
 ) -> list[Path]:
     """Create plots useful for diagnostics
 
@@ -487,6 +491,7 @@ def make_plot_results(
         reverse_baselines (bool, optional): Needed in some circumstances should antenna ordering in MS be different. Defaults to False.
         outer_width_ns (float | None, optional): Size, in nanoseconds, of the tukey taper. Defaults to None.
         max_baselines (int, optional): The maximum number of baseline plots to create. Defaults to 10.
+        delay_rate (bool, optional): Also plot each baseline in fringe rate and delay. Defaults to False.
 
     Returns:
         list[Path]: Collection of paths to use
@@ -559,6 +564,19 @@ def make_plot_results(
         )
         logger.info(f"Have written {output_path=}")
         output_paths.append(plot_path)
+
+        if delay_rate:
+            output_paths.append(
+                plot_baseline_delay_rate_comparison(
+                    before_baseline_data=before_baseline_data,
+                    after_baseline_data=after_baseline_data,
+                    output_path=output_path.with_name(
+                        output_path.name.replace("comparison", "delay_rate_comparison")
+                    ),
+                    w_delays=[w_delays] if isinstance(w_delays, WDelays) else w_delays,
+                    outer_width_ns=outer_width_ns,
+                )
+            )
 
     return output_paths
 
@@ -1501,6 +1519,10 @@ def make_tukey_rate_filter(
             .value
             + outer_width_s
         )
+    plot_dir = None
+    if tukey_tractor_options.make_plots:
+        plot_dir = open_ms_tables.ms_path.parent / "plots"
+        plot_dir.mkdir(exist_ok=True, parents=True)
     settings = RateFilterSettings(
         w_delays_list=w_delays_list,
         freq_hz=np.atleast_1d(
@@ -1511,6 +1533,8 @@ def make_tukey_rate_filter(
         field_delay_s=outer_width_s,
         elevation_cut_deg=tukey_tractor_options.elevation_cut_deg,
         ignore_nyquist_zone=tukey_tractor_options.ignore_nyquist_zone,
+        plot_dir=plot_dir,
+        max_plots=tukey_tractor_options.number_of_plots,
     )
     return make_rate_filter_run(
         settings=settings,
@@ -1605,6 +1629,7 @@ def tukey_tractor(
             reverse_baselines=tukey_tractor_options.reverse_baselines,
             outer_width_ns=tukey_tractor_options.outer_width_ns,
             max_baselines=tukey_tractor_options.number_of_plots,
+            delay_rate=tukey_tractor_options.rate_filter,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")

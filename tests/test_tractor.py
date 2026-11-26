@@ -505,6 +505,22 @@ def test_tractor_rate_filter_records_history(ms_example) -> None:
     assert _history_rows(ms_example)[-1]["MESSAGE"].startswith("Delay-rate filter:")
 
 
+def test_tractor_rate_filter_makes_delay_rate_plots(ms_example) -> None:
+    results = tukey_tractor(
+        ms_path=Path(ms_example),
+        tukey_tractor_options=TukeyTractorOptions(
+            output_column="JACKS_DATA",
+            rate_filter=True,
+            make_plots=True,
+            number_of_plots=1,
+        ),
+    )
+    assert results.output_plots is not None
+    names = [path.name for path in results.output_plots]
+    assert any(name.endswith("_delay_rate_comparison.png") for name in names)
+    assert all(path.exists() for path in results.output_plots)
+
+
 def test_tractor_dry_run_leaves_history(ms_example) -> None:
     """A dry run does not modify the HISTORY table"""
     before = _history_rows(ms_example)

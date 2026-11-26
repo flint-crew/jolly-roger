@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import astropy.units as u
@@ -388,7 +389,7 @@ def test_filter_segment_with_interior_flags() -> None:
     assert np.all(left[recovered] < 2 * reference[recovered] + 1)
 
 
-def test_tukey_rate_filter_recovers_flagged_rows() -> None:
+def test_tukey_rate_filter_recovers_flagged_rows(tmp_path: Path) -> None:
     """Chunks from the delay notch, fed to the rate filter in row order,
     recover some of the rows the notch flags"""
     n_rows, chunk_rows = 120, 40
@@ -417,6 +418,7 @@ def test_tukey_rate_filter_recovers_flagged_rows() -> None:
             field_delay_s=options.outer_width_ns * 1e-9,
             elevation_cut_deg=options.elevation_cut_deg,
             ignore_nyquist_zone=options.ignore_nyquist_zone,
+            plot_dir=tmp_path,
         ),
         max_timesteps=options.rate_filter_max_timesteps,
     )
@@ -451,3 +453,5 @@ def test_tukey_rate_filter_recovers_flagged_rows() -> None:
     left = np.sqrt(np.mean(np.abs(update.data[..., 0] - field) ** 2, axis=1))
     assert np.median(left) < 20
     assert not update.flags.any()
+    assert rate_filter.summary.plotted == 1
+    assert (tmp_path / "rate_filter_0_1_0.png").exists()
