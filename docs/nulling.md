@@ -87,11 +87,10 @@ Settings that trade quality for speed, with the residual (cleaned minus true, ov
 
 | setting | spectra/s | residual |
 |---|---|---|
-| defaults | 1300 | 0.38 |
-| `gain=0.3` | 1430 | 0.37 |
-| `oversample=2` | 1590 | 0.67 |
-| `--threshold-sigma 5 --mask-sigma 8` | 1830 | 0.52 |
-| `gain=0.3`, `oversample=2` | 2490 | 0.64 |
+| defaults (`gain=0.3`) | 1360 | 0.37 |
+| `gain=0.1` | 1350 | 0.38 |
+| `oversample=2` | 1850 | 0.64 |
+| `--threshold-sigma 5 --mask-sigma 8` | 1750 | 0.50 |
 | `tukey` (for comparison) | 27,000 | 10.2 |
 
 `gain` and `oversample` are set through `DelayCleanOptions` in Python.

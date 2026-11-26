@@ -66,7 +66,7 @@ class DelayCleanOptions:
 
     oversample: int = 4
     """Factor by which the delay axis is sampled more finely than 1 / bandwidth"""
-    gain: float = 0.1
+    gain: float = 0.3
     """Fraction of the residual peak removed in each CLEAN iteration"""
     mask_sigma: float = 5.0
     """The CLEAN mask grows into delays brighter than this many times the delay noise"""
