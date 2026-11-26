@@ -49,7 +49,8 @@ from jolly_roger.rates import (
     describe_rate_filter,
     flush_rate_filter,
     make_rate_filter_run,
-    separable_in_rate,
+    needed_duration_s,
+    rate_separation_hz,
     update_rate_filter,
 )
 from jolly_roger.response import (
@@ -997,15 +998,21 @@ def make_rate_filter_payload(
     )
     freq_hz = np.atleast_1d(data_chunk.freq_chan.to("Hz").value)
     delay_contaminated = np.zeros(n_rows, dtype=bool)
-    candidate = np.ones(n_rows, dtype=bool)
+    needed_s = np.zeros(n_rows)
     for w_delays, contaminated in zip(w_delays_list, object_contaminated, strict=True):
         delay_contaminated |= contaminated
-        candidate &= ~contaminated | separable_in_rate(
-            w_delays=w_delays,
-            baseline_idx=baseline_idx,
-            time_idx=time_idx,
-            freq_hz=freq_hz,
+        object_needed_s = needed_duration_s(
+            rate_separation_hz(
+                w_delays=w_delays,
+                baseline_idx=baseline_idx,
+                time_idx=time_idx,
+                freq_hz=freq_hz,
+            )
         )
+        needed_s = np.where(
+            contaminated, np.maximum(needed_s, object_needed_s), needed_s
+        )
+    candidate = np.isfinite(needed_s)
     cross = data_chunk.ant_1 != data_chunk.ant_2
     return RateFilterPayload(
         rows=data_chunk.row_start + np.arange(n_rows),
@@ -1017,6 +1024,7 @@ def make_rate_filter_payload(
         original_masked_data=original_masked_data,
         delay_contaminated=delay_contaminated & cross,
         candidate=candidate & delay_contaminated & cross,
+        needed_s=needed_s,
         original_weights=data_chunk.weights,
     )
 
@@ -1220,8 +1228,6 @@ class RateFilterOptions(BaseOptions):
 
     rate_filter: bool = False
     """Recover rows flagged by the delay notch by filtering in delay-rate where the object is separable from the field"""
-    rate_filter_max_timesteps: int = 256
-    """The most rows per baseline filtered together. Bounds memory."""
 
 
 class TukeyTractorOptions(TractorOptions, RateFilterOptions):
@@ -1536,10 +1542,7 @@ def make_tukey_rate_filter(
         plot_dir=plot_dir,
         max_plots=tukey_tractor_options.number_of_plots,
     )
-    return make_rate_filter_run(
-        settings=settings,
-        max_timesteps=tukey_tractor_options.rate_filter_max_timesteps,
-    )
+    return make_rate_filter_run(settings=settings)
 
 
 def tukey_tractor(

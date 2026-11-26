@@ -57,7 +57,6 @@ def test_tukey_options_keep_cli_fields():
         "peak_shift_search",
         "peak_shift_search_width_ns",
         "rate_filter",
-        "rate_filter_max_timesteps",
     }
     assert set(TractorOptions.model_fields) < set(TukeyTractorOptions.model_fields)
     assert "outer_width_ns" not in TractorOptions.model_fields
@@ -90,8 +89,7 @@ def test_rate_filter_flags():
 
     assert not parser.parse_args([]).rate_filter
     options = create_options_from_parser(
-        parser.parse_args(["--rate-filter", "--rate-filter-max-timesteps", "64"]),
+        parser.parse_args(["--rate-filter"]),
         options_class=TukeyTractorOptions,
     )
     assert options.rate_filter
-    assert options.rate_filter_max_timesteps == 64

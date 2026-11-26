@@ -43,6 +43,7 @@ def _update(
     data: NDArray[np.complexfloating[Any]] | None = None,
     weights: dict[str, NDArray[np.floating[Any]]] | None = None,
     time_s: NDArray[np.floating[Any]] | None = None,
+    needed_s: float | None = None,
 ) -> list[CandidateSegment]:
     """Feed a set of rows to the accumulator. By default rows are a single
     baseline at consecutive times"""
@@ -68,6 +69,7 @@ def _update(
         original_masked_data=np.ma.masked_array(data, mask=np.zeros(data.shape, bool)),
         delay_contaminated=np.asarray(delay_contaminated, dtype=bool),
         candidate=np.asarray(candidate, dtype=bool),
+        needed_s=None if needed_s is None else np.full(n_rows, needed_s),
         original_weights=weights,
     )
     return update_segment_accumulator(accumulator=accumulator, payload=payload)
@@ -229,14 +231,37 @@ def test_accumulator_releases_on_given_gap_in_seconds() -> None:
     assert [seg.rows for seg in released] == [[0], [1, 2, 3]]
 
 
-def test_accumulator_default_cap() -> None:
-    """Segments are capped by default so memory stays bounded"""
-    accumulator = SegmentAccumulator()
-    assert accumulator.max_timesteps is not None
-    released = _update(accumulator, np.ones(accumulator.max_timesteps + 1, bool))
+def test_accumulator_releases_on_needed_duration() -> None:
+    """A long run of candidates is split once a segment lasts twice the
+    duration it needs, with segments overlapping so every candidate is
+    written once and is away from the ends of its segment"""
+    accumulator = SegmentAccumulator(pad_timesteps=2)
+    pattern = "00" + "1" * 20 + "00"
+    released = _update(accumulator, _bools(pattern), needed_s=3 * DT_S)
     released += flush_segment_accumulator(accumulator)
 
-    assert [seg.n_candidates for seg in released] == [accumulator.max_timesteps, 1]
+    # Released once it spans 60 s (2 x 30 s), handing its last 2 candidates
+    # and the 2 rows before them to the next segment
+    first, second = released[0], released[1]
+    assert first.rows == [0, 1, 2, 3, 4, 5, 6]
+    assert _candidate_rows(first) == [2, 3, 4]
+    assert second.rows[:4] == [3, 4, 5, 6]
+    assert _candidate_rows(second)[:2] == [5, 6]
+    written = [row for segment in released for row in _candidate_rows(segment)]
+    assert sorted(written) == list(range(2, 22))
+    assert len(written) == len(set(written))
+    for segment in released:
+        candidates = _candidate_rows(segment)
+        assert segment.rows[0] not in candidates
+        assert segment.rows[-1] not in candidates
+
+
+def test_accumulator_without_needed_duration() -> None:
+    """Without a needed duration a run of candidates is one segment"""
+    accumulator = SegmentAccumulator(pad_timesteps=2)
+    released = _update(accumulator, _bools("0" + "1" * 50 + "0"))
+    released += flush_segment_accumulator(accumulator)
+    assert [seg.n_candidates for seg in released] == [50]
 
 
 N_CHAN = 288
@@ -420,7 +445,6 @@ def test_tukey_rate_filter_recovers_flagged_rows(tmp_path: Path) -> None:
             ignore_nyquist_zone=options.ignore_nyquist_zone,
             plot_dir=tmp_path,
         ),
-        max_timesteps=options.rate_filter_max_timesteps,
     )
 
     flagged, updates = [], []
@@ -446,12 +470,15 @@ def test_tukey_rate_filter_recovers_flagged_rows(tmp_path: Path) -> None:
     updates += flush_rate_filter(rate_filter)
 
     flagged_rows = np.flatnonzero(np.concatenate(flagged))
-    (update,) = updates
+    rows = np.concatenate([update.rows for update in updates])
+    data = np.concatenate([update.data for update in updates])
     assert len(flagged_rows) > 0
-    assert set(update.rows) <= set(flagged_rows)
-    assert rate_filter.summary.recovered == len(update.rows) > len(flagged_rows) / 2
-    left = np.sqrt(np.mean(np.abs(update.data[..., 0] - field) ** 2, axis=1))
+    assert len(updates) > 1
+    assert len(set(rows)) == len(rows)
+    assert set(rows) <= set(flagged_rows)
+    assert rate_filter.summary.recovered == len(rows) > len(flagged_rows) / 2
+    left = np.sqrt(np.mean(np.abs(data[..., 0] - field) ** 2, axis=1))
     assert np.median(left) < 20
-    assert not update.flags.any()
-    assert rate_filter.summary.plotted == 1
+    assert not any(update.flags.any() for update in updates)
+    assert rate_filter.summary.plotted == len(updates)
     assert (tmp_path / "rate_filter_0_1_0.png").exists()

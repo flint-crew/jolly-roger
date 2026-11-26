@@ -56,6 +56,8 @@ class CandidateSegment:
     """The number of candidate rows"""
     weights: dict[str, list[NDArray[np.floating[Any]]]] | None = None
     """The original weights of each row, keyed by column name"""
+    needed_s: float = 0.0
+    """The shortest duration, in seconds, that separates every object from the field over the candidates"""
 
 
 def _append_segment_row(segment: CandidateSegment, row: _Row, is_pad: bool) -> None:
@@ -96,11 +98,16 @@ class SegmentAccumulator:
     """Per-baseline collection of candidate rows: rows flagged by the delay
     notch where every object is separable from the field in delay-rate. A
     segment is released on a clean row (after ``pad_timesteps`` trailing
-    rows), a flagged row that is not a candidate, a gap in time, or
-    ``max_timesteps`` candidates."""
+    rows), a flagged row that is not a candidate, a gap in time, or once it
+    lasts ``length_factor`` times the duration its candidates need. A segment
+    released while still in a run of candidates overlaps the next by
+    2 ``pad_timesteps`` rows, so every candidate is away from an end of the
+    segment it is written from."""
 
-    max_timesteps: int | None = 256
-    """The most candidates in a segment. Bounds memory. If None there is no limit."""
+    length_factor: float = 2.0
+    """A segment is released once it lasts this many times the duration its candidates need"""
+    max_timesteps: int | None = None
+    """The most candidates in a segment. If None there is no limit."""
     pad_timesteps: int = 0
     """The number of clean rows either side of a segment to include as padding"""
     max_time_gap_s: float | None = None
@@ -133,8 +140,52 @@ class RateFilterPayload:
     """Rows flagged by the delay notch"""
     candidate: NDArray[np.bool_]
     """Flagged rows where every object is separable from the field in delay-rate"""
+    needed_s: NDArray[np.floating[Any]] | None = None
+    """The duration, in seconds, each row needs to separate its objects from the field. If None segments are not released on length."""
     original_weights: dict[str, NDArray[np.floating[Any]]] | None = None
     """The weights before any scaling"""
+
+
+def _segment_row(segment: CandidateSegment, index: int) -> _Row:
+    return _Row(
+        row=segment.rows[index],
+        time_mjd=segment.time_mjds[index],
+        time_idx=segment.time_idx[index],
+        data=segment.data[index],
+        mask=segment.mask[index],
+        weights=None
+        if segment.weights is None
+        else {k: v[index] for k, v in segment.weights.items()},
+    )
+
+
+def _split_segment(
+    state: _BaselineState, released: list[CandidateSegment], pad: int
+) -> None:
+    """Release a segment in the middle of a run of candidates. Its last ``pad``
+    candidates become pad rows, and the next segment starts with its last
+    ``2 pad`` rows: ``pad`` pad rows, then those candidates."""
+    segment = state.segment
+    assert segment is not None
+    if pad == 0 or segment.n_candidates <= 2 * pad:
+        _release_segment(state, released)
+        return
+    n_rows = len(segment.rows)
+    overlap = [
+        _segment_row(segment, index) for index in range(n_rows - 2 * pad, n_rows)
+    ]
+    for index in range(n_rows - pad, n_rows):
+        segment.is_pad[index] = True
+    segment.n_candidates -= pad
+    _release_segment(state, released)
+    state.segment = CandidateSegment(
+        ant_1=segment.ant_1,
+        ant_2=segment.ant_2,
+        baseline_idx=segment.baseline_idx,
+        needed_s=segment.needed_s,
+    )
+    for index, row in enumerate(overlap):
+        _append_segment_row(state.segment, row, is_pad=index < pad)
 
 
 def _release_segment(state: _BaselineState, released: list[CandidateSegment]) -> None:
@@ -238,12 +289,18 @@ def update_segment_accumulator(
                     _append_segment_row(state.segment, lead, is_pad=True)
             state.leading.clear()
             _append_segment_row(state.segment, row, is_pad=False)
-
-            if (
-                max_timesteps is not None
-                and state.segment.n_candidates >= max_timesteps
+            segment = state.segment
+            if payload.needed_s is not None:
+                segment.needed_s = max(segment.needed_s, float(payload.needed_s[i]))
+            duration_s = segment.time_mjds[-1] - segment.time_mjds[0]
+            long_enough = (
+                payload.needed_s is not None
+                and duration_s >= accumulator.length_factor * segment.needed_s
+            )
+            if long_enough or (
+                max_timesteps is not None and segment.n_candidates >= max_timesteps
             ):
-                _release_segment(state, released)
+                _split_segment(state, released, pad)
             continue
 
         # Clean row, with padding
@@ -544,14 +601,15 @@ def segment_spectrum(
     return np.abs(spectrum[..., 0] + spectrum[..., -1]) / 2
 
 
-def separable_in_rate(
+def rate_separation_hz(
     w_delays: WDelays,
     baseline_idx: NDArray[np.int_],
     time_idx: NDArray[np.int_],
     freq_hz: NDArray[np.floating[Any]],
-) -> NDArray[np.bool_]:
-    """Whether an object's fringe rate is outside the field's over the band,
-    and below the Nyquist rate, at each row
+) -> NDArray[np.floating[Any]]:
+    """The gap in fringe rate between an object and the field's guard over the
+    band at each row, in Hz. Zero where they overlap, or the object is beyond
+    the Nyquist rate.
 
     Args:
         w_delays (WDelays): The object's delays and the field's rate guard
@@ -560,7 +618,7 @@ def separable_in_rate(
         freq_hz (NDArray[np.floating[Any]]): The frequency of each channel, in Hz
 
     Returns:
-        NDArray[np.bool_]: Whether each row is separable in fringe rate
+        NDArray[np.floating[Any]]: The gap at each row, in Hz
     """
     rate = np.abs(get_w_rates(w_delays)[baseline_idx, time_idx].to("").value)
     guard = (
@@ -571,7 +629,30 @@ def separable_in_rate(
     time_s = _time_map_to_seconds(w_delays.time_map)
     step_s = float(np.median(np.diff(time_s))) if len(time_s) > 1 else np.inf
     nu_low, nu_high = np.min(np.abs(freq_hz)), np.max(np.abs(freq_hz))
-    return (rate * nu_low > guard * nu_high) & (rate * nu_high < 0.5 / step_s)
+    gap = rate * nu_low - guard * nu_high
+    return np.where((gap > 0) & (rate * nu_high < 0.5 / step_s), gap, 0.0)
+
+
+def needed_duration_s(
+    separation_hz: NDArray[np.floating[Any]],
+    rate_margin_lobes: float = 4.0,
+    rate_roll_off_bins: int = 2,
+) -> NDArray[np.floating[Any]]:
+    """The shortest segment that ``filter_segment``, with the same settings,
+    can separate an object from the field over: the margin around the object,
+    the roll-off and the field's main lobe all scale as 1/T
+
+    Args:
+        separation_hz (NDArray[np.floating[Any]]): The gap from ``rate_separation_hz``, in Hz
+        rate_margin_lobes (float, optional): As for ``filter_segment``. Defaults to 4.0.
+        rate_roll_off_bins (int, optional): As for ``filter_segment``. Defaults to 2.
+
+    Returns:
+        NDArray[np.floating[Any]]: The duration, in seconds. Infinite where the gap is zero.
+    """
+    lobes = rate_margin_lobes + 1 + rate_roll_off_bins / 2
+    with np.errstate(divide="ignore"):
+        return np.where(separation_hz > 0, lobes / separation_hz, np.inf)
 
 
 @dataclass
@@ -636,14 +717,12 @@ class RateFilterRun:
 
 def make_rate_filter_run(
     settings: RateFilterSettings,
-    max_timesteps: int | None,
     max_gap_steps: float = 1.5,
 ) -> RateFilterRun:
     """Start delay-rate filtering, feeding chunks in row order to ``update_rate_filter``
 
     Args:
         settings (RateFilterSettings): The notch and object settings
-        max_timesteps (int | None): The most candidates per segment
         max_gap_steps (float, optional): A step in time of more than this many integrations ends a segment. Defaults to 1.5.
 
     Returns:
@@ -653,7 +732,6 @@ def make_rate_filter_run(
     return RateFilterRun(
         settings=settings,
         accumulator=SegmentAccumulator(
-            max_timesteps=max_timesteps,
             pad_timesteps=settings.pad_timesteps,
             max_time_gap_s=max_gap_steps * float(np.median(np.diff(time_s)))
             if len(time_s) > 1
