@@ -11,6 +11,7 @@
 
 flagging.md
 nulling.md
+clean.md
 example.ipynb
 
 ```

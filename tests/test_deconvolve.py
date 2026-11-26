@@ -22,6 +22,7 @@ from jolly_roger.deconvolve import (
     clean_tractor,
     compute_clean_tractor,
     compute_delay_clean,
+    delay_clean_spectra,
     delay_clean_spectrum,
     describe_band_edges,
     describe_clean_line_limit,
@@ -271,6 +272,154 @@ def test_missing_rm_lite_is_explained(monkeypatch: pytest.MonkeyPatch) -> None:
             channel_width_hz=CHANNEL_WIDTH_HZ,
             field_delay_s=FIELD_DELAY_S,
         )
+
+
+def test_old_rm_lite_is_explained(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rm_lite.utils import clean  # noqa: PLC0415
+
+    monkeypatch.delattr(clean, "minor_loop_batch")
+
+    with pytest.raises(MissingCleanDependencyError, match=r"rm-lite>=2026\.11\.0"):
+        delay_clean_spectrum(
+            values=_field(),
+            weights=np.ones(N_CHAN),
+            channel_width_hz=CHANNEL_WIDTH_HZ,
+            field_delay_s=FIELD_DELAY_S,
+        )
+
+
+def _mixed_chunk() -> DataChunk:
+    """Rows with different flag patterns, objects inside and outside the
+    field, a fully flagged spectrum, and spectra too broken up by flags for the
+    noise to be estimated"""
+    data_chunk = _chunk([150e-9, 55e-9, 150e-9, -120e-9, 200e-9, 150e-9])
+    mask = data_chunk.masked_data.mask
+    mask[1, 90:100, 0] = True
+    mask[3, :10, :] = True
+    mask[4, :, 1] = True
+    mask[5, ::20, :] = True
+    return data_chunk
+
+
+def test_chunk_matches_cleaning_each_spectrum() -> None:
+    data_chunk = _mixed_chunk()
+    statistics = DelayCleanStatistics()
+
+    result = compute_delay_clean(
+        data_chunk=data_chunk, field_delay_s=FIELD_DELAY_S, statistics=statistics
+    )
+
+    data = data_chunk.masked_data.data
+    flags = ma.getmaskarray(data_chunk.masked_data)
+    expected = data.copy()
+    reaches_field = np.zeros(data.shape[0], dtype=bool)
+    expected_statistics = DelayCleanStatistics()
+    spectra = []
+    for row in range(data.shape[0]):
+        for pol in range(data.shape[2]):
+            weights = (~flags[row, :, pol]).astype(float)
+            if not weights.any():
+                continue
+            spectrum = delay_clean_spectrum(
+                values=data[row, :, pol],
+                weights=weights,
+                channel_width_hz=CHANNEL_WIDTH_HZ,
+                field_delay_s=FIELD_DELAY_S,
+            )
+            expected[row, :, pol] -= spectrum.model
+            reaches_field[row] |= spectrum.reaches_field
+            spectra.append(spectrum)
+    expected_statistics.record(spectra, rows_flagged=int(reaches_field.sum()))
+    expected_flags = flags | reaches_field[:, None, None]
+
+    assert result.data_chunk is not None
+    assert result.flags is not None
+    np.testing.assert_allclose(
+        result.data_chunk.masked_data.data, expected, rtol=0, atol=1e-10
+    )
+    np.testing.assert_array_equal(result.flags, expected_flags)
+    # Both kinds of uncleaned spectra are exercised
+    assert statistics.spectra == len(spectra) == 11
+    assert statistics.noise_not_estimated == 2
+    assert statistics.noise_not_estimated == expected_statistics.noise_not_estimated
+    np.testing.assert_allclose(
+        statistics.edge_residuals, expected_statistics.edge_residuals
+    )
+    np.testing.assert_allclose(
+        statistics.mid_residuals, expected_statistics.mid_residuals
+    )
+    assert statistics.rows_flagged == expected_statistics.rows_flagged == 1
+
+
+def test_spectra_match_cleaning_each_spectrum() -> None:
+    values = np.stack(
+        [_field() + _noise(seed) + _resolved_object(150e-9) for seed in range(3)]
+    )
+    weights = np.ones(N_CHAN)
+    weights[40:46] = 0.0
+    # The last spectrum's field takes in the object
+    field_delays = np.array([FIELD_DELAY_S, FIELD_DELAY_S, 300e-9])
+    noise = np.array([SIGMA, np.nan, 2 * SIGMA])
+
+    results = delay_clean_spectra(
+        values=values,
+        weights=weights,
+        channel_width_hz=CHANNEL_WIDTH_HZ,
+        field_delay_s=field_delays,
+        visibility_noise=noise,
+    )
+
+    for index, result in enumerate(results):
+        expected = delay_clean_spectrum(
+            values=values[index],
+            weights=weights,
+            channel_width_hz=CHANNEL_WIDTH_HZ,
+            field_delay_s=float(field_delays[index]),
+            visibility_noise=None if np.isnan(noise[index]) else float(noise[index]),
+        )
+        if index == 1:
+            # A NaN noise is not known, so the spectrum is left alone
+            assert result.iterations == 0
+            assert result.delay_noise == 0
+            assert np.all(result.model == 0)
+            continue
+        np.testing.assert_allclose(result.model, expected.model, rtol=0, atol=1e-12)
+        assert result.iterations == expected.iterations
+        assert result.delay_noise == pytest.approx(expected.delay_noise)
+        assert result.reaches_field == expected.reaches_field
+        assert result.edge_residual == pytest.approx(expected.edge_residual)
+        assert result.mid_residual == pytest.approx(expected.mid_residual)
+    assert _rms(results[0].model) > 1.0
+    assert _rms(results[2].model) < 0.1
+
+
+def test_chunk_results_do_not_depend_on_row_order() -> None:
+    data_chunk = _mixed_chunk()
+    order = np.array([4, 2, 0, 5, 1, 3])
+    shuffled = replace(
+        data_chunk,
+        masked_data=data_chunk.masked_data[order],
+        ant_1=data_chunk.ant_1[order],
+        ant_2=data_chunk.ant_2[order],
+        time_mjds=data_chunk.time_mjds[order],
+    )
+
+    result = compute_delay_clean(data_chunk=data_chunk, field_delay_s=FIELD_DELAY_S)
+    shuffled_result = compute_delay_clean(
+        data_chunk=shuffled, field_delay_s=FIELD_DELAY_S
+    )
+
+    assert result.data_chunk is not None
+    assert shuffled_result.data_chunk is not None
+    assert result.flags is not None
+    assert shuffled_result.flags is not None
+    np.testing.assert_allclose(
+        shuffled_result.data_chunk.masked_data.data,
+        result.data_chunk.masked_data.data[order],
+        rtol=0,
+        atol=1e-12,
+    )
+    np.testing.assert_array_equal(shuffled_result.flags, result.flags[order])
 
 
 def _w_delays(
