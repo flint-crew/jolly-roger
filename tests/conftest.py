@@ -47,6 +47,15 @@ def ms_example(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def ms_sb47138(tmp_path: Path) -> Path:
+    """30 minutes of SB47138 around sunrise: ak01 to ak06, ak07 and ak32"""
+    resource = files("jolly_roger.data").joinpath("tests", "sb47138_sunrise.ms.zip")
+    with as_file(resource) as archive:
+        shutil.unpack_archive(archive, tmp_path)
+    return tmp_path / "sb47138_sunrise.ms"
+
+
+@pytest.fixture
 def ms_ant_xyz() -> np.ndarray:
     resource = files("jolly_roger.data").joinpath("tests", "ant_xyz.npz")
     with as_file(resource) as path, np.load(path) as arr:
