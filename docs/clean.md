@@ -6,6 +6,16 @@
 jolly_tractor clean my.ms --target-objects sun --output-column CORRECTED_DATA
 ```
 
+## Example
+
+The example below runs `clean` on the same 30 minutes of ASKAP data as the [notch example](nulling_example.ipynb). The figures are made from the data each time the documentation is built.
+
+```{toctree}
+:maxdepth: 1
+
+clean_example.ipynb
+```
+
 ## How it works
 
 - Each visibility spectrum is transformed to delay with an FFT. The delay spread function (the delay spectrum of a point source) is the FFT of the channel weights, so flagged channels are accounted for exactly.
