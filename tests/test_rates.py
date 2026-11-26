@@ -6,7 +6,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from jolly_roger.rates import (
-    ContaminatedSegment,
+    CandidateSegment,
     RateFilterPayload,
     SegmentAccumulator,
     flush_segment_accumulator,
@@ -19,7 +19,7 @@ T0_S = 5e9
 
 def _update(
     accumulator: SegmentAccumulator,
-    recoverable: NDArray[np.bool_],
+    candidate: NDArray[np.bool_],
     delay_contaminated: NDArray[np.bool_] | None = None,
     time_idx: NDArray[np.int_] | None = None,
     ant_2: NDArray[np.int_] | None = None,
@@ -27,12 +27,12 @@ def _update(
     data: NDArray[np.complexfloating[Any]] | None = None,
     weights: dict[str, NDArray[np.floating[Any]]] | None = None,
     time_s: NDArray[np.floating[Any]] | None = None,
-) -> list[ContaminatedSegment]:
+) -> list[CandidateSegment]:
     """Feed a set of rows to the accumulator. By default rows are a single
     baseline at consecutive times"""
-    n_rows = len(recoverable)
+    n_rows = len(candidate)
     if delay_contaminated is None:
-        delay_contaminated = recoverable
+        delay_contaminated = candidate
     if time_idx is None:
         time_idx = row_start + np.arange(n_rows)
     if ant_2 is None:
@@ -51,10 +51,16 @@ def _update(
         time_idx=time_idx,
         original_masked_data=np.ma.masked_array(data, mask=np.zeros(data.shape, bool)),
         delay_contaminated=np.asarray(delay_contaminated, dtype=bool),
-        recoverable=np.asarray(recoverable, dtype=bool),
+        candidate=np.asarray(candidate, dtype=bool),
         original_weights=weights,
     )
     return update_segment_accumulator(accumulator=accumulator, payload=payload)
+
+
+def _candidate_rows(segment: CandidateSegment) -> list[int]:
+    return [
+        row for row, pad in zip(segment.rows, segment.is_pad, strict=True) if not pad
+    ]
 
 
 def _bools(pattern: str) -> NDArray[np.bool_]:
@@ -68,7 +74,7 @@ def test_accumulator_releases_on_exit() -> None:
 
     assert len(released) == 1
     assert released[0].rows == [2, 3, 4]
-    assert released[0].n_core == 3
+    assert released[0].n_candidates == 3
     assert flush_segment_accumulator(accumulator) == []
 
 
@@ -86,10 +92,10 @@ def test_accumulator_tracks_baselines_independently() -> None:
     """Rows interleaved from two baselines, each time step holds both"""
     accumulator = SegmentAccumulator()
     # (baseline 1, baseline 2) per time step
-    recoverable = _bools("10111101")
+    candidate = _bools("10111101")
     ant_2 = np.tile([1, 2], 4)
     time_idx = np.repeat(np.arange(4), 2)
-    released = _update(accumulator, recoverable, time_idx=time_idx, ant_2=ant_2)
+    released = _update(accumulator, candidate, time_idx=time_idx, ant_2=ant_2)
     released += flush_segment_accumulator(accumulator)
 
     by_baseline = {(seg.ant_1, seg.ant_2): seg.rows for seg in released}
@@ -99,9 +105,9 @@ def test_accumulator_tracks_baselines_independently() -> None:
 
 def test_accumulator_releases_on_doubly_contaminated() -> None:
     accumulator = SegmentAccumulator()
-    recoverable = _bools("0110110")
+    candidate = _bools("0110110")
     delay_contaminated = _bools("0111110")
-    released = _update(accumulator, recoverable, delay_contaminated)
+    released = _update(accumulator, candidate, delay_contaminated)
 
     assert [seg.rows for seg in released] == [[1, 2], [4, 5]]
     assert accumulator.doubly_contaminated_rows == 1
@@ -155,7 +161,7 @@ def test_accumulator_padding() -> None:
     segment = released[0]
     assert segment.rows == [1, 2, 3, 4, 5, 6, 7]
     assert segment.is_pad == [True, True, False, False, False, True, True]
-    assert segment.core_rows.tolist() == [3, 4, 5]
+    assert _candidate_rows(segment) == [3, 4, 5]
 
 
 def test_accumulator_padding_shared_between_segments() -> None:
@@ -165,19 +171,19 @@ def test_accumulator_padding_shared_between_segments() -> None:
     released += flush_segment_accumulator(accumulator)
 
     assert [seg.rows for seg in released] == [[0, 1, 2], [2, 3, 4, 5]]
-    assert [seg.core_rows.tolist() for seg in released] == [[0, 1], [3, 4]]
+    assert [_candidate_rows(seg) for seg in released] == [[0, 1], [3, 4]]
 
 
 def test_accumulator_padding_cut_by_doubly_contaminated() -> None:
     accumulator = SegmentAccumulator(pad_timesteps=2)
-    recoverable = _bools("0001100")
+    candidate = _bools("0001100")
     delay_contaminated = _bools("0101100")
-    released = _update(accumulator, recoverable, delay_contaminated)
+    released = _update(accumulator, candidate, delay_contaminated)
 
     assert len(released) == 1
     # Row 1 is doubly contaminated so only row 2 may lead
     assert released[0].rows == [2, 3, 4, 5, 6]
-    assert released[0].core_rows.tolist() == [3, 4]
+    assert _candidate_rows(released[0]) == [3, 4]
 
 
 def test_accumulator_padding_cut_by_time_gap() -> None:
@@ -194,7 +200,7 @@ def test_accumulator_partial_trail_flushed() -> None:
 
     (segment,) = flush_segment_accumulator(accumulator)
     assert segment.rows == [0, 1, 2, 3]
-    assert segment.core_rows.tolist() == [1, 2]
+    assert _candidate_rows(segment) == [1, 2]
 
 
 def test_accumulator_releases_on_given_gap_in_seconds() -> None:
@@ -214,4 +220,4 @@ def test_accumulator_default_cap() -> None:
     released = _update(accumulator, np.ones(accumulator.max_timesteps + 1, bool))
     released += flush_segment_accumulator(accumulator)
 
-    assert [seg.n_core for seg in released] == [accumulator.max_timesteps, 1]
+    assert [seg.n_candidates for seg in released] == [accumulator.max_timesteps, 1]

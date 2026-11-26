@@ -23,10 +23,9 @@ class _Row:
 
 
 @dataclass
-class ContaminatedSegment:
-    """Consecutive rows of a baseline to filter in delay-rate. Core rows were
-    flagged by the delay notch. Pad rows are clean neighbours that are never
-    written back."""
+class CandidateSegment:
+    """Consecutive rows of a baseline to filter in delay-rate: candidate rows,
+    plus clean pad rows either side that are never written back"""
 
     ant_1: int
     """The first antenna of the baseline"""
@@ -45,29 +44,14 @@ class ContaminatedSegment:
     mask: list[NDArray[np.bool_]] = field(default_factory=list)
     """The original flags of each row, shape (chan, pol)"""
     is_pad: list[bool] = field(default_factory=list)
-    """Whether a row is padding rather than a core row"""
-    n_core: int = 0
-    """The number of core rows"""
+    """Whether each row is a pad row rather than a candidate"""
+    n_candidates: int = 0
+    """The number of candidate rows"""
     weights: dict[str, list[NDArray[np.floating[Any]]]] | None = None
     """The original weights of each row, keyed by column name"""
 
-    @property
-    def n_rows(self) -> int:
-        """The total number of rows, core and pad"""
-        return len(self.rows)
 
-    @property
-    def core(self) -> NDArray[np.bool_]:
-        """Mask selecting the core rows"""
-        return ~np.array(self.is_pad, dtype=bool)
-
-    @property
-    def core_rows(self) -> NDArray[np.int_]:
-        """The measurement set row numbers of the core rows"""
-        return np.array(self.rows, dtype=int)[self.core]
-
-
-def _append_segment_row(segment: ContaminatedSegment, row: _Row, is_pad: bool) -> None:
+def _append_segment_row(segment: CandidateSegment, row: _Row, is_pad: bool) -> None:
     """Add a row to the end of a segment"""
     segment.rows.append(row.row)
     segment.time_mjds.append(row.time_mjd)
@@ -76,7 +60,7 @@ def _append_segment_row(segment: ContaminatedSegment, row: _Row, is_pad: bool) -
     segment.mask.append(row.mask)
     segment.is_pad.append(is_pad)
     if not is_pad:
-        segment.n_core += 1
+        segment.n_candidates += 1
     if row.weights is not None:
         if segment.weights is None:
             segment.weights = {k: [] for k in row.weights}
@@ -88,7 +72,7 @@ def _append_segment_row(segment: ContaminatedSegment, row: _Row, is_pad: bool) -
 class _BaselineState:
     """Tracking of a single baseline in the accumulator"""
 
-    segment: ContaminatedSegment | None = None
+    segment: CandidateSegment | None = None
     """The segment being collected. None when idle."""
     trailing: int | None = None
     """Number of trailing pad rows collected. None when the segment is still open."""
@@ -102,12 +86,14 @@ class _BaselineState:
 
 @dataclass
 class SegmentAccumulator:
-    """Per-baseline collection of recoverable rows. A segment is released on
-    a clean row (after ``pad_timesteps`` trailing rows), an unrecoverable row,
-    a gap in time, or ``max_timesteps`` core rows."""
+    """Per-baseline collection of candidate rows: rows flagged by the delay
+    notch where every object is separable from the field in delay-rate. A
+    segment is released on a clean row (after ``pad_timesteps`` trailing
+    rows), a flagged row that is not a candidate, a gap in time, or
+    ``max_timesteps`` candidates."""
 
     max_timesteps: int | None = 256
-    """The most core rows of a segment. Bounds memory. If None there is no limit."""
+    """The most candidates in a segment. Bounds memory. If None there is no limit."""
     pad_timesteps: int = 0
     """The number of clean rows either side of a segment to include as padding"""
     max_time_gap_s: float | None = None
@@ -138,15 +124,13 @@ class RateFilterPayload:
     """The visibilities before any delay tapering, shape (row, chan, pol)"""
     delay_contaminated: NDArray[np.bool_]
     """Rows flagged by the delay notch"""
-    recoverable: NDArray[np.bool_]
+    candidate: NDArray[np.bool_]
     """Flagged rows where every object is separable from the field in delay-rate"""
     original_weights: dict[str, NDArray[np.floating[Any]]] | None = None
     """The weights before any scaling"""
 
 
-def _release_segment(
-    state: _BaselineState, released: list[ContaminatedSegment]
-) -> None:
+def _release_segment(state: _BaselineState, released: list[CandidateSegment]) -> None:
     """Move the segment of a baseline, if any, to the released segments"""
     if state.segment is not None:
         released.append(state.segment)
@@ -172,15 +156,15 @@ def _is_time_gap(
 
 def update_segment_accumulator(
     accumulator: SegmentAccumulator, payload: RateFilterPayload
-) -> list[ContaminatedSegment]:
+) -> list[CandidateSegment]:
     """Consume the rows of a chunk, in the order they appear in the measurement set.
 
     Args:
         accumulator (SegmentAccumulator): The per-baseline collection of rows, updated in place
-        payload (RateFilterPayload): The rows, and whether each is flagged and recoverable
+        payload (RateFilterPayload): The rows, and whether each is flagged and a candidate
 
     Returns:
-        list[ContaminatedSegment]: Segments that have been released and are ready to filter
+        list[CandidateSegment]: Segments that have been released and are ready to filter
     """
     pad = accumulator.pad_timesteps
     max_timesteps = accumulator.max_timesteps
@@ -188,9 +172,9 @@ def update_segment_accumulator(
     mask = np.ma.getmaskarray(payload.original_masked_data)
     weights = payload.original_weights
 
-    released: list[ContaminatedSegment] = []
+    released: list[CandidateSegment] = []
     for i in range(len(payload.rows)):
-        is_recoverable = bool(payload.recoverable[i])
+        is_candidate = bool(payload.candidate[i])
         is_clean = not bool(payload.delay_contaminated[i])
         key = (int(payload.ant_1[i]), int(payload.ant_2[i]))
         state = accumulator.states.get(key)
@@ -211,7 +195,7 @@ def update_segment_accumulator(
         state.last_time_idx = t_idx
         state.last_time_mjd = t_mjd
 
-        if not is_clean and not is_recoverable:
+        if not is_clean and not is_candidate:
             accumulator.doubly_contaminated_rows += 1
             _release_segment(state, released)
             state.leading.clear()
@@ -234,11 +218,11 @@ def update_segment_accumulator(
             else {k: np.array(v[i]) for k, v in weights.items()},
         )
 
-        if is_recoverable:
+        if is_candidate:
             if state.trailing is not None:
                 _release_segment(state, released)
             if state.segment is None:
-                state.segment = ContaminatedSegment(
+                state.segment = CandidateSegment(
                     ant_1=key[0],
                     ant_2=key[1],
                     baseline_idx=int(payload.baseline_idx[i]),
@@ -248,7 +232,10 @@ def update_segment_accumulator(
             state.leading.clear()
             _append_segment_row(state.segment, row, is_pad=False)
 
-            if max_timesteps is not None and state.segment.n_core >= max_timesteps:
+            if (
+                max_timesteps is not None
+                and state.segment.n_candidates >= max_timesteps
+            ):
                 _release_segment(state, released)
             continue
 
@@ -265,16 +252,16 @@ def update_segment_accumulator(
 
 def flush_segment_accumulator(
     accumulator: SegmentAccumulator,
-) -> list[ContaminatedSegment]:
+) -> list[CandidateSegment]:
     """Release all segments still being collected, e.g. at the end of the measurement set
 
     Args:
         accumulator (SegmentAccumulator): The per-baseline collection of rows, emptied in place
 
     Returns:
-        list[ContaminatedSegment]: The remaining segments
+        list[CandidateSegment]: The remaining segments
     """
-    released: list[ContaminatedSegment] = []
+    released: list[CandidateSegment] = []
     for state in accumulator.states.values():
         _release_segment(state, released)
     accumulator.states = {}
