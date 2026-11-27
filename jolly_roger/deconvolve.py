@@ -25,9 +25,16 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 from scipy import ndimage, signal, stats
+from scipy.fft import next_fast_len
 
 from jolly_roger.history import add_history, dataclass_to_app_params
 from jolly_roger.logging import logger
+from jolly_roger.rates import (
+    SegmentFilterResult,
+    SegmentGeometry,
+    SegmentOutcome,
+    _band_residual,
+)
 from jolly_roger.tractor import (
     DataChunk,
     TaperedChunkResult,
@@ -259,6 +266,111 @@ def _no_clean_result(number_of_channels: int) -> DelayCleanResult:
     )
 
 
+def _clean_batch(
+    values: NDArray[np.complexfloating],
+    weights: NDArray[np.floating],
+    noise: NDArray[np.floating],
+    options: DelayCleanOptions,
+) -> tuple[NDArray[np.complexfloating], NDArray[np.floating], NDArray[np.int_]]:
+    """CLEAN a stack of regularly sampled series that share their weights,
+    over the conjugate axis oversampled by ``options.oversample`` (as ``delay_axis``)
+
+    Args:
+        values (NDArray[np.complexfloating]): The series, shaped (series, sample)
+        weights (NDArray[np.floating]): Weight of each sample, shared by every series, with a positive sum
+        noise (NDArray[np.floating]): Noise of one sample of each series, per real or imaginary part, at unit weight
+        options (DelayCleanOptions): CLEAN settings
+
+    Returns:
+        tuple[NDArray[np.complexfloating], NDArray[np.floating], NDArray[np.int_]]: The CLEAN components of each series on the conjugate axis, the noise on that axis, and the iterations of each
+    """
+    clean, _ = _import_minor_loop()
+    size = options.oversample * values.shape[-1]
+    weight_sum = weights.sum()
+    weighted = np.where(weights > 0, values, 0) * weights
+
+    dirty = np.fft.fftshift(np.fft.fft(weighted, n=size, axis=-1), axes=-1) / weight_sum
+    spread_function = np.fft.fftshift(np.fft.fft(weights, n=size)) / weight_sum
+    # The axis is cyclic, so three periods give the shifted spread function
+    # rm-lite expects for every peak position
+    spread_function = np.tile(spread_function, 3)
+    index = np.arange(size, dtype=float)
+    index_double = np.arange(3 * size, dtype=float) - size
+
+    # Noise per sample of the conjugate axis, from the noise per sample at unit weight
+    conjugate_noise = noise * np.sqrt(np.sum(weights**2)) / weight_sum
+
+    batch = clean.minor_loop_batch(
+        clean.MinorLoopBatchArrays(
+            resid_fdf_arr_mask=np.ma.masked_array(
+                dirty, mask=np.zeros(dirty.shape, dtype=bool)
+            ),
+            phi_arr_radm2=index,
+            phi_double_arr_radm2=index_double,
+            rmsf_arr=spread_function,
+        ),
+        clean.MinorLoopBatchOptions(
+            max_iter=options.max_iter,
+            gain=options.gain,
+            mask_threshold=options.mask_sigma * conjugate_noise,
+            stopping_threshold=options.threshold_sigma * conjugate_noise,
+            update_mask=True,
+            noise=conjugate_noise,
+            # Chunks already run on the tractor's threads, and numba's
+            # workqueue layer aborts when launched from several threads
+            parallel=False,
+        ),
+    )
+    return batch.model_fdf_arr, conjugate_noise, batch.iter_count_arr
+
+
+def clean_and_select(
+    values: NDArray[np.complexfloating],
+    weights: NDArray[np.floating],
+    keep: NDArray[np.bool_],
+    options: DelayCleanOptions | None = None,
+    visibility_noise: float | NDArray[np.floating] | None = None,
+) -> tuple[NDArray[np.complexfloating], NDArray[np.complexfloating]]:
+    """CLEAN regularly sampled series that share their weights, and return the
+    model of the components in ``keep`` and of all components, evaluated at every sample
+
+    Args:
+        values (NDArray[np.complexfloating]): The series, shaped (series, sample)
+        weights (NDArray[np.floating]): Weight of each sample, shared by every series
+        keep (NDArray[np.bool_]): Components to keep on the conjugate axis given by ``delay_axis``, for all series or shaped (series, axis)
+        options (DelayCleanOptions | None, optional): CLEAN settings. Defaults to None (the defaults).
+        visibility_noise (float | NDArray[np.floating] | None, optional): Noise of one sample, per real or imaginary part, at unit weight, for all series or for each. If None it is estimated with ``estimate_visibility_noise``. Defaults to None.
+
+    Returns:
+        tuple[NDArray[np.complexfloating], NDArray[np.complexfloating]]: The model of the kept components and of all components, each shaped as ``values``. Zero for series whose noise could not be estimated.
+    """
+    options = options or DelayCleanOptions()
+    values = np.asarray(values)
+    weights = np.asarray(weights, dtype=float)
+    number_of_series, number_of_samples = values.shape
+    model = np.zeros_like(values, dtype=complex)
+    full_model = np.zeros_like(values, dtype=complex)
+    if weights.sum() <= 0:
+        return model, full_model
+    noise = (
+        _estimate_visibility_noises(values, weights)
+        if visibility_noise is None
+        else np.broadcast_to(
+            np.asarray(visibility_noise, dtype=float), (number_of_series,)
+        )
+    )
+    to_clean = np.flatnonzero(~np.isnan(noise))
+    if to_clean.size == 0:
+        return model, full_model
+    components, _, _ = _clean_batch(
+        values=values[to_clean], weights=weights, noise=noise[to_clean], options=options
+    )
+    keep = np.broadcast_to(keep, (number_of_series, components.shape[-1]))[to_clean]
+    model[to_clean] = _model_to_values(np.where(keep, components, 0), number_of_samples)
+    full_model[to_clean] = _model_to_values(components, number_of_samples)
+    return model, full_model
+
+
 def delay_clean_spectra(
     values: NDArray[np.complexfloating],
     weights: NDArray[np.floating],
@@ -280,7 +392,7 @@ def delay_clean_spectra(
     Returns:
         list[DelayCleanResult]: The model to subtract and a summary of the CLEAN, for each spectrum. The model is zero where the noise could not be estimated.
     """
-    clean, _ = _import_minor_loop()
+    _import_minor_loop()
     options = options or DelayCleanOptions()
 
     values = np.asarray(values)
@@ -315,43 +427,10 @@ def delay_clean_spectra(
     values_to_clean = values[to_clean]
     noise = noise[to_clean]
 
-    size = options.oversample * number_of_channels
     delays_s = delay_axis(number_of_channels, channel_width_hz, options.oversample)
-    weighted = np.where(weights > 0, values_to_clean, 0) * weights
-
-    dirty = np.fft.fftshift(np.fft.fft(weighted, n=size, axis=-1), axes=-1) / weight_sum
-    delay_spread_function = np.fft.fftshift(np.fft.fft(weights, n=size)) / weight_sum
-    # The delay axis is cyclic, so three periods give the shifted delay spread
-    # function rm-lite expects for every peak position
-    delay_spread_function = np.tile(delay_spread_function, 3)
-    index = np.arange(size, dtype=float)
-    index_double = np.arange(3 * size, dtype=float) - size
-
-    # Noise per delay sample, from the noise per visibility at unit weight
-    delay_noise = noise * np.sqrt(np.sum(weights**2)) / weight_sum
-
-    batch = clean.minor_loop_batch(
-        clean.MinorLoopBatchArrays(
-            resid_fdf_arr_mask=np.ma.masked_array(
-                dirty, mask=np.zeros(dirty.shape, dtype=bool)
-            ),
-            phi_arr_radm2=index,
-            phi_double_arr_radm2=index_double,
-            rmsf_arr=delay_spread_function,
-        ),
-        clean.MinorLoopBatchOptions(
-            max_iter=options.max_iter,
-            gain=options.gain,
-            mask_threshold=options.mask_sigma * delay_noise,
-            stopping_threshold=options.threshold_sigma * delay_noise,
-            update_mask=True,
-            noise=delay_noise,
-            # Chunks already run on the tractor's threads, and numba's
-            # workqueue layer aborts when launched from several threads
-            parallel=False,
-        ),
+    models, delay_noise, iterations = _clean_batch(
+        values=values_to_clean, weights=weights, noise=noise, options=options
     )
-    models = batch.model_fdf_arr
 
     outside_field = np.abs(delays_s) > field_delays[to_clean, None]
     model_values = _model_to_values(
@@ -379,7 +458,7 @@ def delay_clean_spectra(
         )
         results[spectrum] = DelayCleanResult(
             model=model_values[position],
-            iterations=int(batch.iter_count_arr[position]),
+            iterations=int(iterations[position]),
             delay_noise=float(delay_noise[position]),
             reaches_field=reaches_field,
             edge_residual=edge_residual,
@@ -418,6 +497,145 @@ def delay_clean_spectrum(
         options=options,
         visibility_noise=visibility_noise,
     )[0]
+
+
+def _object_rate_bands(
+    geometry: SegmentGeometry,
+    freq_hz: NDArray[np.floating],
+    duration_s: float,
+    rate_margin_lobes: float,
+    min_margin_lobes: float,
+) -> tuple[list[tuple[NDArray[np.floating], NDArray[np.floating]]], bool]:
+    """Each active object's fringe-rate band in each channel, widened by up to
+    ``rate_margin_lobes`` / T but never into the field's range, and whether
+    every object is at least ``min_margin_lobes`` / T from the field"""
+    frequency = np.abs(freq_hz)
+    field_rate_hz = float(np.max(geometry.field_rate)) * frequency + 1 / duration_s
+    bands = []
+    for index in range(len(geometry.object_names)):
+        active = geometry.object_active[index]
+        if not active.any():
+            continue
+        rate = geometry.object_rate[index][active]
+        low, high = rate.min() * frequency, rate.max() * frequency
+        gap = np.where(low > 0, low - field_rate_hz, -field_rate_hz - high)
+        if np.any(gap < min_margin_lobes / duration_s):
+            return [], False
+        margin = np.minimum(rate_margin_lobes / duration_s, gap)
+        bands.append((low - margin, high + margin))
+    return bands, True
+
+
+def rate_clean_segment(
+    data: NDArray[np.complexfloating],
+    flags: NDArray[np.bool_],
+    is_pad: NDArray[np.bool_],
+    time_s: NDArray[np.floating],
+    freq_hz: NDArray[np.floating],
+    geometry: SegmentGeometry,
+    options: DelayCleanOptions | None = None,
+    visibility_noise: float | None = None,
+    rate_margin_lobes: float = 8.0,
+    min_margin_lobes: float = 4.0,
+    acceptance_sigma: float = 5.0,
+) -> SegmentFilterResult:
+    """Remove the objects from a baseline segment by CLEAN in fringe rate.
+
+    Each channel and polarisation is CLEANed along time, so the field and the
+    objects are separated by fringe rate alone and the objects' delay sidelobes
+    never arise. Only components in each object's fringe-rate band are
+    subtracted, evaluated at every row; everything else is kept. A row is
+    recovered if what CLEAN could not model in the objects' bands is within
+    ``acceptance_sigma`` times the noise.
+
+    Args:
+        data (NDArray[np.complexfloating]): Visibilities, shape (row, chan, pol)
+        flags (NDArray[np.bool_]): Flags, shape (row, chan, pol)
+        is_pad (NDArray[np.bool_]): Whether each row is a pad row, never recovered
+        time_s (NDArray[np.floating]): Time of each row, in seconds
+        freq_hz (NDArray[np.floating]): Frequency of each channel, in Hz
+        geometry (SegmentGeometry): Predicted delay-rates of the objects and the field's rate guard
+        options (DelayCleanOptions | None, optional): CLEAN settings. Defaults to None (the defaults).
+        visibility_noise (float | None, optional): Noise of one visibility, per real or imaginary part. If None it is estimated from the rows' spectra. Defaults to None.
+        rate_margin_lobes (float, optional): Widest margin around each object's band, in units of 1/T. Defaults to 8.0.
+        min_margin_lobes (float, optional): Margin an object must clear the field by, in units of 1/T. Defaults to 4.0.
+        acceptance_sigma (float, optional): Largest object residual of a recovered row, in units of the noise. Defaults to 5.0.
+
+    Returns:
+        SegmentFilterResult: The filtered visibilities and the rows recovered
+    """
+    options = options or DelayCleanOptions()
+    n_rows, n_chan, n_pol = data.shape
+    if not geometry.object_active.any():
+        return SegmentFilterResult(outcome=SegmentOutcome.NOTHING_TO_NULL)
+    if n_rows < 2 or (~is_pad).sum() == 0:
+        return SegmentFilterResult(outcome=SegmentOutcome.TOO_SHORT)
+
+    step_s = float(np.median(np.diff(time_s)))
+    duration_s = n_rows * step_s
+    bands, separable = _object_rate_bands(
+        geometry, freq_hz, duration_s, rate_margin_lobes, min_margin_lobes
+    )
+    if not separable:
+        return SegmentFilterResult(outcome=SegmentOutcome.NOT_SEPARABLE)
+
+    rates_hz = delay_axis(n_rows, step_s, options.oversample)
+    keep = np.zeros((n_chan, len(rates_hz)), dtype=bool)
+    for low, high in bands:
+        keep |= (rates_hz[None, :] >= low[:, None]) & (
+            rates_hz[None, :] <= high[:, None]
+        )
+
+    model = np.zeros_like(data, dtype=complex)
+    full_model = np.zeros_like(data, dtype=complex)
+    for pol in range(n_pol):
+        if visibility_noise is None:
+            spectra = [
+                estimate_visibility_noise(data[row, :, pol], ~flags[row, :, pol])
+                for row in np.flatnonzero(~is_pad)
+            ]
+            estimates = [estimate for estimate in spectra if estimate is not None]
+            noise = float(np.median(estimates)) if estimates else np.nan
+        else:
+            noise = visibility_noise
+        weights = (~flags[:, :, pol]).astype(float).T
+        patterns, group = np.unique(weights, axis=0, return_inverse=True)
+        for index, pattern in enumerate(patterns):
+            channels = np.flatnonzero(group.reshape(-1) == index)
+            kept, everything = clean_and_select(
+                values=data[:, channels, pol].T,
+                weights=pattern,
+                keep=keep[channels],
+                options=options,
+                visibility_noise=noise,
+            )
+            model[:, channels, pol] = kept.T
+            full_model[:, channels, pol] = everything.T
+    filtered = data - model
+
+    # What CLEAN could not model, band-passed to the objects' fringe rates. The
+    # field is modelled, so the sidelobes of the finite segment it puts into the
+    # objects' bands are not counted.
+    n_time = int(next_fast_len(2 * n_rows))
+    grid_hz = np.fft.fftfreq(n_time, step_s)
+    low = min(float(band[0].min()) for band in bands)
+    high = max(float(band[1].max()) for band in bands)
+    band_profile = ((grid_hz >= low) & (grid_hz <= high)).astype(float)
+    every_delay = np.ones((n_rows, n_chan), dtype=bool)
+    left, noise_left = _band_residual(
+        data - full_model,
+        (~flags).astype(float),
+        band_profile,
+        every_delay,
+        ~every_delay,
+        n_time,
+    )
+    passes = np.all(left <= acceptance_sigma * noise_left, axis=1)
+    return SegmentFilterResult(
+        outcome=SegmentOutcome.FILTERED,
+        data=filtered,
+        recovered=~is_pad & passes,
+    )
 
 
 @dataclass
