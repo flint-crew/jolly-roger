@@ -370,6 +370,7 @@ def plot_baseline_comparison_data(
         fig.suptitle(format_baseline_title(after_baseline_data))
         fig.tight_layout()
         fig.savefig(output_path)
+        plt.close(fig)
 
         return output_path
 

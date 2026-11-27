@@ -532,8 +532,10 @@ def test_tractor_rate_filter_records_history(ms_example) -> None:
     assert _history_rows(ms_example)[-1]["MESSAGE"].startswith("Delay-rate filter:")
 
 
-def test_tractor_rate_filter_adds_delay_rate_row(ms_example) -> None:
+def test_tractor_rate_filter_adds_delay_rate_row(ms_example, monkeypatch) -> None:
     """With rate filtering the comparison plot gains a fringe rate and delay row"""
+    closed: list[plt.Figure] = []
+    monkeypatch.setattr("jolly_roger.plots.plt.close", closed.append)
     results = tukey_tractor(
         ms_path=Path(ms_example),
         tukey_tractor_options=TukeyTractorOptions(
@@ -546,10 +548,9 @@ def test_tractor_rate_filter_adds_delay_rate_row(ms_example) -> None:
     assert results.output_plots is not None
     assert len(results.output_plots) == 1
     assert results.output_plots[0].exists()
-    figure = plt.gcf()
+    (figure,) = closed
     rate_axes = [ax for ax in figure.axes if ax.get_xlabel() == "Fringe rate / mHz"]
     assert len(rate_axes) == 3
-    plt.close(figure)
 
 
 def test_tractor_dry_run_leaves_history(ms_example) -> None:
@@ -650,3 +651,29 @@ def test_notch_flags_overlap_with_the_field_independent_of_delay_bins() -> None:
     )
     assert result.delay_contaminated is not None
     assert result.delay_contaminated.tolist() == [True, False]
+
+
+def test_plots_show_flags_from_before_the_run(ms_sb47138, monkeypatch) -> None:
+    """The 'before' panels are masked with the flags from before the run, not
+    with the rows the run flagged"""
+    closed: list[plt.Figure] = []
+    monkeypatch.setattr("jolly_roger.plots.plt.close", closed.append)
+    tukey_tractor(
+        ms_path=ms_sb47138,
+        tukey_tractor_options=TukeyTractorOptions(
+            output_column="NULLED_DATA", make_plots=True, number_of_plots=1
+        ),
+    )
+    # ak01-ak04 is plotted first; the notch flags 120 of its rows
+    figure = closed[0]
+    before, after = (
+        # The image is (frequency, time): count times masked in every channel
+        np.ma.getmaskarray(mesh.get_array()).all(axis=0).sum()
+        for mesh in (figure.axes[0].collections[0], figure.axes[2].collections[0])
+    )
+    with table(str(ms_sb47138), ack=False) as tab:
+        assert (
+            tab.getcol("FLAG")[tab.getcol("ANTENNA2") == 3].all(axis=(1, 2)).sum()
+            == 120
+        )
+    assert after - before == 120
