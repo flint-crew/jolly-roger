@@ -37,8 +37,8 @@ class OpenMSTables:
     """The path to the MS used to open tables"""
     phase_dir: SkyCoord
     """The phase direction appropriate for the data"""
-    nominal_fov: u.Quantity
-    """The FWHM field-of-view at the lowest frequency representative of the MS"""
+    nominal_fov: u.Quantity | None
+    """The FWHM field-of-view at the lowest frequency representative of the MS. None if the MS has no valid DISH_DIAMETER"""
 
     def close(self) -> None:
         """Close all open tables"""
@@ -134,15 +134,23 @@ def beam_fraction_to_radius(
 def get_nominal_fov(
     chan_freq: NDArray[np.floating[Any]],
     dish_diameter: NDArray[np.floating[Any]],
-) -> u.Quantity:
+    dish_rtol: float = 1e-3,
+) -> u.Quantity | None:
     """Field of view at the lowest frequency, assuming a single SPW and dish size.
+
+    The smallest valid dish diameter is used, as it gives the widest field of view.
+    Diameters that differ by more than ``dish_rtol`` raise a warning, as the
+    array is then not homogeneous and ``--dish-diameter-m`` may be more appropriate.
+    Diameters that are not positive and finite are ignored. If none are valid
+    there is no field of view, and ``None`` is returned.
 
     Args:
         chan_freq (NDArray[np.floating[Any]]): The CHAN_FREQ column, in Hz
         dish_diameter (NDArray[np.floating[Any]]): The DISH_DIAMETER column, in m
+        dish_rtol (float, optional): Relative tolerance within which dish diameters are considered the same. Defaults to 1e-3.
 
     Returns:
-        u.Quantity: The nominal radial field-of-view
+        u.Quantity | None: The nominal radial field-of-view, or None if there is no valid dish diameter
     """
     # NOTE; This crew member recognises that we could perhaps also convert
     # the FWHM -> radius to some PB level here. However, this is called by
@@ -152,17 +160,33 @@ def get_nominal_fov(
     lowest_freq = np.min(chan_freq) * u.Hz
     longest_lambda = (speed_of_light / lowest_freq).decompose()
 
-    unique_diameter = np.unique(dish_diameter)
-    assert len(unique_diameter) == 1, (
-        f"{len(unique_diameter)} dish sizes found, which is not reasonable"
-    )
-    if unique_diameter[0] <= 0:
+    dish_diameter = np.asarray(dish_diameter, dtype=float)
+    valid = np.isfinite(dish_diameter) & (dish_diameter > 0)
+    if not np.any(valid):
         logger.warning(
-            f"DISH_DIAMETER of {unique_diameter[0]} m, so the field-of-view is unbounded. Set --dish-diameter-m."
+            f"No valid DISH_DIAMETER found ({np.unique(dish_diameter)} m), so the "
+            "field-of-view is unknown. Set --dish-diameter-m if it is needed."
         )
-        return np.inf * u.rad
+        return None
+    if not np.all(valid):
+        logger.warning(
+            f"Ignoring {np.sum(~valid)} of {len(dish_diameter)} DISH_DIAMETER values "
+            f"that are not positive: {np.unique(dish_diameter[~valid])} m"
+        )
+        dish_diameter = dish_diameter[valid]
 
-    fov = (1.02 * longest_lambda / (unique_diameter[0] * u.m)).decompose() * u.rad
+    # Some arrays (e.g. LOFAR) record a per-station DISH_DIAMETER derived from
+    # each station's own layout, so values that are effectively the same can
+    # differ slightly. Use the smallest diameter, i.e. the widest field of view.
+    diameter = float(np.min(dish_diameter))
+    if not np.allclose(dish_diameter, diameter, rtol=dish_rtol, atol=0.0):
+        logger.warning(
+            f"DISH_DIAMETER varies across antennas ({np.min(dish_diameter):.4f} to "
+            f"{np.max(dish_diameter):.4f} m). Using the smallest, {diameter:.4f} m, "
+            "which has the widest field-of-view. Set --dish-diameter-m to override."
+        )
+
+    fov = (1.02 * longest_lambda / (diameter * u.m)).decompose() * u.rad
     logger.info(f"Nominal field-of-view (FWHM) is {fov.to('deg'):.3f}")
 
     return fov
@@ -172,7 +196,7 @@ def _get_nominal_fov(
     spw_table: table,
     antenna_table: table,
     dish_diameter_m: float | None = None,
-) -> u.Quantity:
+) -> u.Quantity | None:
     """Read CHAN_FREQ/DISH_DIAMETER from open tables and derive the nominal FoV.
 
     Args:
@@ -181,12 +205,13 @@ def _get_nominal_fov(
         dish_diameter_m (float | None, optional): A dish diameter, in m, overriding DISH_DIAMETER of the antenna table. Defaults to None.
 
     Returns:
-        u.Quantity: The nominal radial field-of-view
+        u.Quantity | None: The nominal radial field-of-view, or None if there is no valid dish diameter
     """
     dish_diameter = antenna_table.getcol("DISH_DIAMETER")
     if dish_diameter_m is not None:
         logger.info(
-            f"Using a dish diameter of {dish_diameter_m} m in place of DISH_DIAMETER {np.unique(dish_diameter)} m"
+            f"Using a dish diameter of {dish_diameter_m} m in place of DISH_DIAMETER "
+            f"({np.min(dish_diameter)} to {np.max(dish_diameter)} m)"
         )
         dish_diameter = np.array([dish_diameter_m])
 
@@ -206,9 +231,18 @@ def get_open_ms_tables(
         read_only (bool, optional): Whether to open in a read-only mode. Defaults to True.
         dish_diameter_m (float | None, optional): A dish diameter, in m, overriding DISH_DIAMETER when deriving the nominal field-of-view. Defaults to None.
 
+    Raises:
+        ValueError: Raised if ``dish_diameter_m`` is not positive and finite
+
     Returns:
         OpenMSTables: Set of open table references
     """
+    if dish_diameter_m is not None and not (
+        np.isfinite(dish_diameter_m) and dish_diameter_m > 0
+    ):
+        msg = f"{dish_diameter_m=}, but the dish diameter must be positive."
+        raise ValueError(msg)
+
     main_table = table(str(ms_path), ack=False, readonly=read_only)
     spw_table = table(str(ms_path / "SPECTRAL_WINDOW"), ack=False, readonly=read_only)
     field_table = table(str(ms_path / "FIELD"), ack=False, readonly=read_only)

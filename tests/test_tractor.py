@@ -7,12 +7,14 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 from casacore.tables import table
 from numpy import ma
 from numpy.typing import NDArray
 
+from jolly_roger.baselines import get_open_ms_tables
 from jolly_roger.delays import data_to_delay_time
 from jolly_roger.tractor import (
     DataChunk,
@@ -186,6 +188,28 @@ def test_tractor_run2(ms_example) -> None:
     with table(str(ms_example), ack=False) as tab:
         cols = tab.colnames()
         assert new_column in cols
+
+
+def test_tractor_guard_field_without_dish_diameter(ms_example) -> None:
+    """--guard-field needs a dish diameter, so fail rather than guard everything"""
+    with table(str(ms_example / "ANTENNA"), ack=False, readonly=False) as tab:
+        tab.putcol("DISH_DIAMETER", np.zeros(tab.nrows()))
+
+    # Without --guard-field the field of view is not needed, so the MS still opens
+    with get_open_ms_tables(ms_path=Path(ms_example)) as open_ms_tables:
+        assert open_ms_tables.nominal_fov is None
+
+    tukey_tractor_options = TukeyTractorOptions(
+        auto_size=True,
+        guard_field=True,
+        object_minimum_flux=0.05,
+        output_column="JACKS_DATA",
+    )
+    with pytest.raises(ValueError, match="--dish-diameter-m"):
+        tukey_tractor(
+            ms_path=Path(ms_example),
+            tukey_tractor_options=tukey_tractor_options,
+        )
 
 
 def _make_data_chunk(n_time: int = 8, n_chan: int = 16, n_pol: int = 2) -> DataChunk:

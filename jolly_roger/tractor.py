@@ -1523,6 +1523,12 @@ def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSe
     # Calculate the guard field region used to derieve the appropriate delay window
     radial_fov: u.Quantity | None = None
     if tractor_options.guard_field:
+        if open_ms_tables.nominal_fov is None:
+            msg = (
+                "--guard-field needs the field-of-view, but the measurement set has "
+                "no valid DISH_DIAMETER. Set --dish-diameter-m."
+            )
+            raise ValueError(msg)
         radial_fov = beam_fraction_to_radius(
             fraction=tractor_options.guard_field_fraction,
             field_of_view=open_ms_tables.nominal_fov,
