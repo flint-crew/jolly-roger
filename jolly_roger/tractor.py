@@ -42,6 +42,7 @@ from jolly_roger.rates import (
     RateFilterSettings,
     RowUpdate,
     describe_rate_filter,
+    filter_segment,
     flush_rate_filter,
     make_rate_filter_run,
     needed_duration_s,
@@ -1541,13 +1542,19 @@ def make_tukey_rate_filter(
     if tukey_tractor_options.make_plots:
         plot_dir = open_ms_tables.ms_path.parent / "plots"
         plot_dir.mkdir(exist_ok=True, parents=True)
+    pad_timesteps = 16
     settings = RateFilterSettings(
         w_delays_list=w_delays_list,
         freq_hz=np.atleast_1d(
             open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze()
         ).astype(float),
-        delay_width_s=delay_width_s,
-        delay_roll_off_s=tukey_tractor_options.tukey_width_ns * 1e-9,
+        segment_filter=partial(
+            filter_segment,
+            delay_width_s=delay_width_s,
+            delay_roll_off_s=tukey_tractor_options.tukey_width_ns * 1e-9,
+            roll_off_rows=pad_timesteps,
+        ),
+        pad_timesteps=pad_timesteps,
         field_delay_s=outer_width_s,
         elevation_cut_deg=tukey_tractor_options.elevation_cut_deg,
         ignore_nyquist_zone=tukey_tractor_options.ignore_nyquist_zone,

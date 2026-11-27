@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -438,8 +439,12 @@ def test_tukey_rate_filter_recovers_flagged_rows(tmp_path: Path) -> None:
         settings=RateFilterSettings(
             w_delays_list=[w_delays],
             freq_hz=FREQ_HZ,
-            delay_width_s=options.outer_width_ns * 1e-9,
-            delay_roll_off_s=options.tukey_width_ns * 1e-9,
+            segment_filter=partial(
+                filter_segment,
+                delay_width_s=options.outer_width_ns * 1e-9,
+                delay_roll_off_s=options.tukey_width_ns * 1e-9,
+                roll_off_rows=16,
+            ),
             field_delay_s=options.outer_width_ns * 1e-9,
             elevation_cut_deg=options.elevation_cut_deg,
             ignore_nyquist_zone=options.ignore_nyquist_zone,

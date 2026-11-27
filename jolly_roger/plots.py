@@ -543,11 +543,11 @@ def plot_rate_filter_segment(
     output_path: Path,
 ) -> Path:
     """A segment before and after delay-rate filtering, in fringe rate and
-    delay, with each object's path, the region removed and the field's box
+    delay, with each object's path, the field's box and any region removed
 
     Args:
         segment (CandidateSegment): The rows filtered
-        result (SegmentFilterResult): The result of ``filter_segment``
+        result (SegmentFilterResult): The result of ``filter_segment`` or ``rate_clean_segment``
         geometry (SegmentGeometry): The objects' and field's delays and rates
         freq_hz (NDArray[np.floating[Any]]): Frequency of each channel, in Hz
         output_path (Path): Where to save the figure
@@ -556,20 +556,22 @@ def plot_rate_filter_segment(
         Path: The saved figure
     """
     assert result.data is not None
-    assert result.removal is not None
-    assert result.window is not None
     flags = np.array(segment.mask)
-    n_time = result.removal.shape[0]
+    data = np.array(segment.data)
+    n_time = len(data) if result.removal is None else result.removal.shape[0]
+    window = np.ones(len(data)) if result.window is None else result.window
     step_s = float(np.median(np.diff(segment.time_mjds)))
     rate_mhz = np.fft.fftshift(np.fft.fftfreq(n_time, step_s)) * 1e3
     delay_ns = (
         np.fft.fftshift(np.fft.fftfreq(len(freq_hz), np.mean(np.diff(freq_hz)))) * 1e9
     )
-    before = segment_spectrum(np.array(segment.data), flags, result.window, n_time)
-    amplitudes = [
-        np.fft.fftshift(before),
-        np.fft.fftshift(before * (1 - result.removal)),
-    ]
+    before = segment_spectrum(data, flags, window, n_time)
+    after = (
+        segment_spectrum(result.data, flags, window, n_time)
+        if result.removal is None
+        else before * (1 - result.removal)
+    )
+    amplitudes = [np.fft.fftshift(before), np.fft.fftshift(after)]
     positive = amplitudes[0][amplitudes[0] > 0]
     norm = SymLogNorm(
         linthresh=float(np.percentile(positive, 5)) if positive.size else 1e-6,
@@ -614,8 +616,10 @@ def plot_rate_filter_segment(
                 color=f"C{index + 1}",
                 label=name,
             )
-        removal = np.fft.fftshift(result.removal)
-        if (removal > 0.5).any():
+        removal = (
+            None if result.removal is None else np.fft.fftshift(result.removal)
+        )
+        if removal is not None and (removal > 0.5).any():
             ax.contour(
                 rate_mhz,
                 delay_ns,
