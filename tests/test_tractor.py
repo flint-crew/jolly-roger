@@ -25,6 +25,7 @@ from jolly_roger.tractor import (
     TukeyTractorOptions,
     apply_roll_for_taper,
     compute_tukey_multi_taper,
+    compute_tukey_taper,
     find_idx_of_closest_delay,
     make_plot_results,
     make_search_window,
@@ -622,3 +623,30 @@ def test_make_plot_results_single_baseline(ms_example, tmp_path) -> None:
     assert len(paths) == 1
     assert "_0_1_" in paths[0].name
     assert paths[0].exists()
+
+
+def test_notch_flags_overlap_with_the_field_independent_of_delay_bins() -> None:
+    """A row is flagged when the object's notch overlaps the field's protected
+    range (|delay| < outer width + field outer width + guard), even when no
+    delay bin falls in both"""
+    n_time = 2
+    # 200 MHz of bandwidth: delay bins of 5 ns. Outer width 10 ns and a 3 ns
+    # guard, so the notch meets the field for |delay| < 23 ns. At 22 ns the
+    # notch covers 12-32 ns and the field -13-13 ns, but no 5 ns bin is in both.
+    chunk = replace(
+        _make_data_chunk(n_time=n_time, n_chan=40),
+        freq_chan=np.linspace(1.0, 1.195, 40) * u.GHz,
+    )
+    delays_s = np.array([22e-9, 24e-9])
+    w_delays = replace(
+        _make_w_delays(n_time=n_time),
+        w_delays=delays_s[None, :] * u.s,
+        guard_region=np.full((1, n_time), 3e-9) * u.s,
+    )
+    result = compute_tukey_taper(
+        data_chunk=chunk,
+        tukey_tractor_options=TukeyTractorOptions(outer_width_ns=10, tukey_width_ns=5),
+        w_delays=w_delays,
+    )
+    assert result.delay_contaminated is not None
+    assert result.delay_contaminated.tolist() == [True, False]

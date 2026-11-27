@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 from casacore.tables import table
 
+from jolly_roger.deconvolve import CleanTractorOptions, clean_tractor
 from jolly_roger.tractor import TukeyTractorOptions, tukey_tractor
 
 
@@ -34,7 +35,9 @@ def test_sb47138_tukey(ms_sb47138: Path) -> None:
     assert before.shape == after.shape
     assert not np.allclose(before, after)
     # The Sun crosses the field in delay on ak01-ak04 after sunrise
-    assert flagged[ant_2 == 3].sum() == 83
+    # Every row with the Sun above the elevation cut: its notch overlaps the
+    # field's protected range throughout
+    assert flagged[ant_2 == 3].sum() == 120
     assert not flagged[ant_2 != 3].any()
 
 
@@ -46,3 +49,33 @@ def test_sb47138_ak01_ak04_contents(ms_sb47138_ak01_ak04: Path) -> None:
         n_rows = tab.nrows()
     assert baselines == {(0, 3)}
     assert n_rows == 784
+
+
+def test_sb47138_no_flag_overlap(ms_sb47138: Path) -> None:
+    """With flag_overlap off, the notch still tapers the rows where the Sun
+    meets the field, but does not flag them"""
+    tukey_tractor(
+        ms_path=ms_sb47138,
+        tukey_tractor_options=TukeyTractorOptions(
+            output_column="NULLED_DATA", flag_overlap=False
+        ),
+    )
+    with table(str(ms_sb47138), ack=False) as tab:
+        flagged = tab.getcol("FLAG").all(axis=(1, 2))
+        before, after = tab.getcol("DATA"), tab.getcol("NULLED_DATA")
+        ant_2 = tab.getcol("ANTENNA2")
+    assert not flagged.any()
+    assert not np.allclose(before[ant_2 == 3], after[ant_2 == 3])
+
+
+def test_sb47138_clean_no_flag_overlap(ms_sb47138: Path) -> None:
+    results = clean_tractor(
+        ms_path=ms_sb47138,
+        clean_tractor_options=CleanTractorOptions(
+            output_column="CLEANED_DATA", flag_overlap=False
+        ),
+    )
+    with table(str(ms_sb47138), ack=False) as tab:
+        assert not tab.getcol("FLAG").all(axis=(1, 2)).any()
+    assert results.statistics is not None
+    assert results.statistics.rows_flagged > 0

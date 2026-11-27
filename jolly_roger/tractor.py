@@ -762,6 +762,8 @@ def compute_tukey_taper(
     field_taper = np.swapaxes(field_taper[:, :, None], 0, 1)
 
     stokes_i_delay: NDArray[np.complexfloating[Any]] | None = None
+    # Shift of the notch from the predicted delay, in seconds, when the peak is searched for
+    shift_s = np.zeros(len(tukey_x_offset_sec))
     if tukey_tractor_options.peak_shift_search:
         # The formed stokes I spectrum code be reused later should
         # comparisons to field or minimum flux cuts are applied
@@ -826,6 +828,7 @@ def compute_tukey_taper(
         logger.info(f"{shifts=}")
 
         taper = apply_roll_for_taper(taper=taper[..., 0], shifts=shifts)[..., None]
+        shift_s = shifts * float(np.mean(np.diff(delay_time.delay.to("s").value)))
 
     # apply the flags to ignore the tapering if the object is larger
     # than one wrap away
@@ -841,12 +844,21 @@ def compute_tukey_taper(
 
     taper[elevation_mask[time_idx], :, :] = 1.0
 
-    # Compute flags to ignore the objects delay crossing 0, Do
-    # This by computing the taper towards the field and
-    # see if there are any components of the two sets of tapers
-    # that are not 1 (where 1 is 'no change'). ``field_taper`` was formed above.
-    intersecting_taper = np.any(
-        np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
+    # Flag rows where the object's notch overlaps the field's protected range:
+    # the object's delay is within the sum of their half-widths. Computed from
+    # the delays rather than the sampled tapers, so it does not depend on where
+    # the delay bins fall.
+    object_delay_s = symmetric_domain_wrap(
+        values=tukey_x_offset_sec + shift_s,
+        upper_limit=axis_half_period(delay_time.delay.to("s").value),
+    )
+    intersecting_taper = (
+        (
+            np.abs(object_delay_s)
+            < tukey_tractor_options.outer_width_ns * 1e-9 + field_outer_width
+        )
+        & ~ignore_wrapping_for
+        & ~elevation_mask[time_idx]
     )
 
     # The guard region protects the field's main lobe: we flag the crossing
@@ -894,7 +906,8 @@ def compute_tukey_taper(
     # ] = 0.0
     # Update flags
     flags_to_return = np.zeros_like(data_chunk.masked_data.mask)
-    flags_to_return[intersecting_taper] = True
+    if tukey_tractor_options.flag_overlap:
+        flags_to_return[intersecting_taper] = True
     flags_to_return = (
         ~np.isfinite(data_chunk.masked_data.filled(np.nan)) | flags_to_return
     )
@@ -1190,6 +1203,8 @@ class TractorOptions(BaseOptions):
     """Protect a region around delay=0 sized from the field of view"""
     dish_diameter_m: float | None = None
     """Dish diameter in metres used to derive the nominal field of view (e.g. for the guard region), overriding DISH_DIAMETER in the measurement set's ANTENNA table. If None the ANTENNA table is used."""
+    flag_overlap: bool = True
+    """Flag rows where an object can not be separated from the field in delay. If False they are kept, with the object removed only outside the field's protected range."""
     guard_field_fraction: float = 0.1
     """The attenuation level of the main lobe to guard to, and should be in the range (0, 1). Values closer to zero correspond to a larger field-of-view, and hence a larger guard band in delay space. """
 
