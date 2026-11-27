@@ -14,7 +14,7 @@ from jolly_roger.baselines import get_baselines
 from jolly_roger.deconvolve import CleanTractorOptions, clean_tractor
 from jolly_roger.hour_angles import get_location, make_hour_angles
 from jolly_roger.tractor import TukeyTractorOptions, tukey_tractor
-from jolly_roger.uvws import xyz_to_uvw
+from jolly_roger.uvws import PhaseDirMismatchError, xyz_to_uvw
 
 
 def test_sb47138_contents(ms_sb47138: Path) -> None:
@@ -133,3 +133,22 @@ def test_sb47138_field_matches_uvw(name: str, request: pytest.FixtureRequest) ->
     np.testing.assert_allclose(
         uvws[:, baseline_idx, time_idx].T, uvw, rtol=0, atol=1e-3
     )
+
+
+def test_uncorrected_field_fails_early(ms_sb47138: Path) -> None:
+    """With ASKAP's uncorrected FIELD (the boresight, kept by fixms as
+    FIELD_OLD) the phase direction does not reproduce the UVW column"""
+    with table(str(ms_sb47138 / "FIELD_OLD"), ack=False) as old:
+        boresight = old.getcol("PHASE_DIR")
+    with table(str(ms_sb47138 / "FIELD"), readonly=False, ack=False) as field:
+        for column in ("PHASE_DIR", "DELAY_DIR", "REFERENCE_DIR"):
+            field.putcol(column, boresight)
+
+    with pytest.raises(PhaseDirMismatchError, match="fix_ms_dir"):
+        tukey_tractor(
+            ms_path=ms_sb47138,
+            tukey_tractor_options=TukeyTractorOptions(output_column="NULLED_DATA"),
+        )
+    # It fails before the measurement set is changed
+    with table(str(ms_sb47138), ack=False) as tab:
+        assert "NULLED_DATA" not in tab.colnames()
