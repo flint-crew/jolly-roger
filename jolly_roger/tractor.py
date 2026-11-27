@@ -3,7 +3,7 @@ from __future__ import annotations
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from time import time
@@ -465,6 +465,33 @@ def write_output_column(
             subtab.flush()
 
 
+def get_plot_baselines(
+    open_ms_tables: OpenMSTables, max_baselines: int
+) -> NDArray[np.int_]:
+    """The first ``max_baselines`` cross-correlations in the measurement set, as (ANTENNA1, ANTENNA2)"""
+    pairs = np.stack(
+        [
+            open_ms_tables.main_table.getcol("ANTENNA1"),
+            open_ms_tables.main_table.getcol("ANTENNA2"),
+        ],
+        axis=1,
+    )
+    return np.unique(pairs[pairs[:, 0] != pairs[:, 1]], axis=0)[:max_baselines]
+
+
+def read_baseline_flags(
+    open_ms_tables: OpenMSTables, baselines: NDArray[np.int_]
+) -> dict[tuple[int, int], NDArray[np.bool_]]:
+    """The FLAG column of each baseline, e.g. to plot the data as they were before a run"""
+    flags = {}
+    for ant_1, ant_2 in baselines:
+        with open_ms_tables.main_table.query(
+            f"ANTENNA1=={ant_1} AND ANTENNA2=={ant_2}", columns="FLAG"
+        ) as subtable:
+            flags[(int(ant_1), int(ant_2))] = subtable.getcol("FLAG")
+    return flags
+
+
 def make_plot_results(
     open_ms_tables: OpenMSTables,
     data_column: str,
@@ -474,6 +501,7 @@ def make_plot_results(
     outer_width_ns: float | None = None,
     max_baselines: int = 10,
     delay_rate: bool = False,
+    before_flags: dict[tuple[int, int], NDArray[np.bool_]] | None = None,
 ) -> list[Path]:
     """Create plots useful for diagnostics
 
@@ -486,6 +514,7 @@ def make_plot_results(
         outer_width_ns (float | None, optional): Size, in nanoseconds, of the tukey taper. Defaults to None.
         max_baselines (int, optional): The maximum number of baseline plots to create. Defaults to 10.
         delay_rate (bool, optional): Add a row in fringe rate and delay to each baseline's plot. Defaults to False.
+        before_flags (dict[tuple[int, int], NDArray[np.bool_]] | None, optional): Flags of each baseline before the run, from ``read_baseline_flags``, for the 'before' data. If None the current flags are used. Defaults to None.
 
     Returns:
         list[Path]: Collection of paths to use
@@ -496,18 +525,7 @@ def make_plot_results(
     output_dir = open_ms_tables.ms_path.parent / "plots"
     output_dir.mkdir(exist_ok=True, parents=True)
 
-    # The cross-correlations present, in the measurement set's own ordering
-    pairs = np.stack(
-        [
-            open_ms_tables.main_table.getcol("ANTENNA1"),
-            open_ms_tables.main_table.getcol("ANTENNA2"),
-        ],
-        axis=1,
-    )
-    b_idx = np.unique(pairs[pairs[:, 0] != pairs[:, 1]], axis=0)
-    logger.info(f"MS contains {len(b_idx)} baselines")
-
-    b_idx = b_idx[:max_baselines]
+    b_idx = get_plot_baselines(open_ms_tables, max_baselines)
     logger.info(f"Plotting {len(b_idx)} baselines")
 
     for baseline, (ant_1, ant_2) in enumerate(b_idx):
@@ -519,6 +537,14 @@ def make_plot_results(
             ant_2=ant_2,
             data_column=data_column,
         )
+        if before_flags is not None:
+            before_baseline_data = replace(
+                before_baseline_data,
+                masked_data=np.ma.masked_array(
+                    before_baseline_data.masked_data.data,
+                    mask=before_flags[(int(ant_1), int(ant_2))],
+                ),
+            )
         after_baseline_data = get_baseline_data(
             open_ms_tables=open_ms_tables,
             ant_1=ant_1,
@@ -1585,6 +1611,14 @@ def tukey_tractor(
         kernel_summary=kernel_summary,
     )
 
+    before_flags = (
+        read_baseline_flags(
+            open_ms_tables,
+            get_plot_baselines(open_ms_tables, tukey_tractor_options.number_of_plots),
+        )
+        if tukey_tractor_options.make_plots
+        else None
+    )
     rate_filter: RateFilterRun | None = None
     if not tukey_tractor_options.dry_run:
         if tukey_tractor_options.rate_filter:
@@ -1618,6 +1652,7 @@ def tukey_tractor(
             outer_width_ns=tukey_tractor_options.outer_width_ns,
             max_baselines=tukey_tractor_options.number_of_plots,
             delay_rate=tukey_tractor_options.rate_filter,
+            before_flags=before_flags,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")

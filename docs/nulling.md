@@ -13,21 +13,17 @@ Brief testing suggests that smaller batch sizes is preferable over larger when u
 
 ## Example
 
-The nulling approach can be accessed through `jolly_tractor`. Examples of its application are below. The left and right columns indicate the before and after of the nulling procedure (here nulling towards the Sun's sky position). The top row shows the dynamic sopectrum (time vs frequency) while the bottom highlight the time vs delay of the data.
+`jolly_tractor tukey` applies the notch. The example below nulls the Sun in 30 minutes of an ASKAP EMU observation around sunrise, and shows each baseline before and after. The figures are made from the data each time the documentation is built.
 
-Sunrise was approximately in the middle of this observation, as indicated by the sudden excess power seen in the top left figure.
+The dashed line in the middle panel is the Sun's delay, predicted from the array geometry. The length of each dash shows the Nyquist zone, i.e. how many times the object's delay wraps round the delay axis. Objects beyond `--ignore-nyquist-zone` are not nulled, which is typical on longer baselines. Where the object's delay comes within the field's guard region the two cannot be separated in delay, so the timestep is flagged; `--rate-filter` can recover many of these rows.
 
-The red dashed lines in the lower panel represents the delay of the Sun as derived from the geometry of the array, with the length of each dash represents the Nyquist zone (i.e. how aliased the source appears in delay space). Nulling can be deactivated if the Nyquist zone of the object is high enough to effectively mean no contribution (typically the case for longer baselines).
+```{toctree}
+:maxdepth: 1
 
-Should the source cross over a delay of 0 then that timestep will be flagged, as the intermixed components can not be separated, and nulling would have an adverse effect of the direction being observed.
+nulling_example.ipynb
+```
 
-### Baseline ak01 to ak06
-![Example 1](images/baseline_data_0_5_multi_comparison.png)
-
-### Baseline ak01 to ak07
-![Example 1](images/baseline_data_0_6_multi_comparison.png)
-
-### Tukey Parameterisation
+## Tukey Parameterisation
 ![Tukey Parameterisation](images/example_tukey.png)
 
 Internal `jolly-roger` uses a tukey window function to smoothly modify visibilities. This window function defines a region that smoothly changes from 1.0 to 0.0. We should in the above figure this specific window is parameterised in `jolly-roger`.
@@ -52,12 +48,12 @@ The nulling can be used from Python without the CLI, either on a measurement set
 
 ## Delay-rate filtering
 
-`jolly_tractor tukey --rate-filter` recovers rows the notch flags because an object is too close to the field in delay, when the object is separated from the field in fringe rate.
+`jolly_tractor tukey --rate-filter` recovers rows that the notch flags because an object is too close to the field in delay, provided the object is separated from the field in fringe rate.
 
-- Consecutive flagged rows of each baseline, plus clean rows either side, are filtered together in delay and fringe rate. The object's delay track and fringe-rate band are removed; the field's region, sized from the same field of view as the delay guard band, is kept.
+- Consecutive flagged rows of each baseline, plus clean rows either side, are filtered together in delay and fringe rate. The region around each object's delay track and fringe-rate band is removed. The field's region, sized from the same field of view as the delay guard band, is kept.
 - A row is recovered only if the object left in it is comparable to what the notch leaves on rows it does not flag. Rows near the ends of a run without clean neighbours, or that fail this check, stay flagged.
-- Each run is filtered in segments long enough to separate every object from the field in fringe rate, which depends on the baseline, the objects' fringe rates, the frequencies and the integration time. A segment is released at twice the duration its rows need; long runs are split into overlapping segments, so no row is left at a segment end.
-- With `--make-plots`, each baseline's comparison plot gains a third row in fringe rate and delay, and up to `--number-of-plots` filtered segments are plotted with the region removed and the field's box.
+- Each run is filtered in segments long enough to separate every object from the field in fringe rate. The length needed depends on the baseline, the objects' fringe rates, the frequencies and the integration time, and each segment lasts twice that. Long runs are split into overlapping segments, so no recovered row is at the end of a segment.
+- With `--make-plots`, each baseline's comparison plot has a third row, in fringe rate and delay, and up to `--number-of-plots` filtered segments are plotted with the region the filter removes and the field's guard region.
 
 From arrays, `make_rate_filter_run`, `update_rate_filter` and `flush_rate_filter` (`jolly_roger.rates`) run the filter over chunks, and `filter_segment` filters one baseline's rows.
 

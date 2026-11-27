@@ -33,8 +33,10 @@ from jolly_roger.tractor import (
     TaperedChunkResult,
     TractorOptions,
     _get_baseline_time_indicies,
+    get_plot_baselines,
     make_plot_results,
     prepare_tractor,
+    read_baseline_flags,
     run_tractor_chunks,
 )
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
@@ -747,6 +749,14 @@ def clean_tractor(
     )
     logger.info(line_limit)
 
+    before_flags = (
+        read_baseline_flags(
+            open_ms_tables,
+            get_plot_baselines(open_ms_tables, clean_tractor_options.number_of_plots),
+        )
+        if clean_tractor_options.make_plots
+        else None
+    )
     statistics: DelayCleanStatistics | None = None
     if not clean_tractor_options.dry_run:
         statistics = DelayCleanStatistics()
@@ -770,6 +780,7 @@ def clean_tractor(
             w_delays=setup.w_delays_list,
             outer_width_ns=clean_tractor_options.field_delay_ns,
             max_baselines=clean_tractor_options.number_of_plots,
+            before_flags=before_flags,
         )
         logger.info(f"Made {len(plot_paths)} output plots")
 

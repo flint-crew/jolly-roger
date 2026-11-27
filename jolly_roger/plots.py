@@ -344,6 +344,7 @@ def plot_baseline_comparison_data(
         )
         fig.tight_layout()
         fig.savefig(output_path)
+        plt.close(fig)
 
         return output_path
 

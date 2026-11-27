@@ -98,6 +98,8 @@ log_cli_level = "INFO"
 testpaths = [
   "tests",
   "docs/example.ipynb",
+  "docs/nulling_example.ipynb",
+  "docs/clean_example.ipynb",
 ]
 
 

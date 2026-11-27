@@ -79,3 +79,22 @@ def test_sb47138_clean_no_flag_overlap(ms_sb47138: Path) -> None:
         assert not tab.getcol("FLAG").all(axis=(1, 2)).any()
     assert results.statistics is not None
     assert results.statistics.rows_flagged > 0
+
+
+def test_sb47138_rate_filter_recovers_rows(ms_sb47138_ak01_ak04: Path) -> None:
+    """On 2 h of ak01-ak04 the Sun crosses the field in delay, but is separable
+    in fringe rate: most of the rows the notch flags are recovered"""
+    options = {"output_column": "NULLED_DATA", "elevation_cut_deg": -1.0}
+    tukey_tractor(
+        ms_path=ms_sb47138_ak01_ak04,
+        tukey_tractor_options=TukeyTractorOptions(**options, rate_filter=True),
+    )
+    with table(str(ms_sb47138_ak01_ak04), ack=False) as tab:
+        flagged = tab.getcol("FLAG").all(axis=(1, 2))
+        before, after = tab.getcol("DATA"), tab.getcol("NULLED_DATA")
+        with table(tab.getkeyword("HISTORY"), ack=False) as history:
+            message = history.getcol("MESSAGE")[-1]
+    assert message.startswith("Delay-rate filter: recovered 701 rows")
+    assert flagged.sum() == 23
+    # Recovered rows are changed, rows before sunrise are not
+    assert not np.allclose(before[~flagged], after[~flagged])
