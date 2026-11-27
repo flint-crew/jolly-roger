@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import astropy.units as u
 import matplotlib.pyplot as plt
 import numpy as np
 from astropy.visualization import (
@@ -24,6 +25,33 @@ from jolly_roger.wrap import calculate_wrapped_data, iterate_over_zones
 
 if TYPE_CHECKING:
     from jolly_roger.delays import DelayTime
+
+
+def format_baseline_title(baseline_data: BaselineData) -> str:
+    """Describe a baseline for a plot title, using the antenna names from the
+    measurement set when known, alongside the antenna indices and baseline length.
+
+    Args:
+        baseline_data (BaselineData): The baseline being plotted
+
+    Returns:
+        str: The title, e.g. ``ak01 - ak07 (Ant 0 - Ant 6), 1.23 km``
+    """
+    ant_1, ant_2 = baseline_data.ant_1, baseline_data.ant_2
+    title = f"Ant {ant_1} - Ant {ant_2}"
+    if baseline_data.ant_1_name and baseline_data.ant_2_name:
+        title = f"{baseline_data.ant_1_name} - {baseline_data.ant_2_name} ({title})"
+
+    if baseline_data.baseline_length is not None:
+        length = baseline_data.baseline_length.to("m")
+        length_str = (
+            f"{length.to('km').value:.2f} km"
+            if length >= 1 * u.km
+            else f"{length.value:.1f} m"
+        )
+        title = f"{title}, {length_str}"
+
+    return title
 
 
 def plot_baseline_data(
@@ -47,7 +75,7 @@ def plot_baseline_data(
         fig.colorbar(im, ax=ax, label="Stokes I Amplitude / Jy")
         ax.set(
             ylabel=f"Frequency / {baseline_data.freq_chan.unit:latex_inline}",
-            title=f"Ant {baseline_data.ant_1} - Ant {baseline_data.ant_2}",
+            title=format_baseline_title(baseline_data),
         )
         output_path = (
             output_dir
@@ -308,9 +336,7 @@ def plot_baseline_comparison_data(
             ylabel="Delay / ns",
         )
 
-        fig.suptitle(
-            f"Ant {after_baseline_data.ant_1} - Ant {after_baseline_data.ant_2}"
-        )
+        fig.suptitle(format_baseline_title(after_baseline_data))
         fig.tight_layout()
         fig.savefig(output_path)
 
