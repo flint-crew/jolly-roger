@@ -7,7 +7,7 @@ from argparse import ArgumentParser
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import astropy.units as u
 import matplotlib.pyplot as plt
@@ -19,6 +19,9 @@ from casacore.tables import table, taql
 from numpy.typing import NDArray
 
 from jolly_roger.logging import logger
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 @dataclass(frozen=True)
@@ -292,6 +295,12 @@ class BaselineData:
     """The second antenna in the baseline."""
     ms_path: Path | None = None
     """MS from which the data was fetched, if any"""
+    ant_1_name: str | None = None
+    """The NAME of the first antenna in the ANTENNA table, if known"""
+    ant_2_name: str | None = None
+    """The NAME of the second antenna in the ANTENNA table, if known"""
+    baseline_length: u.Quantity | None = None
+    """The physical length of the baseline between the antenna positions, if known"""
 
 
 @dataclass
@@ -333,6 +342,8 @@ def build_baseline_data(
     ant_1: int,
     ant_2: int,
     ms_path: Path | None = None,
+    antenna_names: Sequence[str] | None = None,
+    antenna_positions: NDArray[np.floating[Any]] | None = None,
 ) -> BaselineData:
     """Attach units and masking to raw baseline arrays.
 
@@ -343,6 +354,8 @@ def build_baseline_data(
         ant_1 (int): The first antenna of the baseline
         ant_2 (int): The second antenna of the baseline
         ms_path (Path | None, optional): The source MS, if any. Defaults to None.
+        antenna_names (Sequence[str] | None, optional): The ANTENNA table NAME column, used to label the baseline. Defaults to None.
+        antenna_positions (NDArray[np.floating[Any]] | None, optional): The ANTENNA table POSITION column, in m, used to derive the baseline length. Defaults to None.
 
     Returns:
         BaselineData: The unit-attached baseline data
@@ -355,6 +368,18 @@ def build_baseline_data(
     )
     masked_data = np.ma.masked_array(baseline_arrays.data, mask=baseline_arrays.flags)
 
+    ant_1_name = ant_2_name = None
+    if antenna_names is not None:
+        ant_1_name = str(antenna_names[ant_1]).strip() or None
+        ant_2_name = str(antenna_names[ant_2]).strip() or None
+
+    baseline_length = None
+    if antenna_positions is not None:
+        baseline_length = (
+            float(np.linalg.norm(antenna_positions[ant_1] - antenna_positions[ant_2]))
+            * u.m
+        )
+
     return BaselineData(
         masked_data=masked_data,
         freq_chan=freq_chan.squeeze() * u.Hz,
@@ -364,7 +389,17 @@ def build_baseline_data(
         ant_1=ant_1,
         ant_2=ant_2,
         ms_path=ms_path,
+        ant_1_name=ant_1_name,
+        ant_2_name=ant_2_name,
+        baseline_length=baseline_length,
     )
+
+
+def _get_antenna_names(antenna_table: table) -> list[str] | None:
+    """The NAME column of the ANTENNA table, if it is present"""
+    if "NAME" not in antenna_table.colnames():
+        return None
+    return list(antenna_table.getcol("NAME"))
 
 
 def get_baseline_data(
@@ -400,6 +435,8 @@ def get_baseline_data(
         ant_1=ant_1,
         ant_2=ant_2,
         ms_path=open_ms_tables.ms_path,
+        antenna_names=_get_antenna_names(open_ms_tables.antenna_table),
+        antenna_positions=open_ms_tables.antenna_table.getcol("POSITION"),
     )
 
     logger.info(
