@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import astropy.units as u
 import numpy as np
+import pytest
+from astropy.coordinates import SkyCoord
 from casacore.tables import table
 
+from jolly_roger.baselines import get_baselines
 from jolly_roger.deconvolve import CleanTractorOptions, clean_tractor
+from jolly_roger.hour_angles import get_location, make_hour_angles
 from jolly_roger.tractor import TukeyTractorOptions, tukey_tractor
+from jolly_roger.uvws import xyz_to_uvw
 
 
 def test_sb47138_contents(ms_sb47138: Path) -> None:
@@ -94,7 +100,36 @@ def test_sb47138_rate_filter_recovers_rows(ms_sb47138_ak01_ak04: Path) -> None:
         before, after = tab.getcol("DATA"), tab.getcol("NULLED_DATA")
         with table(tab.getkeyword("HISTORY"), ack=False) as history:
             message = history.getcol("MESSAGE")[-1]
-    assert message.startswith("Delay-rate filter: recovered 701 rows")
-    assert flagged.sum() == 23
+    assert message.startswith("Delay-rate filter: recovered 678 rows")
+    assert flagged.sum() == 46
     # Recovered rows are changed, rows before sunrise are not
     assert not np.allclose(before[~flagged], after[~flagged])
+
+
+@pytest.mark.parametrize("name", ["ms_sb47138", "ms_sb47138_ak01_ak04"])
+def test_sb47138_field_matches_uvw(name: str, request: pytest.FixtureRequest) -> None:
+    """FIELD PHASE_DIR is the direction the data and UVWs are phased to (beam 6,
+    corrected as fixms does), not the boresight ASKAP writes"""
+    ms = request.getfixturevalue(name)
+    with table(str(ms), ack=False) as tab:
+        ant_1, ant_2 = tab.getcol("ANTENNA1"), tab.getcol("ANTENNA2")
+        uvw, time_centroid = tab.getcol("UVW"), tab.getcol("TIME_CENTROID")
+    with table(str(ms / "ANTENNA"), ack=False) as tab:
+        ant_xyz = tab.getcol("POSITION")
+    with table(str(ms / "FIELD"), ack=False) as tab:
+        phase_dir = SkyCoord(*tab.getcol("PHASE_DIR").squeeze(), unit="rad")
+
+    baselines = get_baselines(ant_xyz)
+    hour_angles = make_hour_angles(
+        times_mjds=np.unique(time_centroid) * u.s,
+        location=get_location(ant_xyz),
+        position=phase_dir,
+    )
+    uvws = xyz_to_uvw(baselines=baselines, hour_angles=hour_angles).uvws.to(u.m).value
+    baseline_idx = [
+        baselines.b_map[(int(a1), int(a2))] for a1, a2 in zip(ant_1, ant_2, strict=True)
+    ]
+    time_idx = [hour_angles.time_map[t * u.s] for t in time_centroid]
+    np.testing.assert_allclose(
+        uvws[:, baseline_idx, time_idx].T, uvw, rtol=0, atol=1e-3
+    )
