@@ -456,10 +456,11 @@ def compute_delay_clean(
     visibility_noise: float | None = None,
     active_rows: NDArray[np.bool_] | None = None,
     statistics: DelayCleanStatistics | None = None,
+    flag_overlap: bool = True,
 ) -> TaperedChunkResult:
     """Remove emission outside the field's delay range from every row and
     polarisation of a chunk with CLEAN in delay. Rows where the subtracted
-    emission reaches the field are flagged.
+    emission reaches the field are flagged, unless ``flag_overlap`` is False.
 
     Args:
         data_chunk (DataChunk): The visibilities, shaped (row, channel, polarisation). Masked values are given zero weight.
@@ -527,7 +528,9 @@ def compute_delay_clean(
 
     if statistics is not None:
         statistics.record(results, rows_flagged=int(rows_reaching_field.sum()))
-    if rows_reaching_field.any():
+    if not flag_overlap:
+        rows_reaching_field[:] = False
+    elif rows_reaching_field.any():
         logger.info(
             f"Flagging {rows_reaching_field.sum()} of {number_of_rows} rows where the object reaches the field in delay"
         )
@@ -633,6 +636,7 @@ def compute_clean_tractor(
         visibility_noise=clean_tractor_options.visibility_noise,
         active_rows=active,
         statistics=statistics,
+        flag_overlap=clean_tractor_options.flag_overlap,
     )
 
 
@@ -656,8 +660,9 @@ def describe_clean_run(
         f"Delay CLEAN: removed emission outside the field's delay range "
         f"(+/-{clean_tractor_options.field_delay_ns:g} ns{guard}) from "
         f"{statistics.spectra} spectra where {objects} was above the elevation "
-        f"cut; {noise}. {statistics.rows_flagged} rows were flagged because the "
-        f"subtracted emission reached the field.{skipped}"
+        f"cut; {noise}. {statistics.rows_flagged} rows were "
+        f"{'flagged' if clean_tractor_options.flag_overlap else 'left unflagged (--no-flag-overlap)'}"
+        f" where the subtracted emission reached the field.{skipped}"
     )
 
 

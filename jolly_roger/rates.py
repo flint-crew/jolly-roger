@@ -878,8 +878,8 @@ def describe_rate_filter(run: RateFilterRun) -> str:
     summary = run.summary
     doubly_contaminated_rows = run.accumulator.doubly_contaminated_rows
     return (
-        f"Delay-rate filter: recovered {summary.recovered} flagged rows; "
-        f"left flagged {summary.rejected} failing the residual check, "
+        f"Delay-rate filter: recovered {summary.recovered} rows; "
+        f"not recovered: {summary.rejected} failing the residual check, "
         f"{summary.too_short} in short segments, "
         f"{summary.not_separable + doubly_contaminated_rows} not separable in delay-rate"
     )
