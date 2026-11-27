@@ -1719,18 +1719,8 @@ def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSe
         ms_path=ms_path, weight_column=tractor_options.weight_column
     )
 
-    write_back_required: bool = True
-    if not tractor_options.dry_run:
-        # Data will need to be written back to the MS after each chunk if the
-        # output column has not data
-        write_back_required = add_output_column(
-            tab=open_ms_tables.main_table,
-            output_column=tractor_options.output_column,
-            data_column=tractor_options.data_column,
-            overwrite=tractor_options.overwrite,
-            copy_column_data=tractor_options.copy_column_data,
-        )
-
+    # Predict the delays first: this checks the phase direction against the UVW
+    # column, so a mismatch fails before the measurement set is changed.
     # Calculate the guard field region used to derieve the appropriate delay window
     radial_fov: u.Quantity | None = None
     if tractor_options.guard_field:
@@ -1759,6 +1749,18 @@ def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSe
     assert all(len(w_delays.w_delays.shape) == 2 for w_delays in w_delays_list), (
         "Sanity check failed, incorrect dimensionality returned"
     )
+
+    write_back_required: bool = True
+    if not tractor_options.dry_run:
+        # Data will need to be written back to the MS after each chunk if the
+        # output column has not data
+        write_back_required = add_output_column(
+            tab=open_ms_tables.main_table,
+            output_column=tractor_options.output_column,
+            data_column=tractor_options.data_column,
+            overwrite=tractor_options.overwrite,
+            copy_column_data=tractor_options.copy_column_data,
+        )
 
     return TractorSetup(
         open_ms_tables=open_ms_tables,

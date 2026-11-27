@@ -256,6 +256,10 @@ def get_object_delay_from_tables(
         )
         for name in object_name_list
     ]
+    uvws_phase = xyz_to_uvw(
+        baselines=baselines, hour_angles=hour_angles_phase, flip_uvw_sign=flip_uvw_sign
+    )
+    check_phase_dir(open_ms_tables=open_ms_tables, uvws_phase=uvws_phase)
 
     return get_object_delay(
         baselines=baselines,
@@ -263,7 +267,64 @@ def get_object_delay_from_tables(
         object_hour_angles=object_hour_angles,
         flip_uvw_sign=flip_uvw_sign,
         radial_fov=radial_fov,
+        uvws_phase=uvws_phase,
     )
+
+
+class PhaseDirMismatchError(ValueError):
+    pass
+
+
+def check_phase_dir(
+    open_ms_tables: OpenMSTables,
+    uvws_phase: UVWs,
+    tolerance_m: float = 0.1,
+    sample_rows: int = 1000,
+) -> None:
+    """Check that the UVWs computed toward the phase direction reproduce the
+    measurement set's UVW column, so that the delays predicted from it are those
+    of the data. Skipped, with a warning, if the sampled UVWs are all zero.
+
+    Args:
+        open_ms_tables (OpenMSTables): The open measurement set
+        uvws_phase (UVWs): UVWs computed toward the phase direction
+        tolerance_m (float, optional): The largest difference allowed, in metres. Defaults to 0.1.
+        sample_rows (int, optional): The number of rows compared, from the start. Defaults to 1000.
+
+    Raises:
+        PhaseDirMismatchError: If the UVWs differ by more than ``tolerance_m``
+    """
+    main_table = open_ms_tables.main_table
+    n_rows = min(sample_rows, main_table.nrows())
+    ant_1 = main_table.getcol("ANTENNA1", 0, n_rows)
+    ant_2 = main_table.getcol("ANTENNA2", 0, n_rows)
+    uvw = main_table.getcol("UVW", 0, n_rows)
+    times = main_table.getcol("TIME_CENTROID", 0, n_rows)
+    b_map = uvws_phase.baselines.b_map
+    time_map = uvws_phase.hour_angles.time_map
+    rows = [
+        i
+        for i in range(n_rows)
+        if ant_1[i] != ant_2[i] and (int(ant_1[i]), int(ant_2[i])) in b_map
+    ]
+    if not rows or not np.any(uvw[rows]):
+        logger.warning("The UVW column is empty, so the phase direction is not checked")
+        return
+
+    baseline_idx = [b_map[(int(ant_1[i]), int(ant_2[i]))] for i in rows]
+    time_idx = [time_map[times[i] * u.s] for i in rows]
+    computed = uvws_phase.uvws.to(u.m).value[:, baseline_idx, time_idx].T
+    difference = float(np.abs(computed - uvw[rows]).max())
+    if difference > tolerance_m:
+        msg = (
+            f"UVWs computed toward the phase direction "
+            f"{open_ms_tables.phase_dir.to_string('hmsdms')} differ from the UVW "
+            f"column by up to {difference:.3g} m. The FIELD table may not give the "
+            "phase centre of the data, as in ASKAP measurement sets that have not "
+            "been through fix_ms_dir (fixms), so predicted delays would be wrong."
+        )
+        raise PhaseDirMismatchError(msg)
+    logger.info(f"Phase direction matches the UVW column to {difference:.2g} m")
 
 
 def get_object_delay_for_ms(
@@ -306,6 +367,7 @@ def get_object_delay(
     object_hour_angles: Sequence[tuple[str | SkyCoord, PositionHourAngles]],
     flip_uvw_sign: bool = False,
     radial_fov: u.Quantity | None = None,
+    uvws_phase: UVWs | None = None,
 ) -> list[WDelays]:
     """Compute the w-derived delays between the phase direction and each object.
 
@@ -315,14 +377,17 @@ def get_object_delay(
         object_hour_angles (Sequence[tuple[str | SkyCoord, PositionHourAngles]]): The (name, hour angles) for each object
         flip_uvw_sign (bool, optional): Flip the sign of the UVWs. Defaults to False.
         radial_fov (u.Quantity | None, optional): Radial FoV for the guard region. Defaults to None.
+        uvws_phase (UVWs | None, optional): UVWs toward the phase direction, if already computed. Defaults to None.
 
     Returns:
         list[WDelays]: The delay towards each nominated object
     """
-    # Generate the two sets of uvw coordinate objects
-    uvws_phase = xyz_to_uvw(
-        baselines=baselines, hour_angles=hour_angles_phase, flip_uvw_sign=flip_uvw_sign
-    )
+    if uvws_phase is None:
+        uvws_phase = xyz_to_uvw(
+            baselines=baselines,
+            hour_angles=hour_angles_phase,
+            flip_uvw_sign=flip_uvw_sign,
+        )
 
     time_s = u.Quantity(hour_angles_phase.time_mjds, u.s).value
 
