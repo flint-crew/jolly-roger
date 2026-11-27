@@ -25,7 +25,6 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 from scipy import ndimage, signal, stats
-from scipy.fft import next_fast_len
 
 from jolly_roger.history import add_history, dataclass_to_app_params
 from jolly_roger.logging import logger
@@ -33,7 +32,6 @@ from jolly_roger.rates import (
     SegmentFilterResult,
     SegmentGeometry,
     SegmentOutcome,
-    _band_residual,
 )
 from jolly_roger.tractor import (
     DataChunk,
@@ -324,15 +322,29 @@ def _clean_batch(
     return batch.model_fdf_arr, conjugate_noise, batch.iter_count_arr
 
 
+@dataclass
+class SelectedClean:
+    """The result of ``clean_and_select``"""
+
+    model: NDArray[np.complexfloating]
+    """Model of the kept components at every sample, shaped as the series"""
+    components: NDArray[np.complexfloating]
+    """All CLEAN components on the conjugate axis, shape (series, axis)"""
+    threshold: NDArray[np.floating]
+    """CLEAN's stopping threshold on the conjugate axis for each series"""
+    cleaned: NDArray[np.bool_]
+    """Series that were CLEANed and converged"""
+
+
 def clean_and_select(
     values: NDArray[np.complexfloating],
     weights: NDArray[np.floating],
     keep: NDArray[np.bool_],
     options: DelayCleanOptions | None = None,
     visibility_noise: float | NDArray[np.floating] | None = None,
-) -> tuple[NDArray[np.complexfloating], NDArray[np.complexfloating]]:
-    """CLEAN regularly sampled series that share their weights, and return the
-    model of the components in ``keep`` and of all components, evaluated at every sample
+) -> SelectedClean:
+    """CLEAN regularly sampled series that share their weights, and model the
+    components in ``keep`` at every sample
 
     Args:
         values (NDArray[np.complexfloating]): The series, shaped (series, sample)
@@ -342,16 +354,21 @@ def clean_and_select(
         visibility_noise (float | NDArray[np.floating] | None, optional): Noise of one sample, per real or imaginary part, at unit weight, for all series or for each. If None it is estimated with ``estimate_visibility_noise``. Defaults to None.
 
     Returns:
-        tuple[NDArray[np.complexfloating], NDArray[np.complexfloating]]: The model of the kept components and of all components, each shaped as ``values``. Zero for series whose noise could not be estimated.
+        SelectedClean: The model of the kept components, all components, the threshold, and which series were CLEANed
     """
     options = options or DelayCleanOptions()
     values = np.asarray(values)
     weights = np.asarray(weights, dtype=float)
     number_of_series, number_of_samples = values.shape
-    model = np.zeros_like(values, dtype=complex)
-    full_model = np.zeros_like(values, dtype=complex)
+    size = options.oversample * number_of_samples
+    result = SelectedClean(
+        model=np.zeros_like(values, dtype=complex),
+        components=np.zeros((number_of_series, size), dtype=complex),
+        threshold=np.full(number_of_series, np.inf),
+        cleaned=np.zeros(number_of_series, dtype=bool),
+    )
     if weights.sum() <= 0:
-        return model, full_model
+        return result
     noise = (
         _estimate_visibility_noises(values, weights)
         if visibility_noise is None
@@ -361,14 +378,18 @@ def clean_and_select(
     )
     to_clean = np.flatnonzero(~np.isnan(noise))
     if to_clean.size == 0:
-        return model, full_model
-    components, _, _ = _clean_batch(
+        return result
+    components, conjugate_noise, iterations = _clean_batch(
         values=values[to_clean], weights=weights, noise=noise[to_clean], options=options
     )
-    keep = np.broadcast_to(keep, (number_of_series, components.shape[-1]))[to_clean]
-    model[to_clean] = _model_to_values(np.where(keep, components, 0), number_of_samples)
-    full_model[to_clean] = _model_to_values(components, number_of_samples)
-    return model, full_model
+    keep = np.broadcast_to(keep, (number_of_series, size))[to_clean]
+    result.model[to_clean] = _model_to_values(
+        np.where(keep, components, 0), number_of_samples
+    )
+    result.components[to_clean] = components
+    result.threshold[to_clean] = options.threshold_sigma * conjugate_noise
+    result.cleaned[to_clean] = iterations < options.max_iter
+    return result
 
 
 def delay_clean_spectra(
@@ -537,16 +558,18 @@ def rate_clean_segment(
     visibility_noise: float | None = None,
     rate_margin_lobes: float = 8.0,
     min_margin_lobes: float = 4.0,
-    acceptance_sigma: float = 5.0,
+    spill_lobes: float = 4.0,
 ) -> SegmentFilterResult:
     """Remove the objects from a baseline segment by CLEAN in fringe rate.
 
     Each channel and polarisation is CLEANed along time, so the field and the
     objects are separated by fringe rate alone and the objects' delay sidelobes
     never arise. Only components in each object's fringe-rate band are
-    subtracted, evaluated at every row; everything else is kept. A row is
-    recovered if what CLEAN could not model in the objects' bands is within
-    ``acceptance_sigma`` times the noise.
+    subtracted, evaluated at every row; the residual and everything else are
+    kept. A row is not recovered if CLEAN did not run or converge, or if
+    components just outside an object's band (the object varying faster than the
+    margin) exceed CLEAN's threshold and ``field_edge_fraction`` of the object
+    subtracted at that row.
 
     Args:
         data (NDArray[np.complexfloating]): Visibilities, shape (row, chan, pol)
@@ -559,7 +582,7 @@ def rate_clean_segment(
         visibility_noise (float | None, optional): Noise of one visibility, per real or imaginary part. If None it is estimated from the rows' spectra. Defaults to None.
         rate_margin_lobes (float, optional): Widest margin around each object's band, in units of 1/T. Defaults to 8.0.
         min_margin_lobes (float, optional): Margin an object must clear the field by, in units of 1/T. Defaults to 4.0.
-        acceptance_sigma (float, optional): Largest object residual of a recovered row, in units of the noise. Defaults to 5.0.
+        spill_lobes (float, optional): Width beyond each object's band checked for the object spilling out of it, in units of 1/T. Defaults to 4.0.
 
     Returns:
         SegmentFilterResult: The filtered visibilities and the rows recovered
@@ -580,61 +603,74 @@ def rate_clean_segment(
         return SegmentFilterResult(outcome=SegmentOutcome.NOT_SEPARABLE)
 
     rates_hz = delay_axis(n_rows, step_s, options.oversample)
-    keep = np.zeros((n_chan, len(rates_hz)), dtype=bool)
+    in_band = np.zeros((n_chan, len(rates_hz)), dtype=bool)
+    near_band = np.zeros_like(in_band)
+    spill_width_hz = spill_lobes / duration_s
+    field_rate_hz = (
+        float(np.max(geometry.field_rate)) * np.abs(freq_hz) + 1 / duration_s
+    )
     for low, high in bands:
-        keep |= (rates_hz[None, :] >= low[:, None]) & (
+        in_band |= (rates_hz[None, :] >= low[:, None]) & (
             rates_hz[None, :] <= high[:, None]
         )
+        near_band |= (rates_hz[None, :] >= (low - spill_width_hz)[:, None]) & (
+            rates_hz[None, :] <= (high + spill_width_hz)[:, None]
+        )
+    # Just outside the objects' bands, clear of the field
+    spill = near_band & ~in_band & (np.abs(rates_hz)[None, :] > field_rate_hz[:, None])
 
     model = np.zeros_like(data, dtype=complex)
-    full_model = np.zeros_like(data, dtype=complex)
+    rows_ok = np.ones(n_rows, dtype=bool)
     for pol in range(n_pol):
         if visibility_noise is None:
-            spectra = [
-                estimate_visibility_noise(data[row, :, pol], ~flags[row, :, pol])
+            estimates = [
+                estimate
                 for row in np.flatnonzero(~is_pad)
+                if (
+                    estimate := estimate_visibility_noise(
+                        data[row, :, pol], ~flags[row, :, pol]
+                    )
+                )
+                is not None
             ]
-            estimates = [estimate for estimate in spectra if estimate is not None]
             noise = float(np.median(estimates)) if estimates else np.nan
         else:
             noise = visibility_noise
         weights = (~flags[:, :, pol]).astype(float).T
         patterns, group = np.unique(weights, axis=0, return_inverse=True)
         for index, pattern in enumerate(patterns):
+            if not pattern.any():
+                continue
             channels = np.flatnonzero(group.reshape(-1) == index)
-            kept, everything = clean_and_select(
+            selected = clean_and_select(
                 values=data[:, channels, pol].T,
                 weights=pattern,
-                keep=keep[channels],
+                keep=in_band[channels],
                 options=options,
                 visibility_noise=noise,
             )
-            model[:, channels, pol] = kept.T
-            full_model[:, channels, pol] = everything.T
-    filtered = data - model
+            model[:, channels, pol] = selected.model.T
+            if not selected.cleaned.all():
+                rows_ok[:] = False
+                continue
+            # The object modelled just outside its band, above CLEAN's threshold
+            # and above a fraction of the object subtracted at that row, as
+            # CLEAN of a bright object leaves faint components beyond any band
+            spilled = np.abs(
+                _model_to_values(
+                    np.where(spill[channels], selected.components, 0), n_rows
+                )
+            )
+            floor = np.maximum(
+                selected.threshold[:, None],
+                options.field_edge_fraction * np.abs(selected.model),
+            )
+            rows_ok &= ~np.any(spilled > floor, axis=0)
 
-    # What CLEAN could not model, band-passed to the objects' fringe rates. The
-    # field is modelled, so the sidelobes of the finite segment it puts into the
-    # objects' bands are not counted.
-    n_time = int(next_fast_len(2 * n_rows))
-    grid_hz = np.fft.fftfreq(n_time, step_s)
-    low = min(float(band[0].min()) for band in bands)
-    high = max(float(band[1].max()) for band in bands)
-    band_profile = ((grid_hz >= low) & (grid_hz <= high)).astype(float)
-    every_delay = np.ones((n_rows, n_chan), dtype=bool)
-    left, noise_left = _band_residual(
-        data - full_model,
-        (~flags).astype(float),
-        band_profile,
-        every_delay,
-        ~every_delay,
-        n_time,
-    )
-    passes = np.all(left <= acceptance_sigma * noise_left, axis=1)
     return SegmentFilterResult(
         outcome=SegmentOutcome.FILTERED,
-        data=filtered,
-        recovered=~is_pad & passes,
+        data=data - model,
+        recovered=~is_pad & rows_ok,
     )
 
 
