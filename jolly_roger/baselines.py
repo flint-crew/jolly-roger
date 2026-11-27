@@ -134,12 +134,18 @@ def beam_fraction_to_radius(
 def get_nominal_fov(
     chan_freq: NDArray[np.floating[Any]],
     dish_diameter: NDArray[np.floating[Any]],
+    dish_rtol: float = 1e-3,
 ) -> u.Quantity:
     """Field of view at the lowest frequency, assuming a single SPW and dish size.
+
+    The smallest dish diameter is used, as it gives the widest field of view.
+    Diameters that differ by more than ``dish_rtol`` raise a warning, as the
+    array is then not homogeneous and ``--dish-diameter-m`` may be more appropriate.
 
     Args:
         chan_freq (NDArray[np.floating[Any]]): The CHAN_FREQ column, in Hz
         dish_diameter (NDArray[np.floating[Any]]): The DISH_DIAMETER column, in m
+        dish_rtol (float, optional): Relative tolerance within which dish diameters are considered the same. Defaults to 1e-3.
 
     Returns:
         u.Quantity: The nominal radial field-of-view
@@ -152,17 +158,24 @@ def get_nominal_fov(
     lowest_freq = np.min(chan_freq) * u.Hz
     longest_lambda = (speed_of_light / lowest_freq).decompose()
 
-    unique_diameter = np.unique(dish_diameter)
-    assert len(unique_diameter) == 1, (
-        f"{len(unique_diameter)} dish sizes found, which is not reasonable"
-    )
-    if unique_diameter[0] <= 0:
+    dish_diameter = np.asarray(dish_diameter, dtype=float)
+    # Some arrays (e.g. LOFAR) record a per-station DISH_DIAMETER derived from
+    # each station's own layout, so values that are effectively the same can
+    # differ slightly. Use the smallest diameter, i.e. the widest field of view.
+    diameter = float(np.min(dish_diameter))
+    if not np.allclose(dish_diameter, diameter, rtol=dish_rtol, atol=0.0):
         logger.warning(
-            f"DISH_DIAMETER of {unique_diameter[0]} m, so the field-of-view is unbounded. Set --dish-diameter-m."
+            f"DISH_DIAMETER varies across antennas ({np.min(dish_diameter):.4f} to "
+            f"{np.max(dish_diameter):.4f} m). Using the smallest, {diameter:.4f} m, "
+            "which has the widest field-of-view. Set --dish-diameter-m to override."
+        )
+    if diameter <= 0:
+        logger.warning(
+            f"DISH_DIAMETER of {diameter} m, so the field-of-view is unbounded. Set --dish-diameter-m."
         )
         return np.inf * u.rad
 
-    fov = (1.02 * longest_lambda / (unique_diameter[0] * u.m)).decompose() * u.rad
+    fov = (1.02 * longest_lambda / (diameter * u.m)).decompose() * u.rad
     logger.info(f"Nominal field-of-view (FWHM) is {fov.to('deg'):.3f}")
 
     return fov

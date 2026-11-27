@@ -103,6 +103,40 @@ def test_get_nominal_fov_zero_diameter() -> None:
     assert np.isinf(fov.value)
 
 
+def test_get_nominal_fov_near_identical_diameters(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Per-station diameters that differ only slightly (e.g. LOFAR) are accepted"""
+    chan_freq = np.array([30e6, 80e6])
+    dish_diameter = np.linspace(85.95025803, 85.96571389, 38)
+
+    with caplog.at_level("WARNING", logger="jolly_roger"):
+        fov = get_nominal_fov(chan_freq=chan_freq, dish_diameter=dish_diameter)
+
+    expected = (
+        (1.02 * (speed_of_light / (30e6 * u.Hz)) / (dish_diameter.min() * u.m))
+        .decompose()
+        .value
+    )
+    assert np.isclose(fov.to("rad").value, expected)
+    assert "varies across antennas" not in caplog.text
+
+
+def test_get_nominal_fov_mixed_diameters(caplog: pytest.LogCaptureFixture) -> None:
+    """Genuinely mixed diameters warn and use the smallest (widest field of view)"""
+    chan_freq = np.array([1.0e9])
+    dish_diameter = np.array([12.0, 12.0, 25.0])
+
+    with caplog.at_level("WARNING", logger="jolly_roger"):
+        fov = get_nominal_fov(chan_freq=chan_freq, dish_diameter=dish_diameter)
+
+    expected = (
+        (1.02 * (speed_of_light / (1.0e9 * u.Hz)) / (12.0 * u.m)).decompose().value
+    )
+    assert np.isclose(fov.to("rad").value, expected)
+    assert "varies across antennas" in caplog.text
+
+
 def test_get_open_ms_tables_dish_diameter_override(ms_example: Path) -> None:
     """The dish diameter of the measurement set may be overridden"""
     with table(str(ms_example / "SPECTRAL_WINDOW"), ack=False) as tab:
