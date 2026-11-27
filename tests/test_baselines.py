@@ -92,15 +92,40 @@ def test_get_nominal_fov() -> None:
     expected = (
         (1.02 * (speed_of_light / (1.0e9 * u.Hz)) / (12.0 * u.m)).decompose().value
     )
+    assert fov is not None
     assert np.isclose(fov.to("rad").value, expected)
 
 
 def test_get_nominal_fov_zero_diameter() -> None:
-    """A dish diameter of zero has an unbounded field of view, without dividing by zero"""
+    """With no valid dish diameter there is no field of view"""
     fov = get_nominal_fov(
         chan_freq=np.linspace(800e6, 1100e6, 8), dish_diameter=np.zeros(4)
     )
-    assert np.isinf(fov.value)
+    assert fov is None
+
+
+def test_get_nominal_fov_ignores_invalid_diameters() -> None:
+    """A non-positive diameter does not override the valid ones"""
+    chan_freq = np.array([1.0e9])
+    fov = get_nominal_fov(
+        chan_freq=chan_freq, dish_diameter=np.array([12.0, 0.0, -1.0, 12.0])
+    )
+    expected = get_nominal_fov(chan_freq=chan_freq, dish_diameter=np.array([12.0]))
+    assert fov is not None
+    assert expected is not None
+    assert np.isclose(fov.to("rad").value, expected.to("rad").value)
+
+
+@pytest.mark.parametrize("dish_diameter_m", [0.0, -12.0, float("nan")])
+def test_get_open_ms_tables_invalid_dish_diameter_override(
+    ms_example: Path, dish_diameter_m: float
+) -> None:
+    """A non-positive dish diameter override is rejected"""
+    with (
+        pytest.raises(ValueError, match="must be positive"),
+        get_open_ms_tables(ms_path=ms_example, dish_diameter_m=dish_diameter_m),
+    ):
+        pass
 
 
 def test_get_nominal_fov_near_identical_diameters(
@@ -118,6 +143,7 @@ def test_get_nominal_fov_near_identical_diameters(
         .decompose()
         .value
     )
+    assert fov is not None
     assert np.isclose(fov.to("rad").value, expected)
     assert "varies across antennas" not in caplog.text
 
@@ -133,6 +159,7 @@ def test_get_nominal_fov_mixed_diameters(caplog: pytest.LogCaptureFixture) -> No
     expected = (
         (1.02 * (speed_of_light / (1.0e9 * u.Hz)) / (12.0 * u.m)).decompose().value
     )
+    assert fov is not None
     assert np.isclose(fov.to("rad").value, expected)
     assert "varies across antennas" in caplog.text
 
@@ -147,6 +174,8 @@ def test_get_open_ms_tables_dish_diameter_override(ms_example: Path) -> None:
     with get_open_ms_tables(ms_path=ms_example, dish_diameter_m=6.0) as overridden:
         fov = overridden.nominal_fov
 
+    assert fov is not None
+    assert ms_fov is not None
     expected = (1.02 * (speed_of_light / lowest_freq) / (6.0 * u.m)).decompose() * u.rad
     assert fov.to(u.rad).value == pytest.approx(expected.value)
     # ASKAP dishes are 12 m, so halving the diameter doubles the field of view
