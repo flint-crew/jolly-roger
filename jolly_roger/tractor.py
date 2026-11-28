@@ -3,9 +3,8 @@ from __future__ import annotations
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
-from itertools import combinations
 from pathlib import Path
 from time import time
 from typing import Any, cast
@@ -24,8 +23,10 @@ from tqdm.auto import tqdm
 from jolly_roger.baselines import (
     BaselineData,
     OpenMSTables,
+    _get_antenna_names,
     beam_fraction_to_radius,
     get_baseline_data,
+    get_dish_diameter,
     get_open_ms_tables,
 )
 from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
@@ -37,6 +38,20 @@ from jolly_roger.lines import (
 )
 from jolly_roger.logging import logger
 from jolly_roger.plots import plot_baseline_comparison_data
+from jolly_roger.rates import (
+    RateFilterPayload,
+    RateFilterRun,
+    RateFilterSettings,
+    RowUpdate,
+    SegmentFilter,
+    describe_rate_filter,
+    filter_segment,
+    flush_rate_filter,
+    make_rate_filter_run,
+    needed_duration_s,
+    rate_separation_hz,
+    update_rate_filter,
+)
 from jolly_roger.response import (
     calculate_expected_sinc_width,
     get_delay_of_nth_sidelobe,
@@ -454,15 +469,43 @@ def write_output_column(
             subtab.flush()
 
 
+def get_plot_baselines(
+    open_ms_tables: OpenMSTables, max_baselines: int
+) -> NDArray[np.int_]:
+    """The first ``max_baselines`` cross-correlations in the measurement set, as (ANTENNA1, ANTENNA2)"""
+    pairs = np.stack(
+        [
+            open_ms_tables.main_table.getcol("ANTENNA1"),
+            open_ms_tables.main_table.getcol("ANTENNA2"),
+        ],
+        axis=1,
+    )
+    return np.unique(pairs[pairs[:, 0] != pairs[:, 1]], axis=0)[:max_baselines]
+
+
+def read_baseline_flags(
+    open_ms_tables: OpenMSTables, baselines: NDArray[np.int_]
+) -> dict[tuple[int, int], NDArray[np.bool_]]:
+    """The FLAG column of each baseline, e.g. to plot the data as they were before a run"""
+    flags = {}
+    for ant_1, ant_2 in baselines:
+        with open_ms_tables.main_table.query(
+            f"ANTENNA1=={ant_1} AND ANTENNA2=={ant_2}", columns="FLAG"
+        ) as subtable:
+            flags[(int(ant_1), int(ant_2))] = subtable.getcol("FLAG")
+    return flags
+
+
 def make_plot_results(
     open_ms_tables: OpenMSTables,
     data_column: str,
     output_column: str,
     target: str | None = None,
     w_delays: WDelays | list[WDelays] | None = None,
-    reverse_baselines: bool = False,
     outer_width_ns: float | None = None,
     max_baselines: int = 10,
+    delay_rate: bool = False,
+    before_flags: dict[tuple[int, int], NDArray[np.bool_]] | None = None,
 ) -> list[Path]:
     """Create plots useful for diagnostics
 
@@ -472,9 +515,10 @@ def make_plot_results(
         output_column (str): The output 'after' data
         target (str): Object nulling was directed towards
         w_delays (WDelays | None, optional): Description of a track through delay space. If ``None`` some plotting will be skipped. Defaults to None.
-        reverse_baselines (bool, optional): Needed in some circumstances should antenna ordering in MS be different. Defaults to False.
         outer_width_ns (float | None, optional): Size, in nanoseconds, of the tukey taper. Defaults to None.
         max_baselines (int, optional): The maximum number of baseline plots to create. Defaults to 10.
+        delay_rate (bool, optional): Add a row in fringe rate and delay to each baseline's plot. Defaults to False.
+        before_flags (dict[tuple[int, int], NDArray[np.bool_]] | None, optional): Flags of each baseline before the run, from ``read_baseline_flags``, for the 'before' data. If None the current flags are used. Defaults to None.
 
     Returns:
         list[Path]: Collection of paths to use
@@ -485,16 +529,8 @@ def make_plot_results(
     output_dir = open_ms_tables.ms_path.parent / "plots"
     output_dir.mkdir(exist_ok=True, parents=True)
 
-    n_ant = len(np.unique(open_ms_tables.main_table.getcol("ANTENNA1")))
-    b_idx = np.array(list(combinations(range(n_ant), 2)))
-
-    logger.info(f"MS contains {n_ant} antennas ({len(b_idx)} baselines)")
-
-    b_idx = b_idx[:max_baselines]
+    b_idx = get_plot_baselines(open_ms_tables, max_baselines)
     logger.info(f"Plotting {len(b_idx)} baselines")
-
-    if reverse_baselines:
-        b_idx = b_idx[:, ::-1]
 
     for baseline, (ant_1, ant_2) in enumerate(b_idx):
         logger.info(f"Plotting baseline={baseline + 1}")
@@ -505,6 +541,14 @@ def make_plot_results(
             ant_2=ant_2,
             data_column=data_column,
         )
+        if before_flags is not None:
+            before_baseline_data = replace(
+                before_baseline_data,
+                masked_data=np.ma.masked_array(
+                    before_baseline_data.masked_data.data,
+                    mask=before_flags[(int(ant_1), int(ant_2))],
+                ),
+            )
         after_baseline_data = get_baseline_data(
             open_ms_tables=open_ms_tables,
             ant_1=ant_1,
@@ -544,6 +588,7 @@ def make_plot_results(
             output_path=output_path,
             w_delays=w_delays,
             outer_width_ns=outer_width_ns,
+            delay_rate=delay_rate,
         )
         logger.info(f"Have written {output_path=}")
         output_paths.append(plot_path)
@@ -592,6 +637,8 @@ class TaperResult:
     """The fupdated flags"""
     delay_time: DelayTime | None = None
     """The delay_time taper was constructede against"""
+    delay_contaminated: NDArray[np.bool_] | None = None
+    """Rows flagged because the notch meets the field"""
 
 
 def find_idx_of_closest_delay(x: u.Quantity, object_delays: u.Quantity) -> NDArray[int]:
@@ -745,6 +792,8 @@ def compute_tukey_taper(
     field_taper = np.swapaxes(field_taper[:, :, None], 0, 1)
 
     stokes_i_delay: NDArray[np.complexfloating[Any]] | None = None
+    # Shift of the notch from the predicted delay, in seconds, when the peak is searched for
+    shift_s = np.zeros(len(tukey_x_offset_sec))
     if tukey_tractor_options.peak_shift_search:
         # The formed stokes I spectrum code be reused later should
         # comparisons to field or minimum flux cuts are applied
@@ -809,6 +858,7 @@ def compute_tukey_taper(
         logger.info(f"{shifts=}")
 
         taper = apply_roll_for_taper(taper=taper[..., 0], shifts=shifts)[..., None]
+        shift_s = shifts * float(np.mean(np.diff(delay_time.delay.to("s").value)))
 
     # apply the flags to ignore the tapering if the object is larger
     # than one wrap away
@@ -824,12 +874,21 @@ def compute_tukey_taper(
 
     taper[elevation_mask[time_idx], :, :] = 1.0
 
-    # Compute flags to ignore the objects delay crossing 0, Do
-    # This by computing the taper towards the field and
-    # see if there are any components of the two sets of tapers
-    # that are not 1 (where 1 is 'no change'). ``field_taper`` was formed above.
-    intersecting_taper = np.any(
-        np.reshape((taper != 1) & (field_taper != 1), (taper.shape[0], -1)), axis=1
+    # Flag rows where the object's notch overlaps the field's protected range:
+    # the object's delay is within the sum of their half-widths. Computed from
+    # the delays rather than the sampled tapers, so it does not depend on where
+    # the delay bins fall.
+    object_delay_s = symmetric_domain_wrap(
+        values=tukey_x_offset_sec + shift_s,
+        upper_limit=axis_half_period(delay_time.delay.to("s").value),
+    )
+    intersecting_taper = (
+        (
+            np.abs(object_delay_s)
+            < tukey_tractor_options.outer_width_ns * 1e-9 + field_outer_width
+        )
+        & ~ignore_wrapping_for
+        & ~elevation_mask[time_idx]
     )
 
     # The guard region protects the field's main lobe: we flag the crossing
@@ -877,7 +936,8 @@ def compute_tukey_taper(
     # ] = 0.0
     # Update flags
     flags_to_return = np.zeros_like(data_chunk.masked_data.mask)
-    flags_to_return[intersecting_taper] = True
+    if tukey_tractor_options.flag_overlap:
+        flags_to_return[intersecting_taper] = True
     flags_to_return = (
         ~np.isfinite(data_chunk.masked_data.filled(np.nan)) | flags_to_return
     )
@@ -888,6 +948,7 @@ def compute_tukey_taper(
         update_flags=np.any(flags_to_return),
         flags=flags_to_return,
         delay_time=delay_time,
+        delay_contaminated=intersecting_taper,
     )
 
 
@@ -937,6 +998,62 @@ class TaperedChunkResult:
     """Indicates whether data should be written back to the MS"""
     weights: dict[str, NDArray[np.floating[Any]]] | None = None
     """The scaled weights that should be written back to the MS. The key is the column name and the mapped values are the corresponding scaled weights. If None nothing to write back."""
+    rate_payload: RateFilterPayload | None = None
+    """Rows for delay-rate filtering. None unless rate filtering."""
+
+
+def make_rate_filter_payload(
+    data_chunk: DataChunk,
+    original_masked_data: np.ma.MaskedArray,
+    w_delays_list: list[WDelays],
+    object_contaminated: list[NDArray[np.bool_]],
+) -> RateFilterPayload:
+    """The rows of a chunk flagged in delay, and which are candidates for delay-rate filtering
+
+    Args:
+        data_chunk (DataChunk): The chunk, before nulling
+        original_masked_data (np.ma.MaskedArray): The visibilities and flags the delay-rate filter starts from
+        w_delays_list (list[WDelays]): The delays of each object to null
+        object_contaminated (list[NDArray[np.bool_]]): Rows each object contaminates in delay
+
+    Returns:
+        RateFilterPayload: The rows, as needed by ``update_rate_filter``
+    """
+    n_rows = len(data_chunk.ant_1)
+    baseline_idx, time_idx = _get_baseline_time_indicies(
+        w_delays=w_delays_list[0], data_chunk=data_chunk
+    )
+    freq_hz = np.atleast_1d(data_chunk.freq_chan.to("Hz").value)
+    delay_contaminated = np.zeros(n_rows, dtype=bool)
+    needed_s = np.zeros(n_rows)
+    for w_delays, contaminated in zip(w_delays_list, object_contaminated, strict=True):
+        delay_contaminated |= contaminated
+        object_needed_s = needed_duration_s(
+            rate_separation_hz(
+                w_delays=w_delays,
+                baseline_idx=baseline_idx,
+                time_idx=time_idx,
+                freq_hz=freq_hz,
+            )
+        )
+        needed_s = np.where(
+            contaminated, np.maximum(needed_s, object_needed_s), needed_s
+        )
+    candidate = np.isfinite(needed_s)
+    cross = data_chunk.ant_1 != data_chunk.ant_2
+    return RateFilterPayload(
+        rows=data_chunk.row_start + np.arange(n_rows),
+        ant_1=np.asarray(data_chunk.ant_1),
+        ant_2=np.asarray(data_chunk.ant_2),
+        time_mjds=np.asarray(data_chunk.time_mjds, dtype=float),
+        baseline_idx=baseline_idx,
+        time_idx=time_idx,
+        original_masked_data=original_masked_data,
+        delay_contaminated=delay_contaminated & cross,
+        candidate=candidate & delay_contaminated & cross,
+        needed_s=needed_s,
+        original_weights=data_chunk.weights,
+    )
 
 
 def compute_tukey_multi_taper(
@@ -945,6 +1062,9 @@ def compute_tukey_multi_taper(
     w_delays_list: list[WDelays],
 ) -> TaperedChunkResult:
     chunk_size = data_chunk.chunk_size
+    original_masked_data = data_chunk.masked_data
+    n_rows = len(data_chunk.ant_1)
+    object_contaminated = [np.zeros(n_rows, dtype=bool) for _ in w_delays_list]
 
     outer_width = tukey_tractor_options.outer_width_ns * 1e-9 * u.s
 
@@ -952,7 +1072,7 @@ def compute_tukey_multi_taper(
     # to avoid unnecessary recomputes. Also why the for loop and not list comphrension
     delay_time: DelayTime | None = None
     taper_results = []
-    for w_delays in w_delays_list:
+    for object_index, w_delays in enumerate(w_delays_list):
         taper_result = compute_tukey_taper(
             data_chunk=data_chunk,
             tukey_tractor_options=tukey_tractor_options,
@@ -963,6 +1083,8 @@ def compute_tukey_multi_taper(
         # delay_time, and should not discard the one formed for an earlier object
         if taper_result.delay_time is not None:
             delay_time = taper_result.delay_time
+        if taper_result.delay_contaminated is not None:
+            object_contaminated[object_index] |= taper_result.delay_contaminated
         taper_results.append(taper_result)
 
         if (
@@ -987,13 +1109,29 @@ def compute_tukey_multi_taper(
                 )
                 if taper_result.delay_time is not None:
                     delay_time = taper_result.delay_time
+                if taper_result.delay_contaminated is not None:
+                    object_contaminated[object_index] |= taper_result.delay_contaminated
                 taper_results.append(taper_result)
+
+    rate_payload = (
+        make_rate_filter_payload(
+            data_chunk=data_chunk,
+            original_masked_data=original_masked_data,
+            w_delays_list=w_delays_list,
+            object_contaminated=object_contaminated,
+        )
+        if tukey_tractor_options.rate_filter
+        else None
+    )
 
     # Handle all the cases. If all data chunks showed nothing to do we can
     # return early and provide the original data back to the caller.
     if all(not taper_result.attached_payload for taper_result in taper_results):
         return TaperedChunkResult(
-            chunk_size=chunk_size, nothing_to_do=True, data_chunk=data_chunk
+            chunk_size=chunk_size,
+            nothing_to_do=True,
+            data_chunk=data_chunk,
+            rate_payload=rate_payload,
         )
 
     # Throw away objects that are unnecessary in subsequent stages
@@ -1051,6 +1189,7 @@ def compute_tukey_multi_taper(
         flags=combined_flags,
         update_weights=update_weights,
         weights=scaled_weights,
+        rate_payload=rate_payload,
     )
 
 
@@ -1060,6 +1199,8 @@ class TractorOptions(BaseOptions):
 
     target_objects: tuple[str, ...] = ("sun",)
     """The target object to apply the delay towards."""
+    object_radius_deg: tuple[float, ...] | None = None
+    """Angular radius of each target object in degrees, in the order of target_objects. If None the Sun is 0.5 deg, the Moon 0.27 deg and anything else a point. Used by clean; tukey's notch width is set by outer_width_ns."""
     data_column: str = "DATA"
     """The visibility column to modify"""
     output_column: str = "CORRECTED_DATA"
@@ -1090,15 +1231,24 @@ class TractorOptions(BaseOptions):
     """Attempt to identify a WEIGHT-like column and rescale to indicate modified data. Defaults to False."""
     weight_column: str | None = None
     """The name of the WEIGHT-like column. If None when rewrite is True the WEIGHT-like column will be searched for. Defaults to None."""
-    guard_field: bool = False
-    """If True derive a region around the delay=0 spectrum to protect the field-of-view/"""
+    guard_field: bool = True
+    """Protect a region around delay=0 sized from the field of view"""
     dish_diameter_m: float | None = None
-    """Dish diameter in metres used to derive the nominal field of view (e.g. for guard_field), overriding DISH_DIAMETER in the measurement set's ANTENNA table. If None the ANTENNA table is used."""
+    """Dish diameter in metres used to derive the nominal field of view (e.g. for the guard region), overriding DISH_DIAMETER in the measurement set's ANTENNA table. If None the ANTENNA table is used."""
+    flag_overlap: bool = True
+    """Flag rows where an object can not be separated from the field in delay. If False they are kept, with the object removed only outside the field's protected range."""
     guard_field_fraction: float = 0.1
     """The attenuation level of the main lobe to guard to, and should be in the range (0, 1). Values closer to zero correspond to a larger field-of-view, and hence a larger guard band in delay space. """
 
 
-class TukeyTractorOptions(TractorOptions):
+class RateFilterOptions(BaseOptions):
+    """Options for delay-rate filtering, shared by the tractors"""
+
+    rate_filter: bool = False
+    """Recover rows flagged in delay by filtering in delay-rate where the object is separable from the field"""
+
+
+class TukeyTractorOptions(TractorOptions, RateFilterOptions):
     """Options to describe the tukey taper to apply"""
 
     outer_width_ns: float = 10
@@ -1367,6 +1517,92 @@ def write_back_results(
         logger.debug("No updating of weights")
 
 
+def make_tukey_rate_filter(
+    open_ms_tables: OpenMSTables,
+    tukey_tractor_options: TukeyTractorOptions,
+    w_delays_list: list[WDelays],
+) -> RateFilterRun:
+    """Delay-rate filter with the notch's delay widths, covering any nulled sidelobes
+
+    Args:
+        open_ms_tables (OpenMSTables): The open measurement set
+        tukey_tractor_options (TukeyTractorOptions): The notch settings, after any auto-sizing
+        w_delays_list (list[WDelays]): The delays of each object to null
+
+    Returns:
+        RateFilterRun: The state for ``run_tractor_chunks``
+    """
+    outer_width_s = tukey_tractor_options.outer_width_ns * 1e-9
+    delay_width_s = outer_width_s
+    if tukey_tractor_options.nth_sidelobe_null is not None:
+        delay_width_s = (
+            get_delay_of_nth_sidelobe(
+                n=tukey_tractor_options.nth_sidelobe_null, sinc_width=outer_width_s
+            )
+            .to("s")
+            .value
+            + outer_width_s
+        )
+    pad_timesteps = 16
+    return make_rate_filter_run(
+        settings=make_rate_filter_settings(
+            open_ms_tables=open_ms_tables,
+            tractor_options=tukey_tractor_options,
+            w_delays_list=w_delays_list,
+            segment_filter=partial(
+                filter_segment,
+                delay_width_s=delay_width_s,
+                delay_roll_off_s=tukey_tractor_options.tukey_width_ns * 1e-9,
+                roll_off_rows=pad_timesteps,
+            ),
+            field_delay_s=outer_width_s,
+            pad_timesteps=pad_timesteps,
+        )
+    )
+
+
+def make_rate_filter_settings(
+    open_ms_tables: OpenMSTables,
+    tractor_options: TractorOptions,
+    w_delays_list: list[WDelays],
+    segment_filter: SegmentFilter,
+    field_delay_s: float,
+    pad_timesteps: int = 16,
+) -> RateFilterSettings:
+    """Delay-rate filter settings shared by the tractors
+
+    Args:
+        open_ms_tables (OpenMSTables): The open measurement set
+        tractor_options (TractorOptions): The elevation cut, Nyquist zone and plot settings
+        w_delays_list (list[WDelays]): The delays of each object to null
+        segment_filter (SegmentFilter): Removes the objects from each segment
+        field_delay_s (float): Half-width of the field's delays before the guard band, in seconds
+        pad_timesteps (int, optional): Clean rows either side of a segment. Defaults to 16.
+
+    Returns:
+        RateFilterSettings: The settings for ``make_rate_filter_run``
+    """
+    plot_dir = None
+    if tractor_options.make_plots:
+        plot_dir = open_ms_tables.ms_path.parent / "plots"
+        plot_dir.mkdir(exist_ok=True, parents=True)
+    return RateFilterSettings(
+        w_delays_list=w_delays_list,
+        freq_hz=np.atleast_1d(
+            open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze()
+        ).astype(float),
+        segment_filter=segment_filter,
+        field_delay_s=field_delay_s,
+        elevation_cut_deg=tractor_options.elevation_cut_deg,
+        ignore_nyquist_zone=tractor_options.ignore_nyquist_zone,
+        pad_timesteps=pad_timesteps,
+        plot_dir=plot_dir,
+        max_plots=tractor_options.number_of_plots,
+        antenna_names=_get_antenna_names(open_ms_tables.antenna_table),
+        antenna_positions_m=open_ms_tables.antenna_table.getcol("POSITION"),
+    )
+
+
 def tukey_tractor(
     ms_path: Path,
     tukey_tractor_options: TukeyTractorOptions,
@@ -1421,7 +1657,22 @@ def tukey_tractor(
         kernel_summary=kernel_summary,
     )
 
+    before_flags = (
+        read_baseline_flags(
+            open_ms_tables,
+            get_plot_baselines(open_ms_tables, tukey_tractor_options.number_of_plots),
+        )
+        if tukey_tractor_options.make_plots
+        else None
+    )
+    rate_filter: RateFilterRun | None = None
     if not tukey_tractor_options.dry_run:
+        if tukey_tractor_options.rate_filter:
+            rate_filter = make_tukey_rate_filter(
+                open_ms_tables=open_ms_tables,
+                tukey_tractor_options=tukey_tractor_options,
+                w_delays_list=w_delays_list,
+            )
         partial_compute_func = partial(
             compute_tukey_multi_taper,
             tukey_tractor_options=tukey_tractor_options,
@@ -1431,7 +1682,11 @@ def tukey_tractor(
             setup=setup,
             chunk_func=partial_compute_func,
             tractor_options=tukey_tractor_options,
+            rate_filter=rate_filter,
         )
+        if rate_filter is not None:
+            rate_message = describe_rate_filter(rate_filter)
+            logger.info(rate_message)
 
     plot_paths: list[Path] | None
     if tukey_tractor_options.make_plots:
@@ -1440,9 +1695,10 @@ def tukey_tractor(
             data_column=tukey_tractor_options.data_column,
             output_column=tukey_tractor_options.output_column,
             w_delays=w_delays_list,
-            reverse_baselines=tukey_tractor_options.reverse_baselines,
             outer_width_ns=tukey_tractor_options.outer_width_ns,
             max_baselines=tukey_tractor_options.number_of_plots,
+            delay_rate=tukey_tractor_options.rate_filter,
+            before_flags=before_flags,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
@@ -1458,6 +1714,7 @@ def tukey_tractor(
                     describe_line_impact(name, summary)
                     for name, summary in line_impacts.items()
                 ),
+                *([rate_message] if rate_filter is not None else []),
             ],
             origin="jolly_tractor tukey",
             app_params=dataclass_to_app_params(tukey_tractor_options),
@@ -1484,6 +1741,8 @@ class TractorSetup:
     """WEIGHT-like columns to read and rescale, if any"""
     write_back_required: bool
     """Whether every chunk has to be written, e.g. a new and empty output column"""
+    dish_diameter_m: float | None = None
+    """The dish diameter, in m, from --dish-diameter-m or the largest DISH_DIAMETER. None if unknown."""
 
 
 def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSetup:
@@ -1508,25 +1767,16 @@ def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSe
         ms_path=ms_path, weight_column=tractor_options.weight_column
     )
 
-    write_back_required: bool = True
-    if not tractor_options.dry_run:
-        # Data will need to be written back to the MS after each chunk if the
-        # output column has not data
-        write_back_required = add_output_column(
-            tab=open_ms_tables.main_table,
-            output_column=tractor_options.output_column,
-            data_column=tractor_options.data_column,
-            overwrite=tractor_options.overwrite,
-            copy_column_data=tractor_options.copy_column_data,
-        )
-
+    # Predict the delays first: this checks the phase direction against the UVW
+    # column, so a mismatch fails before the measurement set is changed.
     # Calculate the guard field region used to derieve the appropriate delay window
     radial_fov: u.Quantity | None = None
     if tractor_options.guard_field:
         if open_ms_tables.nominal_fov is None:
             msg = (
-                "--guard-field needs the field-of-view, but the measurement set has "
-                "no valid DISH_DIAMETER. Set --dish-diameter-m."
+                "Guarding the field needs the field-of-view, but the measurement set "
+                "has no valid DISH_DIAMETER. Set --dish-diameter-m, or turn the guard "
+                "off with --no-guard-field."
             )
             raise ValueError(msg)
         radial_fov = beam_fraction_to_radius(
@@ -1543,23 +1793,65 @@ def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSe
         reverse_baselines=tractor_options.reverse_baselines,
         flip_uvw_sign=tractor_options.flip_uvw_sign,
         radial_fov=radial_fov,
+        object_radii=None
+        if tractor_options.object_radius_deg is None
+        else [radius * u.deg for radius in tractor_options.object_radius_deg],
     )
     assert all(len(w_delays.w_delays.shape) == 2 for w_delays in w_delays_list), (
         "Sanity check failed, incorrect dimensionality returned"
     )
+
+    write_back_required: bool = True
+    if not tractor_options.dry_run:
+        # Data will need to be written back to the MS after each chunk if the
+        # output column has not data
+        write_back_required = add_output_column(
+            tab=open_ms_tables.main_table,
+            output_column=tractor_options.output_column,
+            data_column=tractor_options.data_column,
+            overwrite=tractor_options.overwrite,
+            copy_column_data=tractor_options.copy_column_data,
+        )
 
     return TractorSetup(
         open_ms_tables=open_ms_tables,
         w_delays_list=w_delays_list,
         weight_columns=weight_columns,
         write_back_required=write_back_required,
+        dish_diameter_m=get_dish_diameter(
+            open_ms_tables.antenna_table, tractor_options.dish_diameter_m
+        ),
     )
+
+
+def write_row_updates(
+    open_ms_tables: OpenMSTables,
+    updates: list[RowUpdate],
+    output_column: str,
+) -> None:
+    """Write rows recovered by delay-rate filtering
+
+    Args:
+        open_ms_tables (OpenMSTables): The open measurement set
+        updates (list[RowUpdate]): The recovered rows
+        output_column (str): The column the modified visibilities are written to
+    """
+    for update in updates:
+        selected = open_ms_tables.main_table.selectrows(update.rows.tolist())
+        try:
+            selected.putcol(columnname=output_column, value=update.data)
+            selected.putcol(columnname="FLAG", value=update.flags)
+            for name, weights in (update.weights or {}).items():
+                selected.putcol(columnname=name, value=weights)
+        finally:
+            selected.close()
 
 
 def run_tractor_chunks(
     setup: TractorSetup,
     chunk_func: Callable[[DataChunk], TaperedChunkResult],
     tractor_options: TractorOptions,
+    rate_filter: RateFilterRun | None = None,
 ) -> None:
     """Read the measurement set in chunks of rows, pass each chunk to
     ``chunk_func``, and write the results back. Shared by every tractor:
@@ -1569,6 +1861,7 @@ def run_tractor_chunks(
         setup (TractorSetup): Open tables and write-back settings from ``prepare_tractor``
         chunk_func (Callable[[DataChunk], TaperedChunkResult]): Modifies one chunk of rows
         tractor_options (TractorOptions): The shared tractor options
+        rate_filter (RateFilterRun | None, optional): Delay-rate filtering fed each result's ``rate_payload``. Defaults to None.
     """
     open_ms_tables = setup.open_ms_tables
     weight_columns = setup.weight_columns
@@ -1621,6 +1914,24 @@ def run_tractor_chunks(
                     write_back_required=write_back_required,
                     pbar=pbar,
                 )
+                if (
+                    rate_filter is not None
+                    and taper_chunk_result.rate_payload is not None
+                ):
+                    write_row_updates(
+                        open_ms_tables=open_ms_tables,
+                        updates=update_rate_filter(
+                            rate_filter, taper_chunk_result.rate_payload
+                        ),
+                        output_column=tractor_options.output_column,
+                    )
+
+        if rate_filter is not None:
+            write_row_updates(
+                open_ms_tables=open_ms_tables,
+                updates=flush_rate_filter(rate_filter),
+                output_column=tractor_options.output_column,
+            )
 
     stop = time()
     runtime_s = stop - start
@@ -1669,6 +1980,24 @@ def get_parser() -> ArgumentParser:
         options_class=TukeyTractorOptions,
     )
 
+    # Imported here as jolly_roger.deconvolve builds on this module
+    from jolly_roger.deconvolve import CleanTractorOptions  # noqa: PLC0415
+
+    clean_parser = subparsers.add_parser(
+        name="clean",
+        help="Remove objects outside the field by CLEAN in delay (needs jolly-roger[clean])",
+        formatter_class=ArgumentDefaultsHelpFormatter,
+    )
+    clean_parser.add_argument(
+        "ms_path",
+        type=Path,
+        help="The measurement set to process with delay CLEAN",
+    )
+    clean_parser = add_options_to_parser(
+        parser=clean_parser,
+        options_class=CleanTractorOptions,
+    )
+
     return parser
 
 
@@ -1684,6 +2013,17 @@ def cli() -> None:
         )
 
         tukey_tractor(ms_path=args.ms_path, tukey_tractor_options=tukey_tractor_options)
+    elif args.mode == "clean":
+        from jolly_roger.deconvolve import (  # noqa: PLC0415
+            CleanTractorOptions,
+            clean_tractor,
+        )
+
+        clean_tractor_options = create_options_from_parser(
+            parser_namespace=args,
+            options_class=CleanTractorOptions,
+        )
+        clean_tractor(ms_path=args.ms_path, clean_tractor_options=clean_tractor_options)
     else:
         parser.print_help()
 

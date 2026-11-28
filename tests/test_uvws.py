@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from importlib.resources import as_file, files
 from pathlib import Path
 
 import astropy.units as u
 import numpy as np
+import pytest
 from astropy.coordinates import EarthLocation, SkyCoord, get_sun
 from astropy.time import Time
 from casacore.tables import table
@@ -25,8 +25,10 @@ from jolly_roger.uvws import (
     compute_sun_uv_scales,
     compute_uvw_flags,
     construct_rate_guard_region,
+    default_object_radius,
     get_object_delay_for_ms,
     get_w_rates,
+    projected_extent,
     uvw_flagger,
     xyz_to_uvw,
 )
@@ -146,8 +148,7 @@ def test_uvw_flagger_applies_flags(ms_example: Path) -> None:
 def _load_sb56289_uvw() -> dict[str, np.ndarray]:
     """Rows of ASKAP SB56289 (RACS_1041+18, beam 10) with the UVWs written by the
     correlator, for three timesteps"""
-    resource = files("jolly_roger.data").joinpath("tests", "sb56289_uvw.npz")
-    with as_file(resource) as path, np.load(path) as arr:
+    with np.load(Path(__file__).parent / "data" / "sb56289_uvw.npz") as arr:
         return dict(arr)
 
 
@@ -383,3 +384,49 @@ def test_w_rates_match_earth_rotation() -> None:
     np.testing.assert_allclose(
         rates, expected, rtol=0, atol=0.02 * np.abs(expected).max()
     )
+
+
+def test_default_object_radius() -> None:
+    assert default_object_radius("sun") == 0.5 * u.deg
+    assert default_object_radius("Moon") == 0.27 * u.deg
+    assert default_object_radius("Cyg A") == 0 * u.deg
+    assert default_object_radius(SkyCoord(0, 0, unit="deg")) == 0 * u.deg
+
+
+def test_projected_extent() -> None:
+    """A disc of radius theta spans theta |(u, v)| / c in delay"""
+    uvws = np.array([[[300.0]], [[400.0]], [[1000.0]]]) * u.m
+    extent = projected_extent(uvws=uvws, radius=1 * u.deg)
+    np.testing.assert_allclose(
+        extent.to_value(u.s), np.radians(1.0) * 500.0 / 299_792_458.0
+    )
+
+
+def test_get_object_delay_attaches_object_extent(ms_example: Path) -> None:
+    with table(str(ms_example / "FIELD"), ack=False) as tab:
+        phase = SkyCoord(*tab.getcol("PHASE_DIR")[0, 0], unit="rad")
+
+    sun, point = get_object_delay_for_ms(
+        ms_path=ms_example,
+        phase_dir=phase,
+        object_name=["sun", phase.directional_offset_by(0 * u.deg, 20 * u.deg)],
+    )
+    assert sun.object_radius == 0.5 * u.deg
+    assert sun.object_extent is not None
+    assert sun.object_extent.shape == sun.w_delays.shape
+    assert sun.object_rate_extent is not None
+    assert point.object_extent is None
+
+    (wide,) = get_object_delay_for_ms(
+        ms_path=ms_example, phase_dir=phase, object_name="sun", object_radii=[1 * u.deg]
+    )
+    assert wide.object_extent is not None
+    np.testing.assert_allclose(wide.object_extent.value, 2 * sun.object_extent.value)
+
+    with pytest.raises(ValueError, match="one radius per object"):
+        get_object_delay_for_ms(
+            ms_path=ms_example,
+            phase_dir=phase,
+            object_name=["sun", "moon"],
+            object_radii=[1 * u.deg],
+        )

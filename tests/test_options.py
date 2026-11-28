@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from argparse import ArgumentParser
+
 import pytest
+from capn_crunch import add_options_to_parser, create_options_from_parser
 from pydantic import ValidationError
 
 from jolly_roger.tractor import TractorOptions, TukeyTractorOptions
@@ -27,6 +30,7 @@ def test_tukey_options_keep_cli_fields():
     """Splitting the shared options out must not change the tukey CLI"""
     assert set(TukeyTractorOptions.model_fields) == {
         "target_objects",
+        "object_radius_deg",
         "outer_width_ns",
         "tukey_width_ns",
         "data_column",
@@ -48,11 +52,47 @@ def test_tukey_options_keep_cli_fields():
         "reweight",
         "weight_column",
         "guard_field",
+        "flag_overlap",
         "dish_diameter_m",
         "guard_field_fraction",
         "object_minimum_flux",
         "peak_shift_search",
         "peak_shift_search_width_ns",
+        "rate_filter",
     }
     assert set(TractorOptions.model_fields) < set(TukeyTractorOptions.model_fields)
     assert "outer_width_ns" not in TractorOptions.model_fields
+
+
+def test_field_is_guarded_by_default():
+    assert TukeyTractorOptions().guard_field
+    assert not TukeyTractorOptions(guard_field=False).guard_field
+
+
+def test_guard_field_flags():
+    """Booleans have a --name / --no-name pair of flags"""
+    parser = add_options_to_parser(
+        parser=ArgumentParser(), options_class=TukeyTractorOptions
+    )
+
+    def parse(*flags: str) -> TukeyTractorOptions:
+        return create_options_from_parser(
+            parser.parse_args(list(flags)), options_class=TukeyTractorOptions
+        )
+
+    assert parse().guard_field
+    assert parse("--guard-field").guard_field
+    assert not parse("--no-guard-field").guard_field
+
+
+def test_rate_filter_flags():
+    parser = add_options_to_parser(
+        parser=ArgumentParser(), options_class=TukeyTractorOptions
+    )
+
+    assert not parser.parse_args([]).rate_filter
+    options = create_options_from_parser(
+        parser.parse_args(["--rate-filter"]),
+        options_class=TukeyTractorOptions,
+    )
+    assert options.rate_filter

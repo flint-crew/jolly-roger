@@ -6,16 +6,18 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from casacore.tables import table
+from casacore.tables import table, taql
 from numpy import ma
 from numpy.typing import NDArray
 
 from jolly_roger.baselines import get_open_ms_tables
 from jolly_roger.delays import data_to_delay_time
+from jolly_roger.rates import RowUpdate
 from jolly_roger.tractor import (
     DataChunk,
     TaperedChunkResult,
@@ -23,11 +25,14 @@ from jolly_roger.tractor import (
     TukeyTractorOptions,
     apply_roll_for_taper,
     compute_tukey_multi_taper,
+    compute_tukey_taper,
     find_idx_of_closest_delay,
+    make_plot_results,
     make_search_window,
     prepare_tractor,
     run_tractor_chunks,
     tukey_tractor,
+    write_row_updates,
 )
 from jolly_roger.uvws import WDelays
 
@@ -141,7 +146,6 @@ def test_tractor_run1(ms_example) -> None:
 
     tukey_tractor_options = TukeyTractorOptions(
         auto_size=True,
-        guard_field=True,
         object_minimum_flux=0.05,
         output_column=new_column,
     )
@@ -167,7 +171,6 @@ def test_tractor_run2(ms_example) -> None:
 
     tukey_tractor_options = TukeyTractorOptions(
         auto_size=True,
-        guard_field=True,
         object_minimum_flux=0.05,
         output_column=new_column,
         make_plots=True,
@@ -518,6 +521,38 @@ def test_tractor_reports_kernel_and_history(ms_example) -> None:
     assert after[-1]["MESSAGE"].startswith("Spectral-line impact of nulling sun")
 
 
+def test_tractor_rate_filter_records_history(ms_example) -> None:
+    """A run with the rate filter adds its summary to HISTORY"""
+    tukey_tractor(
+        ms_path=Path(ms_example),
+        tukey_tractor_options=TukeyTractorOptions(
+            output_column="JACKS_DATA", rate_filter=True
+        ),
+    )
+    assert _history_rows(ms_example)[-1]["MESSAGE"].startswith("Delay-rate filter:")
+
+
+def test_tractor_rate_filter_adds_delay_rate_row(ms_example, monkeypatch) -> None:
+    """With rate filtering the comparison plot gains a fringe rate and delay row"""
+    closed: list[plt.Figure] = []
+    monkeypatch.setattr("jolly_roger.plots.plt.close", closed.append)
+    results = tukey_tractor(
+        ms_path=Path(ms_example),
+        tukey_tractor_options=TukeyTractorOptions(
+            output_column="JACKS_DATA",
+            rate_filter=True,
+            make_plots=True,
+            number_of_plots=1,
+        ),
+    )
+    assert results.output_plots is not None
+    assert len(results.output_plots) == 1
+    assert results.output_plots[0].exists()
+    (figure,) = closed
+    rate_axes = [ax for ax in figure.axes if ax.get_xlabel() == "Fringe rate / mHz"]
+    assert len(rate_axes) == 3
+
+
 def test_tractor_dry_run_leaves_history(ms_example) -> None:
     """A dry run does not modify the HISTORY table"""
     before = _history_rows(ms_example)
@@ -545,3 +580,100 @@ def test_run_tractor_chunks_applies_chunk_func(ms_example) -> None:
 
     with table(str(ms_example), ack=False) as tab:
         np.testing.assert_allclose(tab.getcol("DOUBLED_DATA"), 2 * tab.getcol("DATA"))
+
+
+def test_write_row_updates(ms_example) -> None:
+    """Scattered rows are written to the output column and flags"""
+    options = TractorOptions(output_column="JACKS_DATA", copy_column_data=True)
+    setup = prepare_tractor(ms_path=Path(ms_example), tractor_options=options)
+    shape = setup.open_ms_tables.main_table.getcell("DATA", 0).shape
+    rows = np.array([3, 10, 11])
+    write_row_updates(
+        open_ms_tables=setup.open_ms_tables,
+        updates=[
+            RowUpdate(
+                rows=rows,
+                data=np.full((3, *shape), 7 + 1j, dtype=complex),
+                flags=np.zeros((3, *shape), dtype=bool),
+            )
+        ],
+        output_column=options.output_column,
+    )
+    setup.open_ms_tables.close()
+
+    with table(str(ms_example), ack=False) as tab:
+        data = tab.getcol("JACKS_DATA")
+        flags = tab.getcol("FLAG")
+    assert np.all(data[rows] == 7 + 1j)
+    assert not flags[rows].any()
+    assert flags[4].all()
+
+
+def test_make_plot_results_single_baseline(ms_example, tmp_path) -> None:
+    """Baselines are taken from the rows present, so a measurement set with
+    one baseline is plotted"""
+    single = tmp_path / "single.ms"
+    taql(
+        f"SELECT FROM {ms_example} WHERE ANTENNA1=0 AND ANTENNA2=1 GIVING {single} AS PLAIN"
+    )
+    open_ms_tables = get_open_ms_tables(ms_path=single)
+    paths = make_plot_results(
+        open_ms_tables=open_ms_tables, data_column="DATA", output_column="DATA"
+    )
+    open_ms_tables.close()
+    assert len(paths) == 1
+    assert "_0_1_" in paths[0].name
+    assert paths[0].exists()
+
+
+def test_notch_flags_overlap_with_the_field_independent_of_delay_bins() -> None:
+    """A row is flagged when the object's notch overlaps the field's protected
+    range (|delay| < outer width + field outer width + guard), even when no
+    delay bin falls in both"""
+    n_time = 2
+    # 200 MHz of bandwidth: delay bins of 5 ns. Outer width 10 ns and a 3 ns
+    # guard, so the notch meets the field for |delay| < 23 ns. At 22 ns the
+    # notch covers 12-32 ns and the field -13-13 ns, but no 5 ns bin is in both.
+    chunk = replace(
+        _make_data_chunk(n_time=n_time, n_chan=40),
+        freq_chan=np.linspace(1.0, 1.195, 40) * u.GHz,
+    )
+    delays_s = np.array([22e-9, 24e-9])
+    w_delays = replace(
+        _make_w_delays(n_time=n_time),
+        w_delays=delays_s[None, :] * u.s,
+        guard_region=np.full((1, n_time), 3e-9) * u.s,
+    )
+    result = compute_tukey_taper(
+        data_chunk=chunk,
+        tukey_tractor_options=TukeyTractorOptions(outer_width_ns=10, tukey_width_ns=5),
+        w_delays=w_delays,
+    )
+    assert result.delay_contaminated is not None
+    assert result.delay_contaminated.tolist() == [True, False]
+
+
+def test_plots_show_flags_from_before_the_run(ms_sb47138, monkeypatch) -> None:
+    """The 'before' panels are masked with the flags from before the run, not
+    with the rows the run flagged"""
+    closed: list[plt.Figure] = []
+    monkeypatch.setattr("jolly_roger.plots.plt.close", closed.append)
+    tukey_tractor(
+        ms_path=ms_sb47138,
+        tukey_tractor_options=TukeyTractorOptions(
+            output_column="NULLED_DATA", make_plots=True, number_of_plots=1
+        ),
+    )
+    # ak01-ak04 is plotted first; the notch flags 120 of its rows
+    figure = closed[0]
+    before, after = (
+        # The image is (frequency, time): count times masked in every channel
+        np.ma.getmaskarray(mesh.get_array()).all(axis=0).sum()
+        for mesh in (figure.axes[0].collections[0], figure.axes[2].collections[0])
+    )
+    with table(str(ms_sb47138), ack=False) as tab:
+        assert (
+            tab.getcol("FLAG")[tab.getcol("ANTENNA2") == 3].all(axis=(1, 2)).sum()
+            == 120
+        )
+    assert after - before == 120

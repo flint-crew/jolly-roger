@@ -91,6 +91,12 @@ class WDelays:
     """The time derivative of the w-derived delay (a dimensionless delay-rate). Multiplied by frequency this is the fringe-rate. Shape is [baseline, time]. If None it is derived from ``w_delays`` via ``get_w_rates``"""
     rate_guard_region: u.Quantity | None = None
     """Define a guard region around delay-rate=0 based on a nominal field of view, as a dimensionless delay-rate. Will be of shape {baseline, timestep}"""
+    object_radius: u.Quantity = 0 * u.deg
+    """The angular radius of the object, modelled as a disc"""
+    object_extent: u.Quantity | None = None
+    """Half-width in delay of the object's disc about ``w_delays``. Will be of shape {baseline, timestep}. None for a point."""
+    object_rate_extent: u.Quantity | None = None
+    """Half-width in delay-rate of the object's disc about ``w_rates``, dimensionless. Will be of shape {baseline, timestep}. None for a point."""
 
 
 def _time_map_to_seconds(time_map: dict[Any, int]) -> NDArray[np.floating[Any]]:
@@ -138,6 +144,78 @@ def get_w_rates(w_delays: WDelays) -> u.Quantity:
     return rates * u.dimensionless_unscaled
 
 
+def default_object_radius(
+    object_name: str | SkyCoord,
+    sun: u.Quantity = 0.5 * u.deg,
+    moon: u.Quantity = 0.27 * u.deg,
+) -> u.Quantity:
+    """The angular radius of an object when none is given: the radio Sun
+    (including the quiet-Sun corona near 1 GHz), the Moon, or a point for
+    anything else
+
+    Args:
+        object_name (str | SkyCoord): The object name, or its sky position
+        sun (u.Quantity, optional): Radius of the Sun. Defaults to 0.5 deg.
+        moon (u.Quantity, optional): Radius of the Moon. Defaults to 0.27 deg.
+
+    Returns:
+        u.Quantity: The radius
+    """
+    if isinstance(object_name, str) and object_name.lower() == "sun":
+        return sun
+    if isinstance(object_name, str) and object_name.lower() == "moon":
+        return moon
+    return 0 * u.deg
+
+
+def projected_extent(uvws: u.Quantity, radius: u.Quantity) -> u.Quantity:
+    """Half-width in delay of a disc of angular ``radius`` about the direction
+    the ``uvws`` are computed toward:
+
+    >>> radius * np.hypot(u, v) / speed_of_light
+
+    Args:
+        uvws (u.Quantity): The UVW coordinates, in metres, shape (3, baseline, time)
+        radius (u.Quantity): The angular radius
+
+    Returns:
+        u.Quantity: The half-width in delay for (baseline, timestep)
+    """
+    uvws_m = uvws.to("m").value
+    extent_s = (
+        radius.to("rad").value
+        * np.hypot(uvws_m[0], uvws_m[1])
+        / speed_of_light.to("m/s").value
+    )
+    return extent_s * u.s
+
+
+def projected_rate_extent(
+    uvws: u.Quantity, time_s: NDArray[np.floating[Any]], radius: u.Quantity
+) -> u.Quantity:
+    """Half-width in delay-rate of a disc of angular ``radius`` about the
+    direction the ``uvws`` are computed toward, the delay-rate counterpart to
+    ``projected_extent``:
+
+    >>> radius * np.hypot(du/dt, dv/dt) / speed_of_light
+
+    Args:
+        uvws (u.Quantity): The UVW coordinates, in metres, shape (3, baseline, time)
+        time_s (NDArray[np.floating[Any]]): The time of each timestep, in seconds
+        radius (u.Quantity): The angular radius
+
+    Returns:
+        u.Quantity: The dimensionless half-width for (baseline, timestep)
+    """
+    uv_rates_m_s = _gradient_in_time(uvws.to("m").value[:2], np.asarray(time_s))
+    rate_extent = (
+        radius.to("rad").value
+        * np.hypot(uv_rates_m_s[0], uv_rates_m_s[1])
+        / speed_of_light.to("m/s").value
+    )
+    return rate_extent * u.dimensionless_unscaled
+
+
 def construct_rate_guard_region(
     uvws: u.Quantity, time_s: NDArray[np.floating[Any]], radial_fov: u.Quantity
 ) -> u.Quantity:
@@ -169,14 +247,7 @@ def construct_rate_guard_region(
         f"Constructing guard region around delay-rate=0 using {radial_fov.to('deg')}"
     )
 
-    uv_rates_m_s = _gradient_in_time(uvws.to("m").value[:2], np.asarray(time_s))
-    rate_guard = (
-        radial_fov.to("rad").value
-        * np.hypot(uv_rates_m_s[0], uv_rates_m_s[1])
-        / speed_of_light.to("m/s").value
-    )
-
-    return rate_guard * u.dimensionless_unscaled
+    return projected_rate_extent(uvws=uvws, time_s=time_s, radius=radial_fov)
 
 
 def construct_guard_region(uvws: u.Quantity, radial_fov: u.Quantity) -> u.Quantity:
@@ -204,10 +275,7 @@ def construct_guard_region(uvws: u.Quantity, radial_fov: u.Quantity) -> u.Quanti
         f"Constructing guard region around delay=0 using {radial_fov.to('deg')}"
     )
 
-    # Appears as though the np.hyot is returning m2
-    uvws_m = uvws.to("m").value
-    fov = (radial_fov.to("rad").value * np.hypot(uvws_m[0], uvws_m[1])) * u.m
-    fov = (fov / speed_of_light).decompose()
+    fov = projected_extent(uvws=uvws, radius=radial_fov)
 
     assert fov.ndim == 2, f"Unexpected {fov.shape=}"
     assert fov.shape == uvws.shape[1:], (
@@ -224,6 +292,7 @@ def get_object_delay_from_tables(
     reverse_baselines: bool = False,
     flip_uvw_sign: bool = False,
     radial_fov: u.Quantity | None = None,
+    object_radii: Sequence[u.Quantity] | None = None,
 ) -> list[WDelays]:
     """Calculate the object delay from already-open MS tables, so a caller
     that already holds ``open_ms_tables`` need not re-open the MS.
@@ -235,11 +304,13 @@ def get_object_delay_from_tables(
         reverse_baselines (bool, optional): Whether the MS has antennas recorded as (ant1, ant2) or (ant2, ant1), where ant2 is always larger. Defaults to False.
         flip_uvw_sign (bool, optional): Indicates whether a sign slip needs to be introduced to the UVWs. Defaults to False.
         radial_fov (u.Quantity, optional): The radial angular size of the guard region of the main lobe that will be guarded in delay space. If None no guard boundaries are attached to the returned ``WDelays``.
+        object_radii (Sequence[u.Quantity] | None, optional): Angular radius of each object, in the order of ``object_name``. If None each takes ``default_object_radius``. Defaults to None.
 
     Returns:
         list[WDelays]: Description of the delay towards the nominated object. A list of objects will always be returned.
     """
     object_name_list = ensure_object_name_list(object_name)
+    _check_object_radii(object_name_list, object_radii)
 
     baselines = get_baselines_from_tables(
         open_ms_tables=open_ms_tables,
@@ -256,6 +327,10 @@ def get_object_delay_from_tables(
         )
         for name in object_name_list
     ]
+    uvws_phase = xyz_to_uvw(
+        baselines=baselines, hour_angles=hour_angles_phase, flip_uvw_sign=flip_uvw_sign
+    )
+    check_phase_dir(open_ms_tables=open_ms_tables, uvws_phase=uvws_phase)
 
     return get_object_delay(
         baselines=baselines,
@@ -263,7 +338,78 @@ def get_object_delay_from_tables(
         object_hour_angles=object_hour_angles,
         flip_uvw_sign=flip_uvw_sign,
         radial_fov=radial_fov,
+        uvws_phase=uvws_phase,
+        object_radii=object_radii,
     )
+
+
+def _check_object_radii(
+    object_names: Sequence[str | SkyCoord],
+    object_radii: Sequence[u.Quantity] | None,
+) -> None:
+    if object_radii is not None and len(object_radii) != len(object_names):
+        msg = (
+            f"Got {len(object_radii)} object radii for {len(object_names)} objects "
+            f"({', '.join(object_name_to_str(name) for name in object_names)}); "
+            "give one radius per object, in the same order"
+        )
+        raise ValueError(msg)
+
+
+class PhaseDirMismatchError(ValueError):
+    pass
+
+
+def check_phase_dir(
+    open_ms_tables: OpenMSTables,
+    uvws_phase: UVWs,
+    tolerance_m: float = 0.1,
+    sample_rows: int = 1000,
+) -> None:
+    """Check that the UVWs computed toward the phase direction reproduce the
+    measurement set's UVW column, so that the delays predicted from it are those
+    of the data. Skipped, with a warning, if the sampled UVWs are all zero.
+
+    Args:
+        open_ms_tables (OpenMSTables): The open measurement set
+        uvws_phase (UVWs): UVWs computed toward the phase direction
+        tolerance_m (float, optional): The largest difference allowed, in metres. Defaults to 0.1.
+        sample_rows (int, optional): The number of rows compared, from the start. Defaults to 1000.
+
+    Raises:
+        PhaseDirMismatchError: If the UVWs differ by more than ``tolerance_m``
+    """
+    main_table = open_ms_tables.main_table
+    n_rows = min(sample_rows, main_table.nrows())
+    ant_1 = main_table.getcol("ANTENNA1", 0, n_rows)
+    ant_2 = main_table.getcol("ANTENNA2", 0, n_rows)
+    uvw = main_table.getcol("UVW", 0, n_rows)
+    times = main_table.getcol("TIME_CENTROID", 0, n_rows)
+    b_map = uvws_phase.baselines.b_map
+    time_map = uvws_phase.hour_angles.time_map
+    rows = [
+        i
+        for i in range(n_rows)
+        if ant_1[i] != ant_2[i] and (int(ant_1[i]), int(ant_2[i])) in b_map
+    ]
+    if not rows or not np.any(uvw[rows]):
+        logger.warning("The UVW column is empty, so the phase direction is not checked")
+        return
+
+    baseline_idx = [b_map[(int(ant_1[i]), int(ant_2[i]))] for i in rows]
+    time_idx = [time_map[times[i] * u.s] for i in rows]
+    computed = uvws_phase.uvws.to(u.m).value[:, baseline_idx, time_idx].T
+    difference = float(np.abs(computed - uvw[rows]).max())
+    if difference > tolerance_m:
+        msg = (
+            f"UVWs computed toward the phase direction "
+            f"{open_ms_tables.phase_dir.to_string('hmsdms')} differ from the UVW "
+            f"column by up to {difference:.3g} m. The FIELD table may not give the "
+            "phase centre of the data, as in ASKAP measurement sets that have not "
+            "been through fix_ms_dir (fixms), so predicted delays would be wrong."
+        )
+        raise PhaseDirMismatchError(msg)
+    logger.info(f"Phase direction matches the UVW column to {difference:.2g} m")
 
 
 def get_object_delay_for_ms(
@@ -273,6 +419,7 @@ def get_object_delay_for_ms(
     reverse_baselines: bool = False,
     flip_uvw_sign: bool = False,
     radial_fov: u.Quantity | None = None,
+    object_radii: Sequence[u.Quantity] | None = None,
 ) -> list[WDelays]:
     """Calculate the delay between the phase-direction in the measuurement and a set of object directions.
     The delay is calculated by computing the UVWs in both directions and examining the difference in the
@@ -285,6 +432,7 @@ def get_object_delay_for_ms(
         reverse_baselines (bool, optional): Whether the MS has antennas recorded as (ant1, ant2) or (ant2, ant1), where ant2 is always larger. Defaults to False.
         flip_uvw_sign (bool, optional): Indicates whether a sign slip needs to be introduced to the UVWs. Defaults to False.
         radial_fov (u.Quantity, optional): The radial angular size of the guard region of the main lobe that will be guarded in delay space. If None no guard boundaries are attached to the returned ``WDelays``.
+        object_radii (Sequence[u.Quantity] | None, optional): Angular radius of each object, in the order of ``object_name``. If None each takes ``default_object_radius``. Defaults to None.
 
     Returns:
         list[WDelays]: Description of the delay towards the nominated object. A list of objects will always be returned.
@@ -297,6 +445,7 @@ def get_object_delay_for_ms(
             reverse_baselines=reverse_baselines,
             flip_uvw_sign=flip_uvw_sign,
             radial_fov=radial_fov,
+            object_radii=object_radii,
         )
 
 
@@ -306,6 +455,8 @@ def get_object_delay(
     object_hour_angles: Sequence[tuple[str | SkyCoord, PositionHourAngles]],
     flip_uvw_sign: bool = False,
     radial_fov: u.Quantity | None = None,
+    uvws_phase: UVWs | None = None,
+    object_radii: Sequence[u.Quantity] | None = None,
 ) -> list[WDelays]:
     """Compute the w-derived delays between the phase direction and each object.
 
@@ -315,14 +466,18 @@ def get_object_delay(
         object_hour_angles (Sequence[tuple[str | SkyCoord, PositionHourAngles]]): The (name, hour angles) for each object
         flip_uvw_sign (bool, optional): Flip the sign of the UVWs. Defaults to False.
         radial_fov (u.Quantity | None, optional): Radial FoV for the guard region. Defaults to None.
+        uvws_phase (UVWs | None, optional): UVWs toward the phase direction, if already computed. Defaults to None.
+        object_radii (Sequence[u.Quantity] | None, optional): Angular radius of each object, in the order of ``object_hour_angles``. If None each takes ``default_object_radius``. Defaults to None.
 
     Returns:
         list[WDelays]: The delay towards each nominated object
     """
-    # Generate the two sets of uvw coordinate objects
-    uvws_phase = xyz_to_uvw(
-        baselines=baselines, hour_angles=hour_angles_phase, flip_uvw_sign=flip_uvw_sign
-    )
+    if uvws_phase is None:
+        uvws_phase = xyz_to_uvw(
+            baselines=baselines,
+            hour_angles=hour_angles_phase,
+            flip_uvw_sign=flip_uvw_sign,
+        )
 
     time_s = u.Quantity(hour_angles_phase.time_mjds, u.s).value
 
@@ -336,9 +491,10 @@ def get_object_delay(
             uvws=uvws_phase.uvws, time_s=time_s, radial_fov=radial_fov
         )
 
+    _check_object_radii([name for name, _ in object_hour_angles], object_radii)
     object_w_delays: list[WDelays] = []
 
-    for object_name, hour_angles_object in object_hour_angles:
+    for index, (object_name, hour_angles_object) in enumerate(object_hour_angles):
         uvws_object = xyz_to_uvw(
             baselines=baselines,
             hour_angles=hour_angles_object,
@@ -356,6 +512,22 @@ def get_object_delay(
             * u.dimensionless_unscaled
         )
 
+        if object_radii is None:
+            radius = default_object_radius(object_name)
+            source = "built-in" if radius > 0 else "a point, as none was given"
+        else:
+            radius = object_radii[index]
+            source = "given"
+        logger.info(
+            f"Radius of {object_name_to_str(object_name)}: {radius.to('deg'):.3g} ({source})"
+        )
+        object_extent = object_rate_extent = None
+        if radius > 0:
+            object_extent = projected_extent(uvws=uvws_object.uvws, radius=radius)
+            object_rate_extent = projected_rate_extent(
+                uvws=uvws_object.uvws, time_s=time_s, radius=radius
+            )
+
         w_delay = WDelays(
             object_name=object_name_to_str(object_name),
             w_delays=delay_for_object,
@@ -365,6 +537,9 @@ def get_object_delay(
             guard_region=guard_region,
             w_rates=rate_for_object,
             rate_guard_region=rate_guard_region,
+            object_radius=radius.to(u.deg),
+            object_extent=object_extent,
+            object_rate_extent=object_rate_extent,
         )
         logger.info(f"Have created for {w_delay.object_name}")
         object_w_delays.append(w_delay)
