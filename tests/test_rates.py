@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-from jolly_roger.deconvolve import rate_clean_segment
+from jolly_roger.deconvolve import _object_rate_bands, rate_clean_segment
 from jolly_roger.rates import (
     CandidateSegment,
     RateFilterPayload,
@@ -468,6 +469,29 @@ def test_rate_clean_not_separable() -> None:
     )
     result = _rate_clean(data, is_pad, time_s, geometry)
     assert result.outcome == SegmentOutcome.NOT_SEPARABLE
+
+
+def test_rate_bands_include_the_object_rate_extent() -> None:
+    """An extended object's band widens by its rate extent at each frequency,
+    and one wide enough to reach the field is not separable"""
+    *_, geometry, _, _ = _segment(n_candidates=120, n_pad=16)
+    duration_s = 152 * DT_S
+    (point,), _ = _object_rate_bands(geometry, FREQ_HZ, duration_s, 8.0, 4.0)
+    extended = replace(
+        geometry, object_rate_extent=np.full(geometry.object_rate.shape, 2e-12)
+    )
+    (disc,), separable = _object_rate_bands(extended, FREQ_HZ, duration_s, 0.0, 4.0)
+    (bare,), _ = _object_rate_bands(geometry, FREQ_HZ, duration_s, 0.0, 4.0)
+    assert separable
+    np.testing.assert_allclose(disc[1] - bare[1], 2e-12 * FREQ_HZ)
+    np.testing.assert_allclose(bare[0] - disc[0], 2e-12 * FREQ_HZ)
+
+    reaching = replace(
+        geometry, object_rate_extent=np.full(geometry.object_rate.shape, OBJECT_RATE)
+    )
+    _, separable = _object_rate_bands(reaching, FREQ_HZ, duration_s, 8.0, 4.0)
+    assert not separable
+    assert point[0].shape == FREQ_HZ.shape
 
 
 def test_rate_clean_with_random_flags() -> None:

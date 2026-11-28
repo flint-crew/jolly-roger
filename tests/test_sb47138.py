@@ -119,8 +119,8 @@ def test_sb47138_clean_rate_filter_recovers_rows(ms_sb47138_ak01_ak04: Path) -> 
         flagged = tab.getcol("FLAG").all(axis=(1, 2))
         with table(tab.getkeyword("HISTORY"), ack=False) as history:
             message = history.getcol("MESSAGE")[-1]
-    assert message.startswith("Delay-rate filter: recovered 679 rows")
-    assert flagged.sum() == 39
+    assert message.startswith("Delay-rate filter: recovered 686 rows")
+    assert flagged.sum() == 38
 
 
 @pytest.mark.parametrize("name", ["ms_sb47138", "ms_sb47138_ak01_ak04"])

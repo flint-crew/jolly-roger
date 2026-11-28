@@ -30,6 +30,7 @@ def test_tukey_options_keep_cli_fields():
     """Splitting the shared options out must not change the tukey CLI"""
     assert set(TukeyTractorOptions.model_fields) == {
         "target_objects",
+        "object_radius_deg",
         "outer_width_ns",
         "tukey_width_ns",
         "data_column",
