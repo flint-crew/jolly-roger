@@ -997,6 +997,8 @@ class TaperedChunkResult:
     """The scaled weights that should be written back to the MS. The key is the column name and the mapped values are the corresponding scaled weights. If None nothing to write back."""
     rate_payload: RateFilterPayload | None = None
     """Rows for delay-rate filtering. None unless rate filtering."""
+    overlap_rows: NDArray[np.bool_] | None = None
+    """Rows where the object reaches the field in delay, whether or not they are flagged. None if not checked."""
 
 
 def make_rate_filter_payload(
@@ -1005,13 +1007,13 @@ def make_rate_filter_payload(
     w_delays_list: list[WDelays],
     object_contaminated: list[NDArray[np.bool_]],
 ) -> RateFilterPayload:
-    """The rows of a chunk the delay notch flags, and which are candidate by delay-rate filtering
+    """The rows of a chunk flagged in delay, and which are candidates for delay-rate filtering
 
     Args:
         data_chunk (DataChunk): The chunk, before nulling
-        original_masked_data (np.ma.MaskedArray): The visibilities and flags before nulling
+        original_masked_data (np.ma.MaskedArray): The visibilities and flags the delay-rate filter starts from
         w_delays_list (list[WDelays]): The delays of each object to null
-        object_contaminated (list[NDArray[np.bool_]]): Rows each object's notch flags
+        object_contaminated (list[NDArray[np.bool_]]): Rows each object contaminates in delay
 
     Returns:
         RateFilterPayload: The rows, as needed by ``update_rate_filter``
@@ -1240,7 +1242,7 @@ class RateFilterOptions(BaseOptions):
     """Options for delay-rate filtering, shared by the tractors"""
 
     rate_filter: bool = False
-    """Recover rows flagged by the delay notch by filtering in delay-rate where the object is separable from the field"""
+    """Recover rows flagged in delay by filtering in delay-rate where the object is separable from the field"""
 
 
 class TukeyTractorOptions(TractorOptions, RateFilterOptions):

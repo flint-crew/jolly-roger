@@ -368,7 +368,7 @@ class SegmentFilterResult:
     data: NDArray[np.complexfloating[Any]] | None = None
     """Filtered visibilities, shape (row, chan, pol). None unless filtered."""
     recovered: NDArray[np.bool_] | None = None
-    """Candidates that passed the residual check"""
+    """Candidates that passed the filter's checks"""
     removed_fraction: NDArray[np.floating[Any]] | None = None
     """Fraction of the rate axis removed at each delay, shape (row, delay)"""
     removal: NDArray[np.floating[Any]] | None = None
@@ -888,7 +888,7 @@ def describe_rate_filter(run: RateFilterRun) -> str:
     doubly_contaminated_rows = run.accumulator.doubly_contaminated_rows
     return (
         f"Delay-rate filter: recovered {summary.recovered} rows; "
-        f"not recovered: {summary.rejected} failing the residual check, "
+        f"not recovered: {summary.rejected} rejected by the filter's checks, "
         f"{summary.too_short} in short segments, "
         f"{summary.not_separable + doubly_contaminated_rows} not separable in delay-rate"
     )

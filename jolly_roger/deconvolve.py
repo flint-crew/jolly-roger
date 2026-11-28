@@ -26,20 +26,27 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import ndimage, signal, stats
 
+from jolly_roger.baselines import OpenMSTables
 from jolly_roger.history import add_history, dataclass_to_app_params
 from jolly_roger.logging import logger
 from jolly_roger.rates import (
+    RateFilterRun,
+    RateFilterSettings,
     SegmentFilterResult,
     SegmentGeometry,
     SegmentOutcome,
+    describe_rate_filter,
+    make_rate_filter_run,
 )
 from jolly_roger.tractor import (
     DataChunk,
+    RateFilterOptions,
     TaperedChunkResult,
     TractorOptions,
     _get_baseline_time_indicies,
     get_plot_baselines,
     make_plot_results,
+    make_rate_filter_payload,
     prepare_tractor,
     read_baseline_flags,
     run_tractor_chunks,
@@ -628,7 +635,7 @@ def rate_clean_segment(
                 for row in np.flatnonzero(~is_pad)
                 if (
                     estimate := estimate_visibility_noise(
-                        data[row, :, pol], ~flags[row, :, pol]
+                        data[row, :, pol], (~flags[row, :, pol]).astype(float)
                     )
                 )
                 is not None
@@ -784,13 +791,12 @@ def compute_delay_clean(
 
     if statistics is not None:
         statistics.record(results, rows_flagged=int(rows_reaching_field.sum()))
-    if not flag_overlap:
-        rows_reaching_field[:] = False
-    elif rows_reaching_field.any():
+    if flag_overlap and rows_reaching_field.any():
         logger.info(
             f"Flagging {rows_reaching_field.sum()} of {number_of_rows} rows where the object reaches the field in delay"
         )
-    new_flags = flags | rows_reaching_field[:, None, None]
+    flagged = rows_reaching_field & flag_overlap
+    new_flags = flags | flagged[:, None, None]
 
     return TaperedChunkResult(
         chunk_size=data_chunk.chunk_size,
@@ -799,12 +805,13 @@ def compute_delay_clean(
         data_chunk=replace(
             data_chunk, masked_data=np.ma.masked_array(data, mask=new_flags)
         ),
-        update_flags=bool(rows_reaching_field.any()),
+        update_flags=bool(flagged.any()),
         flags=new_flags,
+        overlap_rows=rows_reaching_field,
     )
 
 
-class CleanTractorOptions(TractorOptions):
+class CleanTractorOptions(TractorOptions, RateFilterOptions):
     """Options for removing objects by CLEAN in delay"""
 
     field_delay_ns: float = 10.0
@@ -821,14 +828,15 @@ def _active_rows(
     data_chunk: DataChunk,
     w_delays_list: list[WDelays],
     clean_tractor_options: CleanTractorOptions,
-) -> tuple[NDArray[np.bool_], NDArray[np.floating]]:
-    """Rows where any object is above the elevation cut and within the allowed
-    Nyquist zone, and the field's delay range of each row in seconds"""
+) -> tuple[list[NDArray[np.bool_]], NDArray[np.floating]]:
+    """Cross-correlation rows where each object is above the elevation cut and
+    within the allowed Nyquist zone, and the field's delay range of each row in
+    seconds"""
     freq_hz = data_chunk.freq_chan.to("Hz").value
     half_period_s = 0.5 / abs(float(np.mean(np.diff(freq_hz))))
     cross = data_chunk.ant_1 != data_chunk.ant_2
 
-    active = np.zeros(len(data_chunk.ant_1), dtype=bool)
+    active = []
     field_delay_s = np.full(
         len(data_chunk.ant_1), clean_tractor_options.field_delay_ns * 1e-9
     )
@@ -843,14 +851,14 @@ def _active_rows(
             calculate_nyquist_zone(values=object_s, upper_limit=half_period_s)
             <= clean_tractor_options.ignore_nyquist_zone
         )
-        active |= above & in_zone
+        active.append(above & in_zone & cross)
         # The guard band depends only on the baseline, so is the same for every object
         if index == 0 and w_delays.guard_region is not None:
             field_delay_s = (
                 field_delay_s
                 + w_delays.guard_region[baseline_idx, time_idx].to("s").value
             )
-    return active & cross, field_delay_s
+    return active, field_delay_s
 
 
 def compute_clean_tractor(
@@ -871,29 +879,94 @@ def compute_clean_tractor(
     Returns:
         TaperedChunkResult: The cleaned visibilities and any new flags
     """
-    active, field_delay_s = _active_rows(
+    object_active, field_delay_s = _active_rows(
         data_chunk=data_chunk,
         w_delays_list=w_delays_list,
         clean_tractor_options=clean_tractor_options,
     )
+    active = np.logical_or.reduce(object_active)
     if not active.any():
-        return TaperedChunkResult(
+        result = TaperedChunkResult(
             chunk_size=data_chunk.chunk_size,
             nothing_to_do=True,
             data_chunk=data_chunk,
         )
-    return compute_delay_clean(
-        data_chunk=data_chunk,
-        field_delay_s=field_delay_s,
-        options=DelayCleanOptions(
-            mask_sigma=clean_tractor_options.mask_sigma,
-            threshold_sigma=clean_tractor_options.threshold_sigma,
-        ),
-        visibility_noise=clean_tractor_options.visibility_noise,
-        active_rows=active,
-        statistics=statistics,
-        flag_overlap=clean_tractor_options.flag_overlap,
+    else:
+        result = compute_delay_clean(
+            data_chunk=data_chunk,
+            field_delay_s=field_delay_s,
+            options=_clean_options(clean_tractor_options),
+            visibility_noise=clean_tractor_options.visibility_noise,
+            active_rows=active,
+            statistics=statistics,
+            flag_overlap=clean_tractor_options.flag_overlap,
+        )
+    if not clean_tractor_options.rate_filter:
+        return result
+    # The rate filter starts from the delay-cleaned rows with their original flags
+    assert result.data_chunk is not None
+    overlap = (
+        np.zeros(len(active), dtype=bool)
+        if result.overlap_rows is None
+        else result.overlap_rows
     )
+    return replace(
+        result,
+        rate_payload=make_rate_filter_payload(
+            data_chunk=data_chunk,
+            original_masked_data=np.ma.masked_array(
+                result.data_chunk.masked_data.data,
+                mask=np.ma.getmaskarray(data_chunk.masked_data),
+            ),
+            w_delays_list=w_delays_list,
+            object_contaminated=[overlap & rows for rows in object_active],
+        ),
+    )
+
+
+def _clean_options(clean_tractor_options: CleanTractorOptions) -> DelayCleanOptions:
+    return DelayCleanOptions(
+        mask_sigma=clean_tractor_options.mask_sigma,
+        threshold_sigma=clean_tractor_options.threshold_sigma,
+    )
+
+
+def make_clean_rate_filter(
+    open_ms_tables: OpenMSTables,
+    clean_tractor_options: CleanTractorOptions,
+    w_delays_list: list[WDelays],
+) -> RateFilterRun:
+    """Delay-rate filtering by CLEAN in fringe rate, with the delay CLEAN's settings
+
+    Args:
+        open_ms_tables (OpenMSTables): The open measurement set
+        clean_tractor_options (CleanTractorOptions): The CLEAN settings
+        w_delays_list (list[WDelays]): The delays of each object to null
+
+    Returns:
+        RateFilterRun: The state for ``run_tractor_chunks``
+    """
+    plot_dir = None
+    if clean_tractor_options.make_plots:
+        plot_dir = open_ms_tables.ms_path.parent / "plots"
+        plot_dir.mkdir(exist_ok=True, parents=True)
+    settings = RateFilterSettings(
+        w_delays_list=w_delays_list,
+        freq_hz=np.atleast_1d(
+            open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze()
+        ).astype(float),
+        segment_filter=partial(
+            rate_clean_segment,
+            options=_clean_options(clean_tractor_options),
+            visibility_noise=clean_tractor_options.visibility_noise,
+        ),
+        field_delay_s=clean_tractor_options.field_delay_ns * 1e-9,
+        elevation_cut_deg=clean_tractor_options.elevation_cut_deg,
+        ignore_nyquist_zone=clean_tractor_options.ignore_nyquist_zone,
+        plot_dir=plot_dir,
+        max_plots=clean_tractor_options.number_of_plots,
+    )
+    return make_rate_filter_run(settings=settings)
 
 
 def describe_clean_run(
@@ -1012,8 +1085,15 @@ def clean_tractor(
         else None
     )
     statistics: DelayCleanStatistics | None = None
+    rate_filter: RateFilterRun | None = None
     if not clean_tractor_options.dry_run:
         statistics = DelayCleanStatistics()
+        if clean_tractor_options.rate_filter:
+            rate_filter = make_clean_rate_filter(
+                open_ms_tables=open_ms_tables,
+                clean_tractor_options=clean_tractor_options,
+                w_delays_list=setup.w_delays_list,
+            )
         run_tractor_chunks(
             setup=setup,
             chunk_func=partial(
@@ -1023,6 +1103,7 @@ def clean_tractor(
                 statistics=statistics,
             ),
             tractor_options=clean_tractor_options,
+            rate_filter=rate_filter,
         )
 
     plot_paths: list[Path] | None = None
@@ -1034,6 +1115,7 @@ def clean_tractor(
             w_delays=setup.w_delays_list,
             outer_width_ns=clean_tractor_options.field_delay_ns,
             max_baselines=clean_tractor_options.number_of_plots,
+            delay_rate=clean_tractor_options.rate_filter,
             before_flags=before_flags,
         )
         logger.info(f"Made {len(plot_paths)} output plots")
@@ -1043,6 +1125,8 @@ def clean_tractor(
         band_edges = describe_band_edges(statistics)
         if band_edges is not None:
             messages.append(band_edges)
+        if rate_filter is not None:
+            messages.append(describe_rate_filter(rate_filter))
         for message in messages:
             logger.info(message)
         add_history(

@@ -616,9 +616,7 @@ def plot_rate_filter_segment(
                 color=f"C{index + 1}",
                 label=name,
             )
-        removal = (
-            None if result.removal is None else np.fft.fftshift(result.removal)
-        )
+        removal = None if result.removal is None else np.fft.fftshift(result.removal)
         if removal is not None and (removal > 0.5).any():
             ax.contour(
                 rate_mhz,
