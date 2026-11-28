@@ -487,7 +487,8 @@ def test_filter_segment_widens_the_track_by_the_object_extent() -> None:
     assert bare.removal is not None
     assert wide.removal is not None
     delays_removed = [
-        int((result.removal.max(axis=0) > 0.5).sum()) for result in (bare, wide)
+        int((removal.max(axis=0) > 0.5).sum())
+        for removal in (bare.removal, wide.removal)
     ]
     # 20 ns more either side, in 1/288 MHz delay bins
     assert delays_removed[1] - delays_removed[0] == pytest.approx(
