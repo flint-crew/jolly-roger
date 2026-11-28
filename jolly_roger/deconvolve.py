@@ -31,7 +31,6 @@ from jolly_roger.history import add_history, dataclass_to_app_params
 from jolly_roger.logging import logger
 from jolly_roger.rates import (
     RateFilterRun,
-    RateFilterSettings,
     SegmentFilterResult,
     SegmentGeometry,
     SegmentOutcome,
@@ -47,6 +46,7 @@ from jolly_roger.tractor import (
     get_plot_baselines,
     make_plot_results,
     make_rate_filter_payload,
+    make_rate_filter_settings,
     prepare_tractor,
     read_baseline_flags,
     run_tractor_chunks,
@@ -335,10 +335,6 @@ class SelectedClean:
 
     model: NDArray[np.complexfloating]
     """Model of the kept components at every sample, shaped as the series"""
-    components: NDArray[np.complexfloating]
-    """All CLEAN components on the conjugate axis, shape (series, axis)"""
-    threshold: NDArray[np.floating]
-    """CLEAN's stopping threshold on the conjugate axis for each series"""
     cleaned: NDArray[np.bool_]
     """Series that were CLEANed and converged"""
 
@@ -361,7 +357,7 @@ def clean_and_select(
         visibility_noise (float | NDArray[np.floating] | None, optional): Noise of one sample, per real or imaginary part, at unit weight, for all series or for each. If None it is estimated with ``estimate_visibility_noise``. Defaults to None.
 
     Returns:
-        SelectedClean: The model of the kept components, all components, the threshold, and which series were CLEANed
+        SelectedClean: The model of the kept components, and which series were CLEANed
     """
     options = options or DelayCleanOptions()
     values = np.asarray(values)
@@ -370,8 +366,6 @@ def clean_and_select(
     size = options.oversample * number_of_samples
     result = SelectedClean(
         model=np.zeros_like(values, dtype=complex),
-        components=np.zeros((number_of_series, size), dtype=complex),
-        threshold=np.full(number_of_series, np.inf),
         cleaned=np.zeros(number_of_series, dtype=bool),
     )
     if weights.sum() <= 0:
@@ -386,15 +380,13 @@ def clean_and_select(
     to_clean = np.flatnonzero(~np.isnan(noise))
     if to_clean.size == 0:
         return result
-    components, conjugate_noise, iterations = _clean_batch(
+    components, _, iterations = _clean_batch(
         values=values[to_clean], weights=weights, noise=noise[to_clean], options=options
     )
     keep = np.broadcast_to(keep, (number_of_series, size))[to_clean]
     result.model[to_clean] = _model_to_values(
         np.where(keep, components, 0), number_of_samples
     )
-    result.components[to_clean] = components
-    result.threshold[to_clean] = options.threshold_sigma * conjugate_noise
     result.cleaned[to_clean] = iterations < options.max_iter
     return result
 
@@ -565,7 +557,6 @@ def rate_clean_segment(
     visibility_noise: float | None = None,
     rate_margin_lobes: float = 8.0,
     min_margin_lobes: float = 4.0,
-    spill_lobes: float = 4.0,
 ) -> SegmentFilterResult:
     """Remove the objects from a baseline segment by CLEAN in fringe rate.
 
@@ -573,10 +564,7 @@ def rate_clean_segment(
     objects are separated by fringe rate alone and the objects' delay sidelobes
     never arise. Only components in each object's fringe-rate band are
     subtracted, evaluated at every row; the residual and everything else are
-    kept. A row is not recovered if CLEAN did not run or converge, or if
-    components just outside an object's band (the object varying faster than the
-    margin) exceed CLEAN's threshold and ``field_edge_fraction`` of the object
-    subtracted at that row.
+    kept. No row is recovered if CLEAN did not run or converge in any channel.
 
     Args:
         data (NDArray[np.complexfloating]): Visibilities, shape (row, chan, pol)
@@ -589,7 +577,6 @@ def rate_clean_segment(
         visibility_noise (float | None, optional): Noise of one visibility, per real or imaginary part. If None it is estimated from the rows' spectra. Defaults to None.
         rate_margin_lobes (float, optional): Widest margin around each object's band, in units of 1/T. Defaults to 8.0.
         min_margin_lobes (float, optional): Margin an object must clear the field by, in units of 1/T. Defaults to 4.0.
-        spill_lobes (float, optional): Width beyond each object's band checked for the object spilling out of it, in units of 1/T. Defaults to 4.0.
 
     Returns:
         SegmentFilterResult: The filtered visibilities and the rows recovered
@@ -611,23 +598,13 @@ def rate_clean_segment(
 
     rates_hz = delay_axis(n_rows, step_s, options.oversample)
     in_band = np.zeros((n_chan, len(rates_hz)), dtype=bool)
-    near_band = np.zeros_like(in_band)
-    spill_width_hz = spill_lobes / duration_s
-    field_rate_hz = (
-        float(np.max(geometry.field_rate)) * np.abs(freq_hz) + 1 / duration_s
-    )
     for low, high in bands:
         in_band |= (rates_hz[None, :] >= low[:, None]) & (
             rates_hz[None, :] <= high[:, None]
         )
-        near_band |= (rates_hz[None, :] >= (low - spill_width_hz)[:, None]) & (
-            rates_hz[None, :] <= (high + spill_width_hz)[:, None]
-        )
-    # Just outside the objects' bands, clear of the field
-    spill = near_band & ~in_band & (np.abs(rates_hz)[None, :] > field_rate_hz[:, None])
 
     model = np.zeros_like(data, dtype=complex)
-    rows_ok = np.ones(n_rows, dtype=bool)
+    converged = True
     for pol in range(n_pol):
         if visibility_noise is None:
             estimates = [
@@ -657,27 +634,12 @@ def rate_clean_segment(
                 visibility_noise=noise,
             )
             model[:, channels, pol] = selected.model.T
-            if not selected.cleaned.all():
-                rows_ok[:] = False
-                continue
-            # The object modelled just outside its band, above CLEAN's threshold
-            # and above a fraction of the object subtracted at that row, as
-            # CLEAN of a bright object leaves faint components beyond any band
-            spilled = np.abs(
-                _model_to_values(
-                    np.where(spill[channels], selected.components, 0), n_rows
-                )
-            )
-            floor = np.maximum(
-                selected.threshold[:, None],
-                options.field_edge_fraction * np.abs(selected.model),
-            )
-            rows_ok &= ~np.any(spilled > floor, axis=0)
+            converged &= bool(selected.cleaned.all())
 
     return SegmentFilterResult(
         outcome=SegmentOutcome.FILTERED,
         data=data - model,
-        recovered=~is_pad & rows_ok,
+        recovered=~is_pad & converged,
     )
 
 
@@ -946,27 +908,19 @@ def make_clean_rate_filter(
     Returns:
         RateFilterRun: The state for ``run_tractor_chunks``
     """
-    plot_dir = None
-    if clean_tractor_options.make_plots:
-        plot_dir = open_ms_tables.ms_path.parent / "plots"
-        plot_dir.mkdir(exist_ok=True, parents=True)
-    settings = RateFilterSettings(
-        w_delays_list=w_delays_list,
-        freq_hz=np.atleast_1d(
-            open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze()
-        ).astype(float),
-        segment_filter=partial(
-            rate_clean_segment,
-            options=_clean_options(clean_tractor_options),
-            visibility_noise=clean_tractor_options.visibility_noise,
-        ),
-        field_delay_s=clean_tractor_options.field_delay_ns * 1e-9,
-        elevation_cut_deg=clean_tractor_options.elevation_cut_deg,
-        ignore_nyquist_zone=clean_tractor_options.ignore_nyquist_zone,
-        plot_dir=plot_dir,
-        max_plots=clean_tractor_options.number_of_plots,
+    return make_rate_filter_run(
+        settings=make_rate_filter_settings(
+            open_ms_tables=open_ms_tables,
+            tractor_options=clean_tractor_options,
+            w_delays_list=w_delays_list,
+            segment_filter=partial(
+                rate_clean_segment,
+                options=_clean_options(clean_tractor_options),
+                visibility_noise=clean_tractor_options.visibility_noise,
+            ),
+            field_delay_s=clean_tractor_options.field_delay_ns * 1e-9,
+        )
     )
-    return make_rate_filter_run(settings=settings)
 
 
 def describe_clean_run(

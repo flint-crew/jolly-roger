@@ -53,13 +53,29 @@ def format_baseline_title(baseline_data: BaselineData) -> str:
     Returns:
         str: The title, e.g. ``ak01 - ak07 (Ant 0 - Ant 6), 1.23 km``
     """
-    ant_1, ant_2 = baseline_data.ant_1, baseline_data.ant_2
-    title = f"Ant {ant_1} - Ant {ant_2}"
-    if baseline_data.ant_1_name and baseline_data.ant_2_name:
-        title = f"{baseline_data.ant_1_name} - {baseline_data.ant_2_name} ({title})"
+    return baseline_title(
+        ant_1=baseline_data.ant_1,
+        ant_2=baseline_data.ant_2,
+        ant_1_name=baseline_data.ant_1_name,
+        ant_2_name=baseline_data.ant_2_name,
+        baseline_length=baseline_data.baseline_length,
+    )
 
-    if baseline_data.baseline_length is not None:
-        length = baseline_data.baseline_length.to("m")
+
+def baseline_title(
+    ant_1: int,
+    ant_2: int,
+    ant_1_name: str | None = None,
+    ant_2_name: str | None = None,
+    baseline_length: u.Quantity | None = None,
+) -> str:
+    """As ``format_baseline_title``, from the antennas and length directly"""
+    title = f"Ant {ant_1} - Ant {ant_2}"
+    if ant_1_name and ant_2_name:
+        title = f"{ant_1_name} - {ant_2_name} ({title})"
+
+    if baseline_length is not None:
+        length = baseline_length.to("m")
         length_str = (
             f"{length.to('km').value:.2f} km"
             if length >= 1 * u.km
@@ -541,6 +557,8 @@ def plot_rate_filter_segment(
     geometry: SegmentGeometry,
     freq_hz: NDArray[np.floating[Any]],
     output_path: Path,
+    antenna_names: list[str] | None = None,
+    antenna_positions_m: NDArray[np.floating[Any]] | None = None,
 ) -> Path:
     """A segment before and after delay-rate filtering, in fringe rate and
     delay, with each object's path, the field's box and any region removed
@@ -551,6 +569,8 @@ def plot_rate_filter_segment(
         geometry (SegmentGeometry): The objects' and field's delays and rates
         freq_hz (NDArray[np.floating[Any]]): Frequency of each channel, in Hz
         output_path (Path): Where to save the figure
+        antenna_names (list[str] | None, optional): The ANTENNA table NAME column, for the title. Defaults to None.
+        antenna_positions_m (NDArray[np.floating[Any]] | None, optional): The ANTENNA table POSITION column, in m, for the baseline length in the title. Defaults to None.
 
     Returns:
         Path: The saved figure
@@ -633,8 +653,21 @@ def plot_rate_filter_segment(
     axes[0].legend(loc="upper right", fontsize="small")
     fig.colorbar(im, ax=axes, label="Stokes I Amplitude / Jy")
     recovered = 0 if result.recovered is None else int(result.recovered.sum())
+    ant_1, ant_2 = segment.ant_1, segment.ant_2
+    title = baseline_title(
+        ant_1=ant_1,
+        ant_2=ant_2,
+        ant_1_name=None if antenna_names is None else antenna_names[ant_1].strip(),
+        ant_2_name=None if antenna_names is None else antenna_names[ant_2].strip(),
+        baseline_length=None
+        if antenna_positions_m is None
+        else float(
+            np.linalg.norm(antenna_positions_m[ant_1] - antenna_positions_m[ant_2])
+        )
+        * u.m,
+    )
     fig.suptitle(
-        f"Ant {segment.ant_1} - Ant {segment.ant_2}, rows {segment.rows[0]}-{segment.rows[-1]}: "
+        f"{title}, rows {segment.rows[0]}-{segment.rows[-1]}: "
         f"{recovered} of {segment.n_candidates} candidates recovered"
     )
     fig.savefig(output_path)

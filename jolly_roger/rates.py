@@ -715,6 +715,10 @@ class RateFilterSettings:
     """Clean rows either side of a segment"""
     plot_dir: Path | None = None
     """Where to save segment plots. None for no plots."""
+    antenna_names: list[str] | None = None
+    """The ANTENNA table NAME column, for plot titles"""
+    antenna_positions_m: NDArray[np.floating[Any]] | None = None
+    """The ANTENNA table POSITION column, in m, for plot titles"""
     max_plots: int = 10
     """The most segments to plot"""
 
@@ -832,6 +836,8 @@ def filter_candidate_segment(
             result=result,
             geometry=geometry,
             freq_hz=settings.freq_hz,
+            antenna_names=settings.antenna_names,
+            antenna_positions_m=settings.antenna_positions_m,
             output_path=settings.plot_dir
             / f"rate_filter_{segment.ant_1}_{segment.ant_2}_{segment.rows[0]}.png",
         )
