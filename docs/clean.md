@@ -21,11 +21,29 @@ clean_example.ipynb
 - Each visibility spectrum is transformed to delay with an FFT. The delay spread function (the delay spectrum of a point source) is the FFT of the channel weights, so flagged channels are accounted for exactly.
 - A Hogbom CLEAN (`rm_lite.utils.clean.minor_loop_batch`) runs over the whole delay axis. Its mask starts at the brightest emission and grows into connected emission above the noise, so the object's size, structure and spectrum need not be known.
 - CLEAN runs in rm-lite's compiled loop over batches of spectra that share a flag pattern, so `--max-workers` threads scale.
-- Only components outside the field's delay range are subtracted, so the field is not modified. The subtracted model is evaluated in every channel, including flagged ones.
-- Rows where the subtracted emission runs into the field's delay range are flagged, because there the object and field cannot be separated.
+- Only components within each object's delay band, and outside the field's delay range, are subtracted. Other emission, such as other sources or RFI outside the field, is left as it is. The subtracted model is evaluated in every channel, including flagged ones.
+- Each object's band is its predicted delay ± (the extent of its disc + D/c + 3/bandwidth):
+  - The disc's extent is θ·|(u, v)|/c, with θ the object's angular radius and (u, v) toward the object.
+  - D/c covers the spread an object picks up from the frequency-dependent primary beam, seen through its sidelobes. D is the dish diameter: `--dish-diameter-m`, else the largest DISH_DIAMETER. On ASKAP data the Sun's spread is mostly this, ±40 ns, rather than its disc.
+  - The last term covers CLEAN's spread of an object between delay samples.
+- Each object's radius is set with `--object-radius-deg`, one per `--target-objects` entry, in the same order. By default the Sun is 0.5° (the radio Sun, including the quiet-Sun corona near 1 GHz), the Moon 0.27°, and any other object a point. From Python, set `object_radius_deg` on `CleanTractorOptions`, or pass `object_radii` to `get_object_delay_from_tables`.
+- Rows where an object's band meets the field's delay range are flagged, because there the object and field cannot be separated.
 - The noise sets the CLEAN mask and threshold. Unless it is given, it is estimated from each spectrum by `estimate_visibility_noise`: each long run of unflagged channels is windowed and transformed to delay, and a low quantile of the delay amplitudes is compared with the Rayleigh distribution of noise. Emission only raises the estimate, so it errs high (by about 20% next to an object 10^4 times brighter than the noise).
 - Only rows where an object in `--target-objects` is above the elevation cut are cleaned. The field's delay range on each baseline is `--field-delay-ns` plus the guard band, which is sized from the field of view. The guard band is on by default for both `tukey` and `clean`; `--no-guard-field` turns it off.
-- The run is summarised in the log and the measurement set's HISTORY table: how many spectra were cleaned and rows flagged; how bright a spectral line in the field must be before it is partly subtracted; and the residual left at the band edges compared with mid-band.
+- The run is summarised in the log and the measurement set's HISTORY table:
+  - each object's radius, and how many spectra were cleaned and rows flagged;
+  - the effect on spectral lines (below);
+  - the residual left at the band edges compared with mid-band.
+
+## Spectral lines
+
+A narrow spectral line in the field spreads over all delays. It loses the part of that spread that is subtracted. Take a Gaussian line of peak S and FWHM δν, a noise σ per channel, N channels of width Δν, and κ = √(π / 4 ln 2) = 1.06:
+
+- **Below the CLEAN mask the line is untouched.** CLEAN only reaches a line once its delay spectrum, κ S n / N for a line n channels wide, exceeds the mask, `--mask-sigma` times σ/√N. That happens when S/σ > `mask_sigma`·√N/(κ n), which is about 80/n for 288 channels.
+- **Brighter lines lose the part of their delay spread inside an object's band** of half-width W at delay τ: a fraction κ δν 2W exp(−(π δν τ)² / 4 ln 2) of the peak, or 2W Δν for a line narrower than a channel. This is the same as for the notch (see [Delay nulling](nulling.md)), and is reported for each object, from the geometry of each baseline.
+- **Subtracting everything outside the field, as `clean` did before, removes most of a bright line:** erfc(π δν τ_f / 2√ln 2), or 1 − 2 τ_f Δν for a line narrower than a channel, with τ_f the field's half-width. That is up to 94% for ±30 ns and 1 MHz channels.
+- **`--protect-mhz LOW HIGH [LOW HIGH ...]` leaves known lines out of CLEAN altogether.** Those frequency ranges get zero weight, so lines there lose nothing, while the objects are still subtracted from them.
+- **The rate step is safe for lines.** A line from the field is steady in time, so it is at the field's fringe rate.
 
 ## Recovering flagged rows with fringe-rate CLEAN
 

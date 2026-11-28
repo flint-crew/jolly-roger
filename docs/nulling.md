@@ -32,6 +32,8 @@ The `outer_width` parameter defines a boundary beyond which the window is all 0.
 
 If the `--taper-towards-object` argument is used the tukey taper is inverted to behave like a notch filter. So a smaller `outer_width` will _preserve_ more data. See the below figure.
 
+The notch's width is set by `outer_width` alone. `--object-radius-deg`, which sizes each object's band for `clean`, does not change it.
+
 ![Tukey Parameterisation - inverted](images/example_inverted_tukey.png)
 
 
