@@ -19,16 +19,20 @@ from jolly_roger.deconvolve import (
     DelayCleanOptions,
     DelayCleanStatistics,
     MissingCleanDependencyError,
+    _object_band_mask,
     clean_tractor,
     compute_clean_tractor,
     compute_delay_clean,
+    delay_axis,
     delay_clean_spectra,
     delay_clean_spectrum,
     describe_band_edges,
     describe_clean_line_limit,
     describe_clean_run,
     estimate_visibility_noise,
+    protected_channel_mask,
 )
+from jolly_roger.lines import KAPPA
 from jolly_roger.tractor import DataChunk, cli, get_parser
 from jolly_roger.uvws import WDelays
 
@@ -512,8 +516,8 @@ def test_statistics_and_descriptions() -> None:
     assert "8 channels at each end of the band" in band_edges
     assert describe_band_edges(DelayCleanStatistics()) is None
 
-    # 3 sqrt(288) / 1.06 = 48
-    assert "48/n times the noise" in describe_clean_line_limit(288, 3.0)
+    # mask_sigma sqrt(288) / 1.06 = 80 for mask_sigma = 5
+    assert "80/n times the noise" in describe_clean_line_limit(288, 5.0)
 
 
 def test_statistics_count_spectra_without_a_noise_estimate() -> None:
@@ -625,3 +629,163 @@ def test_cli_runs_clean(monkeypatch: pytest.MonkeyPatch) -> None:
     ms_path, options = calls[0]
     assert ms_path == Path("example.ms")
     assert options.mask_sigma == 6
+
+
+def _line(peak: float, fwhm_channels: float, channel: int = 64) -> NDArray[np.floating]:
+    """A Gaussian spectral line from a source at the phase centre"""
+    return peak * np.exp(
+        -4 * np.log(2) * ((np.arange(N_CHAN) - channel) / fwhm_channels) ** 2
+    )
+
+
+def _line_loss(
+    object_delay_s: float | None, half_width_s: float, fwhm_channels: float
+) -> float:
+    """Fraction of a bright line's peak subtracted along with a point object at
+    150 ns, with only the object's band subtracted, or everything outside the
+    field if ``object_delay_s`` is None"""
+    peak = 1e4 * SIGMA
+    point = 100 * _fringe(150e-9)
+    (result,) = delay_clean_spectra(
+        values=(_line(peak, fwhm_channels) + point + _noise(3))[None],
+        weights=np.ones(N_CHAN),
+        channel_width_hz=CHANNEL_WIDTH_HZ,
+        field_delay_s=FIELD_DELAY_S,
+        options=DelayCleanOptions(object_margin_resolutions=0.0),
+        visibility_noise=SIGMA,
+        object_delay_s=None if object_delay_s is None else np.array([[object_delay_s]]),
+        object_extent_s=np.array([[half_width_s]]),
+    )
+    return float(np.real(result.model[64] - point[64]) / peak)
+
+
+def test_line_loss_matches_the_analytic_form() -> None:
+    """A bright line in the field loses kappa dnu 2W exp(-(pi dnu tau)^2 / 4 ln 2)
+    to an object band of half-width W at delay tau, 2 W dnu when it is narrower
+    than a channel; subtracting everything outside the field it loses
+    1 - 2 tau_f dnu"""
+    half_width_s = 20e-9
+    assert _line_loss(150e-9, half_width_s, 0.5) == pytest.approx(
+        2 * half_width_s * CHANNEL_WIDTH_HZ, rel=0.2
+    )
+    dnu = 3 * CHANNEL_WIDTH_HZ
+    expected = (
+        KAPPA
+        * dnu
+        * 2
+        * half_width_s
+        * np.exp(-((np.pi * dnu * 150e-9) ** 2) / (4 * np.log(2)))
+    )
+    assert _line_loss(150e-9, half_width_s, 3) == pytest.approx(expected, abs=0.01)
+    assert _line_loss(None, 0.0, 0.5) == pytest.approx(
+        1 - 2 * FIELD_DELAY_S * CHANNEL_WIDTH_HZ, rel=0.05
+    )
+
+
+def test_object_band_wraps_and_skips_inactive_objects() -> None:
+    period_s = 1 / CHANNEL_WIDTH_HZ
+    delays_s = delay_axis(N_CHAN, CHANNEL_WIDTH_HZ, 4)
+    keep, meets_field = _object_band_mask(
+        delays_s=delays_s,
+        # Object 1 is one period away (a later Nyquist zone); object 2 is inactive
+        object_delay_s=np.array([[150e-9, np.nan], [150e-9 + period_s, np.nan]]),
+        object_halfwidth_s=np.full((2, 2), 20e-9),
+        field_delay_s=np.full(2, FIELD_DELAY_S),
+        period_s=period_s,
+    )
+    np.testing.assert_array_equal(keep[0], keep[1])
+    np.testing.assert_array_equal(keep[0], np.abs(delays_s - 150e-9) <= 20e-9)
+    assert not meets_field.any()
+
+    _, meets_field = _object_band_mask(
+        delays_s=delays_s,
+        object_delay_s=np.array([[45e-9]]),
+        object_halfwidth_s=np.array([[20e-9]]),
+        field_delay_s=np.array([FIELD_DELAY_S]),
+        period_s=period_s,
+    )
+    assert meets_field.all()
+
+
+def test_compute_clean_tractor_subtracts_only_the_object_band() -> None:
+    """Emission outside the field but away from the object is kept, and the
+    band widens by the primary beam's D / c"""
+    data_chunk = _chunk([150e-9])
+    other = 3 * _fringe(-200e-9)
+    data_chunk.masked_data.data[0] += other[:, None]
+    w_delays = _w_delays(150e-9, n_rows=1, elevation_deg=[20.0])
+    options = CleanTractorOptions(
+        field_delay_ns=FIELD_DELAY_S * 1e9, visibility_noise=SIGMA
+    )
+
+    result = compute_clean_tractor(
+        data_chunk=data_chunk,
+        clean_tractor_options=options,
+        w_delays_list=[w_delays],
+        # The object is 40 ns across with a 25 ns ripple in its spectrum, which
+        # the band must cover as it would a real object's beam-induced spread
+        beam_delay_s=80e-9,
+    )
+
+    assert result.data_chunk is not None
+    cleaned = result.data_chunk.masked_data
+    expected = _field() + _noise(0) + other
+    good = ~cleaned.mask[0, :, 0]
+    assert (
+        np.median(np.abs((cleaned.data[0, :, 0] - expected)[good])) < 3 * NOISE_MEDIAN
+    )
+
+
+def test_protected_channels_keep_a_line() -> None:
+    np.testing.assert_array_equal(
+        protected_channel_mask(FREQ_HZ, (1210.0, 1214.0)),
+        (FREQ_HZ >= 1210e6) & (FREQ_HZ <= 1214e6),
+    )
+    assert protected_channel_mask(FREQ_HZ, None) is None
+    with pytest.raises(ValueError, match="pairs"):
+        protected_channel_mask(FREQ_HZ, (1210.0,))
+
+    line = _line(1e4 * SIGMA, 1)
+    data_chunk = _chunk([150e-9])
+    data_chunk.masked_data.data[0] += line[:, None]
+    protected = protected_channel_mask(
+        FREQ_HZ, (FREQ_HZ[62] * 1e-6, FREQ_HZ[66] * 1e-6)
+    )
+    result = compute_delay_clean(
+        data_chunk=data_chunk,
+        field_delay_s=FIELD_DELAY_S,
+        visibility_noise=SIGMA,
+        object_delay_s=np.array([[150e-9]]),
+        object_extent_s=np.array([[60e-9]]),
+        protected_channels=protected,
+    )
+
+    assert result.data_chunk is not None
+    cleaned = result.data_chunk.masked_data.data[0, :, 0]
+    expected = _field() + _noise(0) + line
+    # The line is kept to the noise; the object is still removed beneath it
+    assert abs(cleaned[64] - expected[64]) < 10 * SIGMA
+
+
+def test_clean_line_options() -> None:
+    args = get_parser().parse_args(
+        [
+            "clean",
+            "example.ms",
+            "--target-objects",
+            "sun",
+            "Cyg A",
+            "--object-radius-deg",
+            "0.5",
+            "0.05",
+            "--protect-mhz",
+            "1420",
+            "1421",
+        ]
+    )
+    options = create_options_from_parser(
+        parser_namespace=args, options_class=CleanTractorOptions
+    )
+    assert options.target_objects == ("sun", "Cyg A")
+    assert options.object_radius_deg == (0.5, 0.05)
+    assert options.protect_mhz == (1420.0, 1421.0)

@@ -71,6 +71,31 @@ def test_summarise_line_impact_fraction_and_empty() -> None:
     assert "No visibilities were modified" in describe_line_impact("sun", empty)
 
 
+def test_summarise_line_impact_with_a_width_per_visibility() -> None:
+    """With a width for each visibility, as clean's bands give, each loss scales
+    with its own width and the unresolved loss with the widest"""
+    summary = summarise_line_impact(
+        delay_separation_s=np.array([100e-9, 1e-6]),
+        effective_width_s=np.array([10e-9, 200e-9]),
+        channel_width_hz=1e6,
+        reference_frequency_hz=1e9,
+    )
+    same = summarise_line_impact(
+        delay_separation_s=np.array([100e-9]),
+        effective_width_s=10e-9,
+        channel_width_hz=1e6,
+        reference_frequency_hz=1e9,
+    )
+    wide = summarise_line_impact(
+        delay_separation_s=np.array([1e-6]),
+        effective_width_s=200e-9,
+        channel_width_hz=1e6,
+        reference_frequency_hz=1e9,
+    )
+    assert summary.worst_loss == pytest.approx(max(same.worst_loss, wide.worst_loss))
+    assert summary.unresolved_loss == pytest.approx(200e-9 * 1e6)
+
+
 def test_describe_line_impact() -> None:
     """The description names the object and quotes widths in frequency and velocity"""
     summary = summarise_line_impact(
