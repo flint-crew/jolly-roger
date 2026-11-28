@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -368,7 +368,7 @@ class SegmentFilterResult:
     data: NDArray[np.complexfloating[Any]] | None = None
     """Filtered visibilities, shape (row, chan, pol). None unless filtered."""
     recovered: NDArray[np.bool_] | None = None
-    """Candidates that passed the residual check"""
+    """Candidates that passed the filter's checks"""
     removed_fraction: NDArray[np.floating[Any]] | None = None
     """Fraction of the rate axis removed at each delay, shape (row, delay)"""
     removal: NDArray[np.floating[Any]] | None = None
@@ -680,18 +680,31 @@ class RateFilterSummary:
     plotted: int = 0
 
 
+class SegmentFilter(Protocol):
+    """Removes the objects from one baseline segment, as ``filter_segment`` does"""
+
+    def __call__(
+        self,
+        *,
+        data: NDArray[np.complexfloating[Any]],
+        flags: NDArray[np.bool_],
+        is_pad: NDArray[np.bool_],
+        time_s: NDArray[np.floating[Any]],
+        freq_hz: NDArray[np.floating[Any]],
+        geometry: SegmentGeometry,
+    ) -> SegmentFilterResult: ...
+
+
 @dataclass(frozen=True)
 class RateFilterSettings:
-    """What delay-rate filtering needs to know of the notch and the objects"""
+    """What delay-rate filtering needs to know of the filter and the objects"""
 
     w_delays_list: list[WDelays]
     """The delays of each object to null"""
     freq_hz: NDArray[np.floating[Any]]
     """Frequency of each channel, in Hz"""
-    delay_width_s: float
-    """Half-width removed around each object's delay track, in seconds"""
-    delay_roll_off_s: float
-    """Roll-off in delay, in seconds"""
+    segment_filter: SegmentFilter
+    """Removes the objects from each segment, e.g. ``filter_segment`` with its delay widths bound"""
     field_delay_s: float
     """Half-width of the field's delays before the guard band, in seconds"""
     elevation_cut_deg: float
@@ -702,6 +715,10 @@ class RateFilterSettings:
     """Clean rows either side of a segment"""
     plot_dir: Path | None = None
     """Where to save segment plots. None for no plots."""
+    antenna_names: list[str] | None = None
+    """The ANTENNA table NAME column, for plot titles"""
+    antenna_positions_m: NDArray[np.floating[Any]] | None = None
+    """The ANTENNA table POSITION column, in m, for plot titles"""
     max_plots: int = 10
     """The most segments to plot"""
 
@@ -794,16 +811,13 @@ def filter_candidate_segment(
     """
     n_candidates = segment.n_candidates
     geometry = segment_geometry(segment, settings)
-    result = filter_segment(
+    result = settings.segment_filter(
         data=np.array(segment.data),
         flags=np.array(segment.mask),
         is_pad=np.array(segment.is_pad),
         time_s=np.array(segment.time_mjds),
         freq_hz=settings.freq_hz,
         geometry=geometry,
-        delay_width_s=settings.delay_width_s,
-        delay_roll_off_s=settings.delay_roll_off_s,
-        roll_off_rows=settings.pad_timesteps,
     )
     if result.outcome == SegmentOutcome.TOO_SHORT:
         summary.too_short += n_candidates
@@ -813,7 +827,6 @@ def filter_candidate_segment(
         return None
     assert result.data is not None
     assert result.recovered is not None
-    assert result.removed_fraction is not None
 
     if settings.plot_dir is not None and summary.plotted < settings.max_plots:
         from jolly_roger.plots import plot_rate_filter_segment  # noqa: PLC0415
@@ -823,6 +836,8 @@ def filter_candidate_segment(
             result=result,
             geometry=geometry,
             freq_hz=settings.freq_hz,
+            antenna_names=settings.antenna_names,
+            antenna_positions_m=settings.antenna_positions_m,
             output_path=settings.plot_dir
             / f"rate_filter_{segment.ant_1}_{segment.ant_2}_{segment.rows[0]}.png",
         )
@@ -835,7 +850,7 @@ def filter_candidate_segment(
         return None
 
     weights = None
-    if segment.weights is not None:
+    if segment.weights is not None and result.removed_fraction is not None:
         weights = scale_multiple_weights(
             taper=1.0 - result.removed_fraction[recovered][..., None],
             weights={
@@ -879,7 +894,7 @@ def describe_rate_filter(run: RateFilterRun) -> str:
     doubly_contaminated_rows = run.accumulator.doubly_contaminated_rows
     return (
         f"Delay-rate filter: recovered {summary.recovered} rows; "
-        f"not recovered: {summary.rejected} failing the residual check, "
+        f"not recovered: {summary.rejected} rejected by the filter's checks, "
         f"{summary.too_short} in short segments, "
         f"{summary.not_separable + doubly_contaminated_rows} not separable in delay-rate"
     )

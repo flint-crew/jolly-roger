@@ -23,6 +23,7 @@ from tqdm.auto import tqdm
 from jolly_roger.baselines import (
     BaselineData,
     OpenMSTables,
+    _get_antenna_names,
     beam_fraction_to_radius,
     get_baseline_data,
     get_open_ms_tables,
@@ -41,7 +42,9 @@ from jolly_roger.rates import (
     RateFilterRun,
     RateFilterSettings,
     RowUpdate,
+    SegmentFilter,
     describe_rate_filter,
+    filter_segment,
     flush_rate_filter,
     make_rate_filter_run,
     needed_duration_s,
@@ -996,6 +999,8 @@ class TaperedChunkResult:
     """The scaled weights that should be written back to the MS. The key is the column name and the mapped values are the corresponding scaled weights. If None nothing to write back."""
     rate_payload: RateFilterPayload | None = None
     """Rows for delay-rate filtering. None unless rate filtering."""
+    overlap_rows: NDArray[np.bool_] | None = None
+    """Rows where the object reaches the field in delay, whether or not they are flagged. None if not checked."""
 
 
 def make_rate_filter_payload(
@@ -1004,13 +1009,13 @@ def make_rate_filter_payload(
     w_delays_list: list[WDelays],
     object_contaminated: list[NDArray[np.bool_]],
 ) -> RateFilterPayload:
-    """The rows of a chunk the delay notch flags, and which are candidate by delay-rate filtering
+    """The rows of a chunk flagged in delay, and which are candidates for delay-rate filtering
 
     Args:
         data_chunk (DataChunk): The chunk, before nulling
-        original_masked_data (np.ma.MaskedArray): The visibilities and flags before nulling
+        original_masked_data (np.ma.MaskedArray): The visibilities and flags the delay-rate filter starts from
         w_delays_list (list[WDelays]): The delays of each object to null
-        object_contaminated (list[NDArray[np.bool_]]): Rows each object's notch flags
+        object_contaminated (list[NDArray[np.bool_]]): Rows each object contaminates in delay
 
     Returns:
         RateFilterPayload: The rows, as needed by ``update_rate_filter``
@@ -1239,7 +1244,7 @@ class RateFilterOptions(BaseOptions):
     """Options for delay-rate filtering, shared by the tractors"""
 
     rate_filter: bool = False
-    """Recover rows flagged by the delay notch by filtering in delay-rate where the object is separable from the field"""
+    """Recover rows flagged in delay by filtering in delay-rate where the object is separable from the field"""
 
 
 class TukeyTractorOptions(TractorOptions, RateFilterOptions):
@@ -1537,24 +1542,64 @@ def make_tukey_rate_filter(
             .value
             + outer_width_s
         )
+    pad_timesteps = 16
+    return make_rate_filter_run(
+        settings=make_rate_filter_settings(
+            open_ms_tables=open_ms_tables,
+            tractor_options=tukey_tractor_options,
+            w_delays_list=w_delays_list,
+            segment_filter=partial(
+                filter_segment,
+                delay_width_s=delay_width_s,
+                delay_roll_off_s=tukey_tractor_options.tukey_width_ns * 1e-9,
+                roll_off_rows=pad_timesteps,
+            ),
+            field_delay_s=outer_width_s,
+            pad_timesteps=pad_timesteps,
+        )
+    )
+
+
+def make_rate_filter_settings(
+    open_ms_tables: OpenMSTables,
+    tractor_options: TractorOptions,
+    w_delays_list: list[WDelays],
+    segment_filter: SegmentFilter,
+    field_delay_s: float,
+    pad_timesteps: int = 16,
+) -> RateFilterSettings:
+    """Delay-rate filter settings shared by the tractors
+
+    Args:
+        open_ms_tables (OpenMSTables): The open measurement set
+        tractor_options (TractorOptions): The elevation cut, Nyquist zone and plot settings
+        w_delays_list (list[WDelays]): The delays of each object to null
+        segment_filter (SegmentFilter): Removes the objects from each segment
+        field_delay_s (float): Half-width of the field's delays before the guard band, in seconds
+        pad_timesteps (int, optional): Clean rows either side of a segment. Defaults to 16.
+
+    Returns:
+        RateFilterSettings: The settings for ``make_rate_filter_run``
+    """
     plot_dir = None
-    if tukey_tractor_options.make_plots:
+    if tractor_options.make_plots:
         plot_dir = open_ms_tables.ms_path.parent / "plots"
         plot_dir.mkdir(exist_ok=True, parents=True)
-    settings = RateFilterSettings(
+    return RateFilterSettings(
         w_delays_list=w_delays_list,
         freq_hz=np.atleast_1d(
             open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze()
         ).astype(float),
-        delay_width_s=delay_width_s,
-        delay_roll_off_s=tukey_tractor_options.tukey_width_ns * 1e-9,
-        field_delay_s=outer_width_s,
-        elevation_cut_deg=tukey_tractor_options.elevation_cut_deg,
-        ignore_nyquist_zone=tukey_tractor_options.ignore_nyquist_zone,
+        segment_filter=segment_filter,
+        field_delay_s=field_delay_s,
+        elevation_cut_deg=tractor_options.elevation_cut_deg,
+        ignore_nyquist_zone=tractor_options.ignore_nyquist_zone,
+        pad_timesteps=pad_timesteps,
         plot_dir=plot_dir,
-        max_plots=tukey_tractor_options.number_of_plots,
+        max_plots=tractor_options.number_of_plots,
+        antenna_names=_get_antenna_names(open_ms_tables.antenna_table),
+        antenna_positions_m=open_ms_tables.antenna_table.getcol("POSITION"),
     )
-    return make_rate_filter_run(settings=settings)
 
 
 def tukey_tractor(

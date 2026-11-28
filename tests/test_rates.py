@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import astropy.units as u
 import numpy as np
+import pytest
 from numpy.typing import NDArray
 
+from jolly_roger.deconvolve import rate_clean_segment
 from jolly_roger.rates import (
     CandidateSegment,
     RateFilterPayload,
@@ -414,6 +417,73 @@ def test_filter_segment_with_interior_flags() -> None:
     assert np.all(left[recovered] < 2 * reference[recovered] + 1)
 
 
+def _rate_clean(data, is_pad, time_s, geometry, flags=None) -> SegmentFilterResult:
+    return rate_clean_segment(
+        data=data,
+        flags=np.zeros(data.shape, bool) if flags is None else flags,
+        is_pad=is_pad,
+        time_s=time_s,
+        freq_hz=FREQ_HZ,
+        geometry=geometry,
+        visibility_noise=0.1,
+    )
+
+
+def _rms(values: NDArray[np.complexfloating[Any]]) -> float:
+    return float(np.sqrt(np.mean(np.abs(values) ** 2)))
+
+
+@pytest.mark.parametrize("object_amplitude", [1.0, 100.0, 1000.0])
+def test_rate_clean_removes_object(object_amplitude: float) -> None:
+    """Every candidate is recovered, the end rows included, and what is left of
+    the object is at the noise (0.1 per part, 0.14 in amplitude)"""
+    data, is_pad, time_s, geometry, _, field = _segment(
+        n_candidates=120, n_pad=16, object_amplitude=object_amplitude
+    )
+    result = _rate_clean(data, is_pad, time_s, geometry)
+    assert result.outcome == SegmentOutcome.FILTERED
+    assert result.recovered is not None
+    assert result.data is not None
+    assert np.array_equal(result.recovered, ~is_pad)
+    left = result.data[..., 0] - field
+    assert _rms(left[~is_pad]) < 0.17
+    candidates = np.flatnonzero(~is_pad)
+    assert _rms(left[candidates[:8]]) < 0.2
+    assert _rms(left[candidates[-8:]]) < 0.2
+
+
+def test_rate_clean_keeps_field() -> None:
+    """With no object present the field is unchanged"""
+    data, is_pad, time_s, geometry, _, field = _segment(
+        n_candidates=120, n_pad=16, object_amplitude=0.0, noise=0.0
+    )
+    result = _rate_clean(data, is_pad, time_s, geometry)
+    assert result.data is not None
+    np.testing.assert_allclose(result.data[..., 0], field, atol=1e-6)
+
+
+def test_rate_clean_not_separable() -> None:
+    data, is_pad, time_s, geometry, *_ = _segment(
+        n_candidates=120, n_pad=16, object_rate=1e-13
+    )
+    result = _rate_clean(data, is_pad, time_s, geometry)
+    assert result.outcome == SegmentOutcome.NOT_SEPARABLE
+
+
+def test_rate_clean_with_random_flags() -> None:
+    """Each channel's own time weights give it its own response, so scattered
+    flags leave no more of the object behind"""
+    data, is_pad, time_s, geometry, _, field = _segment(n_candidates=120, n_pad=16)
+    flags = np.random.default_rng(1).random(data.shape) < 0.05
+    data[flags] = 1e6
+    result = _rate_clean(data, is_pad, time_s, geometry, flags=flags)
+    assert result.recovered is not None
+    assert result.data is not None
+    assert np.array_equal(result.recovered, ~is_pad)
+    left = (result.data[..., 0] - field)[~flags[..., 0] & ~is_pad[:, None]]
+    assert _rms(left) < 0.17
+
+
 def test_tukey_rate_filter_recovers_flagged_rows(tmp_path: Path) -> None:
     """Chunks from the delay notch, fed to the rate filter in row order,
     recover some of the rows the notch flags"""
@@ -438,8 +508,12 @@ def test_tukey_rate_filter_recovers_flagged_rows(tmp_path: Path) -> None:
         settings=RateFilterSettings(
             w_delays_list=[w_delays],
             freq_hz=FREQ_HZ,
-            delay_width_s=options.outer_width_ns * 1e-9,
-            delay_roll_off_s=options.tukey_width_ns * 1e-9,
+            segment_filter=partial(
+                filter_segment,
+                delay_width_s=options.outer_width_ns * 1e-9,
+                delay_roll_off_s=options.tukey_width_ns * 1e-9,
+                roll_off_rows=16,
+            ),
             field_delay_s=options.outer_width_ns * 1e-9,
             elevation_cut_deg=options.elevation_cut_deg,
             ignore_nyquist_zone=options.ignore_nyquist_zone,

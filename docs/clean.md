@@ -27,6 +27,14 @@ clean_example.ipynb
 - Only rows where an object in `--target-objects` is above the elevation cut are cleaned. The field's delay range on each baseline is `--field-delay-ns` plus the guard band, which is sized from the field of view. The guard band is on by default for both `tukey` and `clean`; `--no-guard-field` turns it off.
 - The run is summarised in the log and the measurement set's HISTORY table: how many spectra were cleaned and rows flagged; how bright a spectral line in the field must be before it is partly subtracted; and the residual left at the band edges compared with mid-band.
 
+## Recovering flagged rows with fringe-rate CLEAN
+
+`jolly_tractor clean --rate-filter` recovers rows that `clean` flags because the object reaches the field in delay, provided the object is separated from the field in fringe rate. Runs of flagged rows are collected into segments as for the notch's [delay-rate filtering](nulling.md).
+
+- Each channel and polarisation of a segment is CLEANed along time, from the delay-cleaned rows. The response is the FFT of that channel's time weights, so flags are accounted for exactly.
+- Only components in each object's predicted fringe-rate band are subtracted, widened by up to 8/T (T is the segment length) but never into the field's. The residual, the field and everything else are left as they are, and weights are not changed.
+- A segment is not filtered if an object is within 4/T of the field in fringe rate, and no row is recovered if CLEAN does not converge in any channel.
+
 ## Performance
 
 CLEAN costs about 100 times the notch. Throughput in spectra (one row and polarisation) per second, for 288 channels with two bright objects outside the field, on 4 cores:

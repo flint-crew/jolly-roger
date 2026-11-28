@@ -106,6 +106,23 @@ def test_sb47138_rate_filter_recovers_rows(ms_sb47138_ak01_ak04: Path) -> None:
     assert not np.allclose(before[~flagged], after[~flagged])
 
 
+def test_sb47138_clean_rate_filter_recovers_rows(ms_sb47138_ak01_ak04: Path) -> None:
+    """As for the notch, CLEAN in fringe rate recovers most of the rows where
+    the Sun reaches the field in delay"""
+    clean_tractor(
+        ms_path=ms_sb47138_ak01_ak04,
+        clean_tractor_options=CleanTractorOptions(
+            output_column="CLEANED_DATA", elevation_cut_deg=-1.0, rate_filter=True
+        ),
+    )
+    with table(str(ms_sb47138_ak01_ak04), ack=False) as tab:
+        flagged = tab.getcol("FLAG").all(axis=(1, 2))
+        with table(tab.getkeyword("HISTORY"), ack=False) as history:
+            message = history.getcol("MESSAGE")[-1]
+    assert message.startswith("Delay-rate filter: recovered 679 rows")
+    assert flagged.sum() == 39
+
+
 @pytest.mark.parametrize("name", ["ms_sb47138", "ms_sb47138_ak01_ak04"])
 def test_sb47138_field_matches_uvw(name: str, request: pytest.FixtureRequest) -> None:
     """FIELD PHASE_DIR is the direction the data and UVWs are phased to (beam 6,
