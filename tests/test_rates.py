@@ -471,6 +471,30 @@ def test_rate_clean_not_separable() -> None:
     assert result.outcome == SegmentOutcome.NOT_SEPARABLE
 
 
+def test_filter_segment_widens_the_track_by_the_object_extent() -> None:
+    """The region removed around an object's delay track grows by its half-width"""
+    data, is_pad, time_s, geometry, *_ = _segment(n_candidates=60, n_pad=16)
+    bare = _filter(data, is_pad, time_s, geometry)
+    wide = _filter(
+        data,
+        is_pad,
+        time_s,
+        replace(
+            geometry,
+            object_delay_extent=np.full(geometry.object_delay_s.shape, 20e-9),
+        ),
+    )
+    assert bare.removal is not None
+    assert wide.removal is not None
+    delays_removed = [
+        int((result.removal.max(axis=0) > 0.5).sum()) for result in (bare, wide)
+    ]
+    # 20 ns more either side, in 1/288 MHz delay bins
+    assert delays_removed[1] - delays_removed[0] == pytest.approx(
+        2 * 20e-9 * 288e6, abs=2
+    )
+
+
 def test_rate_bands_include_the_object_rate_extent() -> None:
     """An extended object's band widens by its rate extent at each frequency,
     and one wide enough to reach the field is not separable"""

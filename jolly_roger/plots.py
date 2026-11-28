@@ -26,7 +26,7 @@ from jolly_roger.baselines import BaselineData
 from jolly_roger.delays import data_to_delay_rate
 from jolly_roger.logging import logger
 from jolly_roger.rates import segment_spectrum
-from jolly_roger.uvws import WDelays, get_w_rates
+from jolly_roger.uvws import WDelays, get_w_rates, object_half_width_s
 from jolly_roger.wrap import (
     axis_half_period,
     calculate_wrapped_data,
@@ -125,6 +125,7 @@ def plot_baseline_comparison_data(
     w_delays: WDelays | list[WDelays] | None = None,
     outer_width_ns: float | None = None,
     delay_rate: bool = False,
+    beam_delay_s: float = 0.0,
 ) -> Path:
     """Make a comparison figure showing the before and after the nulling process,
     including an examination spectral axis and the formed delay spectrum.
@@ -140,6 +141,7 @@ def plot_baseline_comparison_data(
         w_delays (WDelays | list[WDelays] | None, optional): Delays corresponding to objects that have been nulled. Defaults to None.
         outer_width_ns (float | None, optional): The taper size. Defaults to None.
         delay_rate (bool, optional): Add a row in fringe rate and delay, with the path of each object and the field's guard region. Defaults to False.
+        beam_delay_s (float, optional): Spread in delay from the primary beam, D / c, which with each object's disc widens the lines drawn either side of it. Defaults to 0.0.
 
     Returns:
         Path: Path to the saved figure
@@ -317,9 +319,16 @@ def plot_baseline_comparison_data(
                     )
 
                 if outer_width_ns is not None:
+                    notch_ns = (
+                        outer_width_ns
+                        + object_half_width_s(
+                            _w_delays, b_idx, slice(None), beam_delay_s
+                        )
+                        * 1e9
+                    )
                     for s, sign in enumerate((1, -1)):
                         wrapped_outer_data = calculate_wrapped_data(
-                            values=wrapped_data.values + outer_width_ns * sign,
+                            values=wrapped_data.values + notch_ns * sign,
                             upper_limit=np.max(after_delays.delay.to("ns")).value,
                         )
                         # for _zone_idx, end_idx in enumerate(transitions):
@@ -332,7 +341,7 @@ def plot_baseline_comparison_data(
                                 ls=":",
                                 color=color_str,
                                 lw=2,
-                                label="outer_width"
+                                label="Notch"
                                 if _zone_idx == 0 and s == 0 and _object_idx == 0
                                 else None,
                             )

@@ -1317,6 +1317,7 @@ def clean_tractor(
             max_baselines=clean_tractor_options.number_of_plots,
             delay_rate=clean_tractor_options.rate_filter,
             before_flags=before_flags,
+            beam_delay_s=beam_delay_s,
         )
         logger.info(f"Made {len(plot_paths)} output plots")
 

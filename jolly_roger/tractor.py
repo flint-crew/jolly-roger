@@ -511,6 +511,7 @@ def make_plot_results(
     max_baselines: int = 10,
     delay_rate: bool = False,
     before_flags: dict[tuple[int, int], NDArray[np.bool_]] | None = None,
+    beam_delay_s: float = 0.0,
 ) -> list[Path]:
     """Create plots useful for diagnostics
 
@@ -524,6 +525,7 @@ def make_plot_results(
         max_baselines (int, optional): The maximum number of baseline plots to create. Defaults to 10.
         delay_rate (bool, optional): Add a row in fringe rate and delay to each baseline's plot. Defaults to False.
         before_flags (dict[tuple[int, int], NDArray[np.bool_]] | None, optional): Flags of each baseline before the run, from ``read_baseline_flags``, for the 'before' data. If None the current flags are used. Defaults to None.
+        beam_delay_s (float, optional): Spread in delay from the primary beam, D / c, which with each object's disc widens the notch drawn. Defaults to 0.0.
 
     Returns:
         list[Path]: Collection of paths to use
@@ -594,6 +596,7 @@ def make_plot_results(
             w_delays=w_delays,
             outer_width_ns=outer_width_ns,
             delay_rate=delay_rate,
+            beam_delay_s=beam_delay_s,
         )
         logger.info(f"Have written {output_path=}")
         output_paths.append(plot_path)
@@ -1213,7 +1216,7 @@ class TractorOptions(BaseOptions):
     target_objects: tuple[str, ...] = ("sun",)
     """The target object to apply the delay towards."""
     object_radius_deg: tuple[float, ...] | None = None
-    """Angular radius of each target object in degrees, in the order of target_objects. If None the Sun is 0.5 deg, the Moon 0.27 deg and anything else a point. Used by clean; tukey's notch width is set by outer_width_ns."""
+    """Angular radius of each target object in degrees, in the order of target_objects. If None the Sun is 0.5 deg, the Moon 0.27 deg and anything else a point. Each object's disc, plus the primary beam's spread (D/c), widens tukey's notch beyond outer_width_ns and sets clean's band."""
     data_column: str = "DATA"
     """The visibility column to modify"""
     output_column: str = "CORRECTED_DATA"
@@ -1754,6 +1757,7 @@ def tukey_tractor(
             max_baselines=tukey_tractor_options.number_of_plots,
             delay_rate=tukey_tractor_options.rate_filter,
             before_flags=before_flags,
+            beam_delay_s=setup.beam_delay_s,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
