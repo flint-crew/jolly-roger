@@ -100,8 +100,8 @@ def test_sb47138_rate_filter_recovers_rows(ms_sb47138_ak01_ak04: Path) -> None:
         before, after = tab.getcol("DATA"), tab.getcol("NULLED_DATA")
         with table(tab.getkeyword("HISTORY"), ack=False) as history:
             message = history.getcol("MESSAGE")[-1]
-    assert message.startswith("Delay-rate filter: recovered 678 rows")
-    assert flagged.sum() == 46
+    assert message.startswith("Delay-rate filter: recovered 672 rows")
+    assert flagged.sum() == 52
     # Recovered rows are changed, rows before sunrise are not
     assert not np.allclose(before[~flagged], after[~flagged])
 

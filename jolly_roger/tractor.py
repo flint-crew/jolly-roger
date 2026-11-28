@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import astropy.units as u
 import numpy as np
+from astropy.constants import c as speed_of_light
 from astropy.coordinates import (
     SkyCoord,
 )
@@ -63,7 +64,11 @@ from jolly_roger.tapering.tukey import (
     summarise_tukey_kernel,
 )
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
-from jolly_roger.uvws import WDelays, get_object_delay_from_tables
+from jolly_roger.uvws import (
+    WDelays,
+    get_object_delay_from_tables,
+    object_half_width_s,
+)
 from jolly_roger.weights import scale_multiple_weights, select_weight_columns
 from jolly_roger.wrap import (
     axis_half_period,
@@ -506,6 +511,7 @@ def make_plot_results(
     max_baselines: int = 10,
     delay_rate: bool = False,
     before_flags: dict[tuple[int, int], NDArray[np.bool_]] | None = None,
+    beam_delay_s: float = 0.0,
 ) -> list[Path]:
     """Create plots useful for diagnostics
 
@@ -519,6 +525,7 @@ def make_plot_results(
         max_baselines (int, optional): The maximum number of baseline plots to create. Defaults to 10.
         delay_rate (bool, optional): Add a row in fringe rate and delay to each baseline's plot. Defaults to False.
         before_flags (dict[tuple[int, int], NDArray[np.bool_]] | None, optional): Flags of each baseline before the run, from ``read_baseline_flags``, for the 'before' data. If None the current flags are used. Defaults to None.
+        beam_delay_s (float, optional): Spread in delay from the primary beam, D / c, which with each object's disc widens the notch drawn. Defaults to 0.0.
 
     Returns:
         list[Path]: Collection of paths to use
@@ -589,6 +596,7 @@ def make_plot_results(
             w_delays=w_delays,
             outer_width_ns=outer_width_ns,
             delay_rate=delay_rate,
+            beam_delay_s=beam_delay_s,
         )
         logger.info(f"Have written {output_path=}")
         output_paths.append(plot_path)
@@ -699,6 +707,7 @@ def compute_tukey_taper(
     w_delays: WDelays,
     delay_time: DelayTime | None = None,
     sidelobe_offset: u.Quantity | None = None,
+    beam_delay_s: float = 0.0,
 ) -> TaperResult:
     """Compute a tukey taper for a dataset and then apply it
     to the dataset. Here the data corresponds to a (chan, time, pol)
@@ -715,6 +724,7 @@ def compute_tukey_taper(
         w_delays (WDelays): The w-derived delays to apply.
         delay_time (DelayTime | None, optional): Optional pre-computed DelayTime object.
         sidelobe_offset (u.Quantity | None, optional): If provided, the tukey taper will be offset by this amount in delay space in order to target specific sidelobes of the response. Defaults to None.
+        beam_delay_s (float, optional): Spread in delay of the object seen through the primary beam, D / c. The notch's half-width is ``outer_width_ns`` plus the object's disc extent plus this. Defaults to 0.0.
 
     Returns:
         TaperResult: Scaled complex visibilities, corresponding flags, and delays.
@@ -755,10 +765,16 @@ def compute_tukey_taper(
         upper_limit=axis_half_period(delay_time.delay.to("s").value),
     )
 
+    # The notch covers the object's disc and its spread through the primary
+    # beam, plus outer_width_ns, on each row
+    notch_half_width_s = tukey_tractor_options.outer_width_ns * 1e-9 + (
+        object_half_width_s(w_delays, baseline_idx, time_idx, beam_delay_s)
+    )
+
     # Make taper with all units in seconds
     taper = get_2d_taper(
         x=delay_time.delay.to("s").value,
-        outer_width=tukey_tractor_options.outer_width_ns * 1e-9,
+        outer_width=notch_half_width_s,
         tukey_width=tukey_tractor_options.tukey_width_ns * 1e-9,
         tukey_offset=tukey_x_offset_sec,
     )
@@ -883,10 +899,7 @@ def compute_tukey_taper(
         upper_limit=axis_half_period(delay_time.delay.to("s").value),
     )
     intersecting_taper = (
-        (
-            np.abs(object_delay_s)
-            < tukey_tractor_options.outer_width_ns * 1e-9 + field_outer_width
-        )
+        (np.abs(object_delay_s) < notch_half_width_s + field_outer_width)
         & ~ignore_wrapping_for
         & ~elevation_mask[time_idx]
     )
@@ -1060,6 +1073,7 @@ def compute_tukey_multi_taper(
     data_chunk: DataChunk,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays_list: list[WDelays],
+    beam_delay_s: float = 0.0,
 ) -> TaperedChunkResult:
     chunk_size = data_chunk.chunk_size
     original_masked_data = data_chunk.masked_data
@@ -1078,6 +1092,7 @@ def compute_tukey_multi_taper(
             tukey_tractor_options=tukey_tractor_options,
             w_delays=w_delays,
             delay_time=delay_time,
+            beam_delay_s=beam_delay_s,
         )
         # An object that is skipped (e.g. below the elevation cut) has no
         # delay_time, and should not discard the one formed for an earlier object
@@ -1106,6 +1121,7 @@ def compute_tukey_multi_taper(
                     w_delays=w_delays,
                     delay_time=delay_time,
                     sidelobe_offset=sidelobe_offset * sign,
+                    beam_delay_s=beam_delay_s,
                 )
                 if taper_result.delay_time is not None:
                     delay_time = taper_result.delay_time
@@ -1200,7 +1216,7 @@ class TractorOptions(BaseOptions):
     target_objects: tuple[str, ...] = ("sun",)
     """The target object to apply the delay towards."""
     object_radius_deg: tuple[float, ...] | None = None
-    """Angular radius of each target object in degrees, in the order of target_objects. If None the Sun is 0.5 deg, the Moon 0.27 deg and anything else a point. Used by clean; tukey's notch width is set by outer_width_ns."""
+    """Angular radius of each target object in degrees, in the order of target_objects. If None the Sun is 0.5 deg, the Moon 0.27 deg and anything else a point. Each object's disc, plus the primary beam's spread (D/c), widens tukey's notch beyond outer_width_ns and sets clean's band."""
     data_column: str = "DATA"
     """The visibility column to modify"""
     output_column: str = "CORRECTED_DATA"
@@ -1363,11 +1379,32 @@ def report_tukey_kernel(
     return summary
 
 
+def describe_object_widths(w_delays_list: list[WDelays], beam_delay_s: float) -> str:
+    """A plain description of how much each object widens its notch, for logs
+    and the HISTORY table"""
+    parts = []
+    for w_delays in w_delays_list:
+        half_width_s = object_half_width_s(
+            w_delays, slice(None), slice(None), beam_delay_s
+        )
+        parts.append(
+            f"{w_delays.object_name} (radius {w_delays.object_radius.to_value('deg'):.3g} deg): "
+            f"{np.min(half_width_s) * 1e9:.3g} to {np.max(half_width_s) * 1e9:.3g} ns"
+        )
+    return (
+        "Each notch is widened either side by its object's half-width in delay, "
+        f"its disc plus {beam_delay_s * 1e9:.3g} ns for the primary beam (D/c): "
+        + "; ".join(parts)
+        + "."
+    )
+
+
 def report_line_impact(
     open_ms_tables: OpenMSTables,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays_list: list[WDelays],
     kernel_summary: TukeyKernelSummary,
+    beam_delay_s: float = 0.0,
 ) -> dict[str, LineImpactSummary]:
     """Predict, from geometry alone, the largest effect on spectral lines of
     nulling each object, and log it.
@@ -1383,6 +1420,7 @@ def report_line_impact(
         tukey_tractor_options (TukeyTractorOptions): The final (e.g. auto-sized) taper options
         w_delays_list (list[WDelays]): The delays of each nulled object
         kernel_summary (TukeyKernelSummary): The notch's equivalent kernel
+        beam_delay_s (float, optional): Spread in delay from the primary beam, D / c, which widens each notch with the object's disc. Defaults to 0.0.
 
     Returns:
         dict[str, LineImpactSummary]: The summary for each object, keyed by name
@@ -1403,6 +1441,7 @@ def report_line_impact(
 
     active: list[NDArray[np.bool_]] = []
     nearest_notch_s: list[NDArray[np.floating[Any]]] = []
+    half_widths_s: list[NDArray[np.floating[Any]]] = []
     flagged: NDArray[np.bool_] | None = None
     for w_delays in w_delays_list:
         object_s = w_delays.w_delays.to("s").value
@@ -1426,22 +1465,30 @@ def report_line_impact(
             )
         )
         is_active = above & in_zone
+        half_width_s = object_half_width_s(
+            w_delays, slice(None), slice(None), beam_delay_s
+        )
         # Matches compute_tukey_taper: a notch reaching the field's protected
         # region flags the visibility instead of filtering it
-        meets_field = np.any(notches_s < 2 * outer_s + guard_s[None, ...], axis=0)
+        meets_field = np.any(
+            notches_s < 2 * outer_s + (half_width_s + guard_s)[None, ...], axis=0
+        )
         flagged_here = is_active & meets_field
         flagged = flagged_here if flagged is None else flagged | flagged_here
         active.append(is_active)
         nearest_notch_s.append(np.min(notches_s, axis=0))
+        half_widths_s.append(half_width_s)
 
     summaries: dict[str, LineImpactSummary] = {}
-    for w_delays, is_active, nearest_s in zip(
-        w_delays_list, active, nearest_notch_s, strict=True
+    for w_delays, is_active, nearest_s, half_width_s in zip(
+        w_delays_list, active, nearest_notch_s, half_widths_s, strict=True
     ):
         modified = is_active if flagged is None else is_active & ~flagged
         summary = summarise_line_impact(
             delay_separation_s=nearest_s[modified],
-            effective_width_s=kernel_summary.effective_width_s,
+            # Each notch is widened by the object's half-width either side
+            effective_width_s=kernel_summary.effective_width_s
+            + 2 * half_width_s[modified],
             channel_width_hz=channel_width_hz,
             reference_frequency_hz=float(np.mean(freq_chan)),
             number_of_notches=kernel_summary.number_of_notches,
@@ -1521,6 +1568,7 @@ def make_tukey_rate_filter(
     open_ms_tables: OpenMSTables,
     tukey_tractor_options: TukeyTractorOptions,
     w_delays_list: list[WDelays],
+    beam_delay_s: float = 0.0,
 ) -> RateFilterRun:
     """Delay-rate filter with the notch's delay widths, covering any nulled sidelobes
 
@@ -1528,6 +1576,7 @@ def make_tukey_rate_filter(
         open_ms_tables (OpenMSTables): The open measurement set
         tukey_tractor_options (TukeyTractorOptions): The notch settings, after any auto-sizing
         w_delays_list (list[WDelays]): The delays of each object to null
+        beam_delay_s (float, optional): Spread in delay from the primary beam, D / c, added to each object's half-width. Defaults to 0.0.
 
     Returns:
         RateFilterRun: The state for ``run_tractor_chunks``
@@ -1557,6 +1606,7 @@ def make_tukey_rate_filter(
             ),
             field_delay_s=outer_width_s,
             pad_timesteps=pad_timesteps,
+            beam_delay_s=beam_delay_s,
         )
     )
 
@@ -1568,6 +1618,7 @@ def make_rate_filter_settings(
     segment_filter: SegmentFilter,
     field_delay_s: float,
     pad_timesteps: int = 16,
+    beam_delay_s: float = 0.0,
 ) -> RateFilterSettings:
     """Delay-rate filter settings shared by the tractors
 
@@ -1578,6 +1629,7 @@ def make_rate_filter_settings(
         segment_filter (SegmentFilter): Removes the objects from each segment
         field_delay_s (float): Half-width of the field's delays before the guard band, in seconds
         pad_timesteps (int, optional): Clean rows either side of a segment. Defaults to 16.
+        beam_delay_s (float, optional): Spread in delay from the primary beam, D / c, added to each object's half-width. Defaults to 0.0.
 
     Returns:
         RateFilterSettings: The settings for ``make_rate_filter_run``
@@ -1600,6 +1652,7 @@ def make_rate_filter_settings(
         max_plots=tractor_options.number_of_plots,
         antenna_names=_get_antenna_names(open_ms_tables.antenna_table),
         antenna_positions_m=open_ms_tables.antenna_table.getcol("POSITION"),
+        beam_delay_s=beam_delay_s,
     )
 
 
@@ -1655,7 +1708,10 @@ def tukey_tractor(
         tukey_tractor_options=tukey_tractor_options,
         w_delays_list=w_delays_list,
         kernel_summary=kernel_summary,
+        beam_delay_s=setup.beam_delay_s,
     )
+    widths_message = describe_object_widths(w_delays_list, setup.beam_delay_s)
+    logger.info(widths_message)
 
     before_flags = (
         read_baseline_flags(
@@ -1672,11 +1728,13 @@ def tukey_tractor(
                 open_ms_tables=open_ms_tables,
                 tukey_tractor_options=tukey_tractor_options,
                 w_delays_list=w_delays_list,
+                beam_delay_s=setup.beam_delay_s,
             )
         partial_compute_func = partial(
             compute_tukey_multi_taper,
             tukey_tractor_options=tukey_tractor_options,
             w_delays_list=w_delays_list,
+            beam_delay_s=setup.beam_delay_s,
         )
         run_tractor_chunks(
             setup=setup,
@@ -1699,6 +1757,7 @@ def tukey_tractor(
             max_baselines=tukey_tractor_options.number_of_plots,
             delay_rate=tukey_tractor_options.rate_filter,
             before_flags=before_flags,
+            beam_delay_s=setup.beam_delay_s,
         )
 
         logger.info(f"Made {len(plot_paths)} output plots")
@@ -1710,6 +1769,7 @@ def tukey_tractor(
             ms_path=open_ms_tables.ms_path,
             messages=[
                 describe_tukey_kernel(kernel_summary),
+                widths_message,
                 *(
                     describe_line_impact(name, summary)
                     for name, summary in line_impacts.items()
@@ -1743,6 +1803,8 @@ class TractorSetup:
     """Whether every chunk has to be written, e.g. a new and empty output column"""
     dish_diameter_m: float | None = None
     """The dish diameter, in m, from --dish-diameter-m or the largest DISH_DIAMETER. None if unknown."""
+    beam_delay_s: float = 0.0
+    """Spread in delay of an object seen through the primary beam, D / c, added to each object's half-width. Zero if the dish diameter is unknown."""
 
 
 def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSetup:
@@ -1813,14 +1875,26 @@ def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSe
             copy_column_data=tractor_options.copy_column_data,
         )
 
+    dish_diameter_m = get_dish_diameter(
+        open_ms_tables.antenna_table, tractor_options.dish_diameter_m
+    )
+    beam_delay_s = 0.0
+    if dish_diameter_m is None:
+        logger.warning(
+            "The dish diameter is unknown, so each object's width in delay leaves out "
+            "the spread from the primary beam (D/c) and may be too narrow. Set "
+            "--dish-diameter-m."
+        )
+    else:
+        beam_delay_s = dish_diameter_m / speed_of_light.to_value("m/s")
+
     return TractorSetup(
         open_ms_tables=open_ms_tables,
         w_delays_list=w_delays_list,
         weight_columns=weight_columns,
         write_back_required=write_back_required,
-        dish_diameter_m=get_dish_diameter(
-            open_ms_tables.antenna_table, tractor_options.dish_diameter_m
-        ),
+        dish_diameter_m=dish_diameter_m,
+        beam_delay_s=beam_delay_s,
     )
 
 

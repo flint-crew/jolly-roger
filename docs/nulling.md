@@ -32,7 +32,11 @@ The `outer_width` parameter defines a boundary beyond which the window is all 0.
 
 If the `--taper-towards-object` argument is used the tukey taper is inverted to behave like a notch filter. So a smaller `outer_width` will _preserve_ more data. See the below figure.
 
-The notch's width is set by `outer_width` alone. `--object-radius-deg`, which sizes each object's band for `clean`, does not change it.
+Around each object the notch is widened by the object's half-width in delay, on each baseline and time:
+- **The object's disc:** θ·|(u, v)|/c, with θ its angular radius from `--object-radius-deg`. By default the Sun is 0.5°, the Moon 0.27°, and any other object a point.
+- **The primary beam's spread, D/c:** an object far outside the main lobe is seen through the beam's frequency-dependent sidelobes, which spread it over about D/c in delay. D is the dish diameter: `--dish-diameter-m`, else the largest DISH_DIAMETER. That is 40 ns for ASKAP's 12 m dishes; without this term the notch leaves most of the Sun on ASKAP data.
+
+So the notch fully removes outer_width − tukey_width + the half-width either side of the object's delay. The run's log and HISTORY give each object's half-width. The same width sets `clean`'s band (see [Delay CLEAN](clean.md)).
 
 ![Tukey Parameterisation - inverted](images/example_inverted_tukey.png)
 

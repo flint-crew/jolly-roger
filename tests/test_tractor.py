@@ -515,9 +515,11 @@ def test_tractor_reports_kernel_and_history(ms_example) -> None:
     assert results.line_impacts is not None
     assert list(results.line_impacts) == ["sun"]
     after = _history_rows(ms_example)
-    assert len(after) == len(before) + 2
-    assert all(row["ORIGIN"] == "jolly_tractor tukey" for row in after[-2:])
-    assert after[-2]["MESSAGE"].startswith("Delay notch: removes about 10 ns")
+    assert len(after) == len(before) + 3
+    assert all(row["ORIGIN"] == "jolly_tractor tukey" for row in after[-3:])
+    assert after[-3]["MESSAGE"].startswith("Delay notch: removes about 10 ns")
+    assert after[-2]["MESSAGE"].startswith("Each notch is widened")
+    assert "sun (radius 0.5 deg)" in after[-2]["MESSAGE"]
     assert after[-1]["MESSAGE"].startswith("Spectral-line impact of nulling sun")
 
 
@@ -653,6 +655,48 @@ def test_notch_flags_overlap_with_the_field_independent_of_delay_bins() -> None:
     assert result.delay_contaminated.tolist() == [True, False]
 
 
+def test_notch_is_widened_by_the_object_half_width() -> None:
+    """The notch removes outer width + disc extent + D/c either side of the
+    object, and meets the field by that wider notch"""
+    n_time = 2
+    chunk = replace(
+        _make_data_chunk(n_time=n_time, n_chan=40),
+        freq_chan=np.linspace(1.0, 1.195, 40) * u.GHz,
+    )
+    w_delays = replace(
+        _make_w_delays(n_time=n_time),
+        w_delays=np.array([[60e-9, 40e-9]]) * u.s,
+        guard_region=np.full((1, n_time), 3e-9) * u.s,
+        object_extent=np.full((1, n_time), 5e-9) * u.s,
+    )
+    options = TukeyTractorOptions(outer_width_ns=10, tukey_width_ns=5)
+    narrow = compute_tukey_taper(
+        data_chunk=chunk, tukey_tractor_options=options, w_delays=w_delays
+    )
+    wide = compute_tukey_taper(
+        data_chunk=chunk,
+        tukey_tractor_options=options,
+        w_delays=w_delays,
+        beam_delay_s=20e-9,
+    )
+
+    removed = {}
+    for name, result in (("narrow", narrow), ("wide", wide)):
+        assert result.taper is not None
+        assert result.delay_time is not None
+        delays_s = result.delay_time.delay.to_value(u.s)
+        removed[name] = delays_s[result.taper[0, :, 0] < 1e-6]
+    # Fully removed out to outer - roll-off + extent (+ D/c) from the object at 60 ns
+    assert np.abs(removed["narrow"] - 60e-9).max() == pytest.approx(10e-9, abs=1e-12)
+    assert np.abs(removed["wide"] - 60e-9).max() == pytest.approx(30e-9, abs=1e-12)
+    # At 40 ns, the notch (10 + 5 ns) clears the field (10 + 3 ns); with
+    # 20 ns of D/c it meets it
+    assert narrow.delay_contaminated is not None
+    assert wide.delay_contaminated is not None
+    assert narrow.delay_contaminated.tolist() == [False, False]
+    assert wide.delay_contaminated.tolist() == [False, True]
+
+
 def test_plots_show_flags_from_before_the_run(ms_sb47138, monkeypatch) -> None:
     """The 'before' panels are masked with the flags from before the run, not
     with the rows the run flagged"""
@@ -677,3 +721,14 @@ def test_plots_show_flags_from_before_the_run(ms_sb47138, monkeypatch) -> None:
             == 120
         )
     assert after - before == 120
+
+
+def test_prepare_tractor_gives_the_beam_spread(ms_example) -> None:
+    """Each object is widened by D / c, from --dish-diameter-m or DISH_DIAMETER"""
+    setup = prepare_tractor(
+        ms_path=Path(ms_example),
+        tractor_options=TukeyTractorOptions(dish_diameter_m=24.0, dry_run=True),
+    )
+    setup.open_ms_tables.close()
+    assert setup.dish_diameter_m == 24.0
+    assert setup.beam_delay_s == pytest.approx(24.0 / 299_792_458.0)

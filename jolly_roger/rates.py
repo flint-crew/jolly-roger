@@ -12,7 +12,12 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.fft import next_fast_len
 
-from jolly_roger.uvws import WDelays, _time_map_to_seconds, get_w_rates
+from jolly_roger.uvws import (
+    WDelays,
+    _time_map_to_seconds,
+    get_w_rates,
+    object_half_width_s,
+)
 from jolly_roger.weights import scale_multiple_weights
 from jolly_roger.wrap import calculate_nyquist_zone
 
@@ -350,6 +355,8 @@ class SegmentGeometry:
     """Half-width of the field's protected delay-rates, shape (row,)"""
     object_rate_extent: NDArray[np.floating[Any]] | None = None
     """Half-width of each object's disc in delay-rate, shape (object, row). None for points."""
+    object_delay_extent: NDArray[np.floating[Any]] | None = None
+    """Half-width of each object in delay, its disc plus the beam's spread, shape (object, row). None for points."""
 
 
 class SegmentOutcome(Enum):
@@ -514,15 +521,30 @@ def filter_segment(
         if not active.any():
             continue
         delay = geometry.object_delay_s[index]
+        extent = (
+            np.zeros(n_rows)
+            if geometry.object_delay_extent is None
+            else geometry.object_delay_extent[index]
+        )
+        rate_extent = (
+            np.zeros(n_rows)
+            if geometry.object_rate_extent is None
+            else geometry.object_rate_extent[index]
+        )
         track = delay[active][0] + np.unwrap(
             _wrap(delay[active] - delay[active][0], delay_half_period),
             period=2 * delay_half_period,
         )
-        low_s, high_s = track.min() - delay_width_s, track.max() + delay_width_s
+        low_s = np.min(track - extent[active]) - delay_width_s
+        high_s = np.max(track + extent[active]) + delay_width_s
         delay_profile = _roll_off(
             _outside(delays_s, low_s, high_s, delay_half_period), delay_roll_off_s
         )
-        fringe = np.outer(geometry.object_rate[index][active], [nu_low, nu_high])
+        rates = geometry.object_rate[index][active]
+        fringe = np.outer(
+            np.concatenate([rates - rate_extent[active], rates + rate_extent[active]]),
+            [nu_low, nu_high],
+        )
         low_hz, high_hz = fringe.min() - margin_hz, fringe.max() + margin_hz
         rate_profile = _roll_off(
             _outside(rates_hz, low_hz, high_hz, rate_half_period), rate_roll_off_hz
@@ -533,6 +555,7 @@ def filter_segment(
         distance = (
             np.abs(_wrap(delays_s[None, :] - delay[:, None], delay_half_period))
             - delay_width_s
+            - extent[:, None]
         )
         window_k = (distance <= delay_roll_off_s) & active[:, None]
         all_windows |= window_k
@@ -721,6 +744,8 @@ class RateFilterSettings:
     """The ANTENNA table NAME column, for plot titles"""
     antenna_positions_m: NDArray[np.floating[Any]] | None = None
     """The ANTENNA table POSITION column, in m, for plot titles"""
+    beam_delay_s: float = 0.0
+    """Spread in delay of an object seen through the primary beam, D / c, added to each object's half-width"""
     max_plots: int = 10
     """The most segments to plot"""
 
@@ -766,13 +791,18 @@ def segment_geometry(
     baseline = segment.baseline_idx
     time_idx = np.asarray(segment.time_idx)
     half_period_s = 0.5 / abs(float(np.mean(np.diff(settings.freq_hz))))
-    delays, rates, active, rate_extents = [], [], [], []
+    delays, rates, active, rate_extents, delay_extents = [], [], [], [], []
     for w_delays in settings.w_delays_list:
         delay = w_delays.w_delays[baseline, time_idx].to("s").value
         elevation = w_delays.elevation[time_idx].to("deg").value
         zone = calculate_nyquist_zone(values=delay, upper_limit=half_period_s)
         delays.append(delay)
         rates.append(get_w_rates(w_delays)[baseline, time_idx].to("").value)
+        delay_extents.append(
+            object_half_width_s(
+                w_delays, baseline, time_idx, beam_delay_s=settings.beam_delay_s
+            )
+        )
         rate_extents.append(
             np.zeros(len(time_idx))
             if w_delays.object_rate_extent is None
@@ -799,6 +829,7 @@ def segment_geometry(
         if first.rate_guard_region is None
         else first.rate_guard_region[baseline, time_idx].to("").value,
         object_rate_extent=np.array(rate_extents),
+        object_delay_extent=np.array(delay_extents),
     )
 
 
