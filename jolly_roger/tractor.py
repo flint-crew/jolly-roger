@@ -26,6 +26,7 @@ from jolly_roger.baselines import (
     _get_antenna_names,
     beam_fraction_to_radius,
     get_baseline_data,
+    get_dish_diameter,
     get_open_ms_tables,
 )
 from jolly_roger.delays import DelayTime, data_to_delay_time, delay_time_to_data
@@ -1740,6 +1741,8 @@ class TractorSetup:
     """WEIGHT-like columns to read and rescale, if any"""
     write_back_required: bool
     """Whether every chunk has to be written, e.g. a new and empty output column"""
+    dish_diameter_m: float | None = None
+    """The dish diameter, in m, from --dish-diameter-m or the largest DISH_DIAMETER. None if unknown."""
 
 
 def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSetup:
@@ -1815,6 +1818,9 @@ def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSe
         w_delays_list=w_delays_list,
         weight_columns=weight_columns,
         write_back_required=write_back_required,
+        dish_diameter_m=get_dish_diameter(
+            open_ms_tables.antenna_table, tractor_options.dish_diameter_m
+        ),
     )
 
 

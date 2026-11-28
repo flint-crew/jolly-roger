@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from astropy.constants import c as speed_of_light
 from numpy.typing import NDArray
 from scipy import ndimage, signal, stats
 
@@ -892,7 +893,7 @@ class ChunkObjects:
     object_delay_s: NDArray[np.floating]
     """Each object's delay, shape (row, object), NaN where it is not active"""
     object_extent_s: NDArray[np.floating]
-    """Half-width of each object's disc in delay, shape (row, object)"""
+    """Half-width of each object in delay, its disc plus the beam's spread, shape (row, object)"""
     meets_field: list[NDArray[np.bool_]]
     """Active rows where each object's band, with the CLEAN margin, meets the field"""
 
@@ -901,8 +902,11 @@ def _chunk_objects(
     data_chunk: DataChunk,
     w_delays_list: list[WDelays],
     clean_tractor_options: CleanTractorOptions,
+    beam_delay_s: float = 0.0,
 ) -> ChunkObjects:
-    """Each object's delay, extent and activity over the rows of a chunk"""
+    """Each object's delay, extent and activity over the rows of a chunk. The
+    extent is the object's disc plus ``beam_delay_s``, the spread in delay of an
+    object seen through the frequency-dependent primary beam (D / c)."""
     freq_hz = data_chunk.freq_chan.to("Hz").value
     channel_width_hz = abs(float(np.mean(np.diff(freq_hz))))
     period_s = 1 / channel_width_hz
@@ -932,7 +936,7 @@ def _chunk_objects(
             <= clean_tractor_options.ignore_nyquist_zone
         )
         is_active = above & in_zone & cross
-        extent_s = (
+        extent_s = beam_delay_s + (
             np.zeros(n_rows)
             if w_delays.object_extent is None
             else w_delays.object_extent[baseline_idx, time_idx].to("s").value
@@ -975,15 +979,17 @@ def compute_clean_tractor(
     clean_tractor_options: CleanTractorOptions,
     w_delays_list: list[WDelays],
     statistics: DelayCleanStatistics | None = None,
+    beam_delay_s: float = 0.0,
 ) -> TaperedChunkResult:
     """CLEAN the rows of a chunk where an object to null is above the
-    elevation cut, and subtract the emission outside the field's delay range.
+    elevation cut, and subtract the emission within each object's delay band.
 
     Args:
         data_chunk (DataChunk): The visibilities, shaped (row, channel, polarisation)
         clean_tractor_options (CleanTractorOptions): The CLEAN settings
-        w_delays_list (list[WDelays]): The delays of each object to null, and the guard band
+        w_delays_list (list[WDelays]): The delays and extent of each object to null, and the guard band
         statistics (DelayCleanStatistics | None, optional): Totals to add this chunk's results to. Defaults to None.
+        beam_delay_s (float, optional): Spread in delay of an object seen through the primary beam, D / c, added to each object's band. Defaults to 0.0.
 
     Returns:
         TaperedChunkResult: The cleaned visibilities and any new flags
@@ -992,6 +998,7 @@ def compute_clean_tractor(
         data_chunk=data_chunk,
         w_delays_list=w_delays_list,
         clean_tractor_options=clean_tractor_options,
+        beam_delay_s=beam_delay_s,
     )
     active = np.logical_or.reduce(objects.active)
     if not active.any():
@@ -1074,6 +1081,7 @@ def describe_clean_run(
     statistics: DelayCleanStatistics,
     clean_tractor_options: CleanTractorOptions,
     w_delays_list: list[WDelays] | None = None,
+    beam_delay_s: float = 0.0,
 ) -> str:
     """A plain description of a delay CLEAN run, for logs and the HISTORY table"""
     objects = ", ".join(clean_tractor_options.target_objects)
@@ -1096,7 +1104,8 @@ def describe_clean_run(
     )
     return (
         f"Delay CLEAN: removed emission within each object's delay band (its "
-        f"delay +/- its disc's extent + {margin:g}/bandwidth), outside the field's "
+        f"delay +/- its disc's extent + {beam_delay_s * 1e9:.3g} ns for the primary "
+        f"beam (D/c) + {margin:g}/bandwidth), outside the field's "
         f"delay range (+/-{clean_tractor_options.field_delay_ns:g} ns{guard}), from "
         f"{statistics.spectra} spectra where {objects} was above the elevation "
         f"cut; {noise}. {statistics.rows_flagged} rows were "
@@ -1146,21 +1155,31 @@ def report_clean_line_impact(
     open_ms_tables: OpenMSTables,
     clean_tractor_options: CleanTractorOptions,
     w_delays_list: list[WDelays],
+    beam_delay_s: float = 0.0,
 ) -> dict[str, LineImpactSummary]:
     """The largest loss of a bright spectral line in the field, from geometry,
-    for each object. CLEAN subtracts a band of width 2 (extent + margin) about
-    the object's delay, so a line loses as it would to a notch of that width
-    (``summarise_line_impact``). Rows where the band meets the field are
-    flagged and not counted.
+    for each object, over the baselines in the measurement set. CLEAN subtracts
+    a band of width 2 (extent + margin) about the object's delay, so a line
+    loses as it would to a notch of that width (``summarise_line_impact``).
+    Rows where the band meets the field are flagged and not counted.
 
     Args:
         open_ms_tables (OpenMSTables): The open measurement set
         clean_tractor_options (CleanTractorOptions): The CLEAN settings
         w_delays_list (list[WDelays]): The delays and extent of each object
+        beam_delay_s (float, optional): Spread in delay from the primary beam, D / c, added to each object's band. Defaults to 0.0.
 
     Returns:
         dict[str, LineImpactSummary]: The summary for each object, keyed by name
     """
+    main_table = open_ms_tables.main_table
+    present = {
+        (int(ant_1), int(ant_2))
+        for ant_1, ant_2 in zip(
+            main_table.getcol("ANTENNA1"), main_table.getcol("ANTENNA2"), strict=True
+        )
+        if ant_1 != ant_2
+    }
     freq_hz = np.atleast_1d(open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze())
     channel_width_hz = abs(float(np.mean(np.diff(freq_hz))))
     period_s = 1 / channel_width_hz
@@ -1170,16 +1189,17 @@ def report_clean_line_impact(
     field_s = clean_tractor_options.field_delay_ns * 1e-9
     summaries = {}
     for w_delays in w_delays_list:
-        object_s = w_delays.w_delays.to("s").value
-        extent_s = (
+        baselines = [index for pair, index in w_delays.b_map.items() if pair in present]
+        object_s = w_delays.w_delays[baselines].to("s").value
+        extent_s = beam_delay_s + (
             np.zeros_like(object_s)
             if w_delays.object_extent is None
-            else w_delays.object_extent.to("s").value
+            else w_delays.object_extent[baselines].to("s").value
         )
         guard_s = (
             np.zeros_like(object_s)
             if w_delays.guard_region is None
-            else w_delays.guard_region.to("s").value
+            else w_delays.guard_region[baselines].to("s").value
         )
         above = (
             w_delays.elevation.to("deg").value
@@ -1237,6 +1257,15 @@ def clean_tractor(
 
     setup = prepare_tractor(ms_path=ms_path, tractor_options=clean_tractor_options)
     open_ms_tables = setup.open_ms_tables
+    beam_delay_s = 0.0
+    if setup.dish_diameter_m is None:
+        logger.warning(
+            "The dish diameter is unknown, so the objects' delay bands leave out the "
+            "spread from the primary beam (D/c) and may be too narrow. Set "
+            "--dish-diameter-m."
+        )
+    else:
+        beam_delay_s = setup.dish_diameter_m / speed_of_light.to_value("m/s")
 
     number_of_channels = len(
         np.atleast_1d(open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze())
@@ -1252,6 +1281,7 @@ def clean_tractor(
                 open_ms_tables=open_ms_tables,
                 clean_tractor_options=clean_tractor_options,
                 w_delays_list=setup.w_delays_list,
+                beam_delay_s=beam_delay_s,
             ).items()
         ),
     ]
@@ -1283,6 +1313,7 @@ def clean_tractor(
                 clean_tractor_options=clean_tractor_options,
                 w_delays_list=setup.w_delays_list,
                 statistics=statistics,
+                beam_delay_s=beam_delay_s,
             ),
             tractor_options=clean_tractor_options,
             rate_filter=rate_filter,
@@ -1304,7 +1335,9 @@ def clean_tractor(
 
     if statistics is not None:
         messages = [
-            describe_clean_run(statistics, clean_tractor_options, setup.w_delays_list),
+            describe_clean_run(
+                statistics, clean_tractor_options, setup.w_delays_list, beam_delay_s
+            ),
             *line_messages,
         ]
         band_edges = describe_band_edges(statistics)

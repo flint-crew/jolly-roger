@@ -195,6 +195,26 @@ def get_nominal_fov(
     return fov
 
 
+def get_dish_diameter(
+    antenna_table: table, dish_diameter_m: float | None = None
+) -> float | None:
+    """The largest valid DISH_DIAMETER, in m, or ``dish_diameter_m`` if given.
+    None if there is no valid diameter.
+
+    Args:
+        antenna_table (table): The ANTENNA table
+        dish_diameter_m (float | None, optional): A dish diameter, in m, overriding DISH_DIAMETER. Defaults to None.
+
+    Returns:
+        float | None: The dish diameter, in m
+    """
+    if dish_diameter_m is not None:
+        return float(dish_diameter_m)
+    dish_diameter = np.asarray(antenna_table.getcol("DISH_DIAMETER"), dtype=float)
+    valid = dish_diameter[np.isfinite(dish_diameter) & (dish_diameter > 0)]
+    return float(np.max(valid)) if valid.size else None
+
+
 def _get_nominal_fov(
     spw_table: table,
     antenna_table: table,
