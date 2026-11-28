@@ -515,9 +515,11 @@ def test_tractor_reports_kernel_and_history(ms_example) -> None:
     assert results.line_impacts is not None
     assert list(results.line_impacts) == ["sun"]
     after = _history_rows(ms_example)
-    assert len(after) == len(before) + 2
-    assert all(row["ORIGIN"] == "jolly_tractor tukey" for row in after[-2:])
-    assert after[-2]["MESSAGE"].startswith("Delay notch: removes about 10 ns")
+    assert len(after) == len(before) + 3
+    assert all(row["ORIGIN"] == "jolly_tractor tukey" for row in after[-3:])
+    assert after[-3]["MESSAGE"].startswith("Delay notch: removes about 10 ns")
+    assert after[-2]["MESSAGE"].startswith("Each notch is widened")
+    assert "sun (radius 0.5 deg)" in after[-2]["MESSAGE"]
     assert after[-1]["MESSAGE"].startswith("Spectral-line impact of nulling sun")
 
 

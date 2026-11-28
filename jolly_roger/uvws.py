@@ -190,6 +190,31 @@ def projected_extent(uvws: u.Quantity, radius: u.Quantity) -> u.Quantity:
     return extent_s * u.s
 
 
+def object_half_width_s(
+    w_delays: WDelays,
+    baseline_idx: NDArray[np.int_] | slice,
+    time_idx: NDArray[np.int_] | slice,
+    beam_delay_s: float = 0.0,
+) -> NDArray[np.floating[Any]]:
+    """Half-width of an object in delay: its disc's extent plus ``beam_delay_s``,
+    the spread of an object seen through the frequency-dependent primary beam
+    (D / c)
+
+    Args:
+        w_delays (WDelays): The object's delays and extent
+        baseline_idx (NDArray[np.int_] | slice): Baseline index of each value
+        time_idx (NDArray[np.int_] | slice): Time index of each value
+        beam_delay_s (float, optional): Spread from the primary beam, in seconds. Defaults to 0.0.
+
+    Returns:
+        NDArray[np.floating[Any]]: The half-width, in seconds
+    """
+    delays_s = w_delays.w_delays[baseline_idx, time_idx].to("s").value
+    if w_delays.object_extent is None:
+        return np.full_like(delays_s, beam_delay_s, dtype=float)
+    return beam_delay_s + w_delays.object_extent[baseline_idx, time_idx].to("s").value
+
+
 def projected_rate_extent(
     uvws: u.Quantity, time_s: NDArray[np.floating[Any]], radius: u.Quantity
 ) -> u.Quantity:

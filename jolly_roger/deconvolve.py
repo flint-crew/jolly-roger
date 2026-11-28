@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from astropy.constants import c as speed_of_light
 from numpy.typing import NDArray
 from scipy import ndimage, signal, stats
 
@@ -59,7 +58,7 @@ from jolly_roger.tractor import (
     run_tractor_chunks,
 )
 from jolly_roger.utils import log_dataclass_attributes, log_jolly_roger_version
-from jolly_roger.uvws import WDelays
+from jolly_roger.uvws import WDelays, object_half_width_s
 from jolly_roger.wrap import calculate_nyquist_zone
 
 
@@ -936,11 +935,7 @@ def _chunk_objects(
             <= clean_tractor_options.ignore_nyquist_zone
         )
         is_active = above & in_zone & cross
-        extent_s = beam_delay_s + (
-            np.zeros(n_rows)
-            if w_delays.object_extent is None
-            else w_delays.object_extent[baseline_idx, time_idx].to("s").value
-        )
+        extent_s = object_half_width_s(w_delays, baseline_idx, time_idx, beam_delay_s)
         wrapped_s = np.abs((object_s + period_s / 2) % period_s - period_s / 2)
         active.append(is_active)
         meets_field.append(
@@ -1051,6 +1046,7 @@ def make_clean_rate_filter(
     open_ms_tables: OpenMSTables,
     clean_tractor_options: CleanTractorOptions,
     w_delays_list: list[WDelays],
+    beam_delay_s: float = 0.0,
 ) -> RateFilterRun:
     """Delay-rate filtering by CLEAN in fringe rate, with the delay CLEAN's settings
 
@@ -1058,6 +1054,7 @@ def make_clean_rate_filter(
         open_ms_tables (OpenMSTables): The open measurement set
         clean_tractor_options (CleanTractorOptions): The CLEAN settings
         w_delays_list (list[WDelays]): The delays of each object to null
+        beam_delay_s (float, optional): Spread in delay from the primary beam, D / c, added to each object's half-width. Defaults to 0.0.
 
     Returns:
         RateFilterRun: The state for ``run_tractor_chunks``
@@ -1073,6 +1070,7 @@ def make_clean_rate_filter(
                 visibility_noise=clean_tractor_options.visibility_noise,
             ),
             field_delay_s=clean_tractor_options.field_delay_ns * 1e-9,
+            beam_delay_s=beam_delay_s,
         )
     )
 
@@ -1191,11 +1189,7 @@ def report_clean_line_impact(
     for w_delays in w_delays_list:
         baselines = [index for pair, index in w_delays.b_map.items() if pair in present]
         object_s = w_delays.w_delays[baselines].to("s").value
-        extent_s = beam_delay_s + (
-            np.zeros_like(object_s)
-            if w_delays.object_extent is None
-            else w_delays.object_extent[baselines].to("s").value
-        )
+        extent_s = object_half_width_s(w_delays, baselines, slice(None), beam_delay_s)
         guard_s = (
             np.zeros_like(object_s)
             if w_delays.guard_region is None
@@ -1257,15 +1251,7 @@ def clean_tractor(
 
     setup = prepare_tractor(ms_path=ms_path, tractor_options=clean_tractor_options)
     open_ms_tables = setup.open_ms_tables
-    beam_delay_s = 0.0
-    if setup.dish_diameter_m is None:
-        logger.warning(
-            "The dish diameter is unknown, so the objects' delay bands leave out the "
-            "spread from the primary beam (D/c) and may be too narrow. Set "
-            "--dish-diameter-m."
-        )
-    else:
-        beam_delay_s = setup.dish_diameter_m / speed_of_light.to_value("m/s")
+    beam_delay_s = setup.beam_delay_s
 
     number_of_channels = len(
         np.atleast_1d(open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze())
@@ -1305,6 +1291,7 @@ def clean_tractor(
                 open_ms_tables=open_ms_tables,
                 clean_tractor_options=clean_tractor_options,
                 w_delays_list=setup.w_delays_list,
+                beam_delay_s=setup.beam_delay_s,
             )
         run_tractor_chunks(
             setup=setup,
