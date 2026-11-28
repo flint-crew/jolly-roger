@@ -76,7 +76,7 @@ class LineImpactSummary:
 
 def summarise_line_impact(
     delay_separation_s: NDArray[np.floating[Any]],
-    effective_width_s: float,
+    effective_width_s: float | NDArray[np.floating[Any]],
     channel_width_hz: float,
     reference_frequency_hz: float,
     number_of_notches: int = 1,
@@ -85,7 +85,7 @@ def summarise_line_impact(
 
     Args:
         delay_separation_s (NDArray[np.floating[Any]]): For each modified visibility, the delay between the nearest notch and the phase centre, in seconds
-        effective_width_s (float): Effective width of one notch, in seconds
+        effective_width_s (float | NDArray[np.floating[Any]]): Effective width of one notch, in seconds, for all visibilities or for each
         channel_width_hz (float): The channel width, in Hz
         reference_frequency_hz (float): Frequency used to quote line widths as velocities, in Hz
         number_of_notches (int, optional): Notches per object (one, plus any nulled sidelobes). Defaults to 1.
@@ -94,7 +94,14 @@ def summarise_line_impact(
         LineImpactSummary: The largest effects
     """
     separation = np.abs(np.asarray(delay_separation_s, dtype=float)).ravel()
-    unresolved_loss = number_of_notches * effective_width_s * abs(channel_width_hz)
+    widths_s = np.broadcast_to(
+        np.asarray(effective_width_s, dtype=float).ravel(), separation.shape
+    )
+    unresolved_loss = (
+        number_of_notches
+        * float(np.max(effective_width_s, initial=0.0))
+        * abs(channel_width_hz)
+    )
     if separation.size == 0:
         return LineImpactSummary(
             unresolved_loss=unresolved_loss,
@@ -108,7 +115,7 @@ def summarise_line_impact(
 
     closest = float(np.min(separation))
     with np.errstate(divide="ignore"):
-        worst_per_visibility = WORST_LOSS_FACTOR * effective_width_s / separation
+        worst_per_visibility = WORST_LOSS_FACTOR * widths_s / separation
     return LineImpactSummary(
         unresolved_loss=unresolved_loss,
         worst_loss=float(np.max(worst_per_visibility)),

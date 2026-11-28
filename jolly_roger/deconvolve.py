@@ -28,6 +28,12 @@ from scipy import ndimage, signal, stats
 
 from jolly_roger.baselines import OpenMSTables
 from jolly_roger.history import add_history, dataclass_to_app_params
+from jolly_roger.lines import (
+    KAPPA,
+    LineImpactSummary,
+    describe_line_impact,
+    summarise_line_impact,
+)
 from jolly_roger.logging import logger
 from jolly_roger.rates import (
     RateFilterRun,
@@ -92,6 +98,8 @@ class DelayCleanOptions:
     """Width, in units of 1 / bandwidth, of the band just outside the field's delay range that is checked for subtracted emission"""
     field_edge_fraction: float = 0.01
     """The object reaches the field when the emission subtracted in that band exceeds this fraction of the brightest emission subtracted"""
+    object_margin_resolutions: float = 3.0
+    """Margin, in units of 1 / bandwidth, added either side of each object's delay band, which covers CLEAN's spread of an object between delay samples and the object's spectral structure"""
 
 
 @dataclass(frozen=True)
@@ -105,7 +113,7 @@ class DelayCleanResult:
     delay_noise: float
     """Noise in the delay spectrum (per real or imaginary part) used to set the mask and threshold"""
     reaches_field: bool
-    """Whether subtracted emission lies just outside the field's delay range, so the object and field may overlap"""
+    """Whether the object and field may overlap: an object's band meets the field's delay range or, without object delays, subtracted emission lies just outside it"""
     edge_residual: float | None = None
     """Residual after CLEAN in the channels at each end of the band, as a multiple of the noise"""
     mid_residual: float | None = None
@@ -193,6 +201,46 @@ def _estimate_visibility_noises(
         / stats.rayleigh.ppf(quantile),
         dtype=float,
     )
+
+
+def _object_band_mask(
+    delays_s: NDArray[np.floating],
+    object_delay_s: NDArray[np.floating],
+    object_halfwidth_s: NDArray[np.floating],
+    field_delay_s: NDArray[np.floating],
+    period_s: float,
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+    """Delays within any object's band and outside the field, shape (spectrum,
+    delay), and whether any object's band meets the field, per spectrum.
+
+    Delays wrap with ``period_s``. Objects with a NaN delay are ignored.
+
+    Args:
+        delays_s (NDArray[np.floating]): The delay axis, in seconds
+        object_delay_s (NDArray[np.floating]): Each object's delay, shape (spectrum, object)
+        object_halfwidth_s (NDArray[np.floating]): Each object's band half-width, shape (spectrum, object)
+        field_delay_s (NDArray[np.floating]): Half-width of the field's delay range, per spectrum
+        period_s (float): The period of the delay axis, 1 / channel width
+
+    Returns:
+        tuple[NDArray[np.bool_], NDArray[np.bool_]]: The delays to subtract, and whether the object meets the field
+    """
+    half = period_s / 2
+    offset = (
+        delays_s[None, None, :] - object_delay_s[..., None] + half
+    ) % period_s - half
+    in_band = np.abs(offset) <= object_halfwidth_s[..., None]
+    in_band &= ~np.isnan(object_delay_s)[..., None]
+    wrapped = np.abs((object_delay_s + half) % period_s - half)
+    meets_field = np.any(
+        wrapped - object_halfwidth_s <= field_delay_s[:, None],
+        axis=1,
+        where=~np.isnan(object_delay_s),
+    )
+    keep = np.any(in_band, axis=1) & (
+        np.abs(delays_s)[None, :] > field_delay_s[:, None]
+    )
+    return keep, meets_field
 
 
 def _reaches_field(
@@ -398,6 +446,8 @@ def delay_clean_spectra(
     field_delay_s: float | NDArray[np.floating],
     options: DelayCleanOptions | None = None,
     visibility_noise: float | NDArray[np.floating] | None = None,
+    object_delay_s: NDArray[np.floating] | None = None,
+    object_extent_s: NDArray[np.floating] | None = None,
 ) -> list[DelayCleanResult]:
     """CLEAN spectra that share their channel weights in one batch, as ``delay_clean_spectrum`` does each.
 
@@ -408,6 +458,8 @@ def delay_clean_spectra(
         field_delay_s (float | NDArray[np.floating]): Half-width of the field's delay range, in seconds, for all spectra or for each. Emission within it is kept.
         options (DelayCleanOptions | None, optional): CLEAN settings. Defaults to None (the defaults).
         visibility_noise (float | NDArray[np.floating] | None, optional): Noise of one visibility, per real or imaginary part, at unit weight, for all spectra or for each. NaN means the noise is not known, so the spectrum is not cleaned. If None it is estimated from each spectrum with ``estimate_visibility_noise``. Defaults to None.
+        object_delay_s (NDArray[np.floating] | None, optional): Each object's predicted delay, shape (spectrum, object), NaN where an object is not nulled. Only components within each object's band (its delay +/- extent + margin) are subtracted, and the object meets the field where its band does. If None, everything outside the field is subtracted. Defaults to None.
+        object_extent_s (NDArray[np.floating] | None, optional): Half-width of each object's disc in delay, shape (spectrum, object). Defaults to None (points).
 
     Returns:
         list[DelayCleanResult]: The model to subtract and a summary of the CLEAN, for each spectrum. The model is zero where the noise could not be estimated.
@@ -452,24 +504,44 @@ def delay_clean_spectra(
         values=values_to_clean, weights=weights, noise=noise, options=options
     )
 
-    outside_field = np.abs(delays_s) > field_delays[to_clean, None]
-    model_values = _model_to_values(
-        np.where(outside_field, models, 0), number_of_channels
-    )
+    meets_field = None
+    if object_delay_s is None:
+        subtract = np.abs(delays_s)[None, :] > field_delays[to_clean, None]
+    else:
+        object_delays = np.atleast_2d(np.asarray(object_delay_s, dtype=float))
+        extents = (
+            np.zeros_like(object_delays)
+            if object_extent_s is None
+            else np.atleast_2d(np.asarray(object_extent_s, dtype=float))
+        )
+        resolution_s = 1 / (number_of_channels * abs(channel_width_hz))
+        subtract, meets_field = _object_band_mask(
+            delays_s=delays_s,
+            object_delay_s=object_delays[to_clean],
+            object_halfwidth_s=extents[to_clean]
+            + options.object_margin_resolutions * resolution_s,
+            field_delay_s=field_delays[to_clean],
+            period_s=1 / abs(channel_width_hz),
+        )
+    model_values = _model_to_values(np.where(subtract, models, 0), number_of_channels)
     residuals = values_to_clean - _model_to_values(models, number_of_channels)
     edge_s = options.field_edge_resolutions / (
         number_of_channels * abs(channel_width_hz)
     )
 
     for position, spectrum in enumerate(to_clean):
-        reaches_field = _reaches_field(
-            model=models[position],
-            delays_s=delays_s,
-            field_delay_s=float(field_delays[spectrum]),
-            edge_s=edge_s,
-            oversample=options.oversample,
-            floor=options.mask_sigma * delay_noise[position],
-            fraction=options.field_edge_fraction,
+        reaches_field = (
+            _reaches_field(
+                model=models[position],
+                delays_s=delays_s,
+                field_delay_s=float(field_delays[spectrum]),
+                edge_s=edge_s,
+                oversample=options.oversample,
+                floor=options.mask_sigma * delay_noise[position],
+                fraction=options.field_edge_fraction,
+            )
+            if meets_field is None
+            else bool(meets_field[position])
         )
         edge_residual, mid_residual = _residual_by_band_position(
             residual=residuals[position],
@@ -526,7 +598,8 @@ def _object_rate_bands(
     rate_margin_lobes: float,
     min_margin_lobes: float,
 ) -> tuple[list[tuple[NDArray[np.floating], NDArray[np.floating]]], bool]:
-    """Each active object's fringe-rate band in each channel, widened by up to
+    """Each active object's fringe-rate band in each channel, including its
+    disc's extent in rate, widened by up to
     ``rate_margin_lobes`` / T but never into the field's range, and whether
     every object is at least ``min_margin_lobes`` / T from the field"""
     frequency = np.abs(freq_hz)
@@ -537,7 +610,13 @@ def _object_rate_bands(
         if not active.any():
             continue
         rate = geometry.object_rate[index][active]
-        low, high = rate.min() * frequency, rate.max() * frequency
+        extent = (
+            0.0
+            if geometry.object_rate_extent is None
+            else geometry.object_rate_extent[index][active]
+        )
+        low = np.min(rate - extent) * frequency
+        high = np.max(rate + extent) * frequency
         gap = np.where(low > 0, low - field_rate_hz, -field_rate_hz - high)
         if np.any(gap < min_margin_lobes / duration_s):
             return [], False
@@ -682,6 +761,9 @@ def compute_delay_clean(
     active_rows: NDArray[np.bool_] | None = None,
     statistics: DelayCleanStatistics | None = None,
     flag_overlap: bool = True,
+    object_delay_s: NDArray[np.floating] | None = None,
+    object_extent_s: NDArray[np.floating] | None = None,
+    protected_channels: NDArray[np.bool_] | None = None,
 ) -> TaperedChunkResult:
     """Remove emission outside the field's delay range from every row and
     polarisation of a chunk with CLEAN in delay. Rows where the subtracted
@@ -694,6 +776,10 @@ def compute_delay_clean(
         visibility_noise (float | None, optional): Noise of one visibility, per real or imaginary part. If None it is estimated from each spectrum. Defaults to None.
         active_rows (NDArray[np.bool_] | None, optional): Rows to clean. Others are passed through unchanged. Defaults to None (all rows).
         statistics (DelayCleanStatistics | None, optional): Totals to add this chunk's results to. Defaults to None.
+        flag_overlap (bool, optional): Flag rows where the object reaches the field. Defaults to True.
+        object_delay_s (NDArray[np.floating] | None, optional): Each object's delay, shape (row, object), NaN where it is not nulled, as for ``delay_clean_spectra``. Defaults to None (everything outside the field is subtracted).
+        object_extent_s (NDArray[np.floating] | None, optional): Half-width of each object's disc in delay, shape (row, object). Defaults to None (points).
+        protected_channels (NDArray[np.bool_] | None, optional): Channels left out of CLEAN, e.g. spectral lines. The model is still subtracted from them. Defaults to None.
 
     Returns:
         TaperedChunkResult: The cleaned visibilities and any new flags
@@ -719,6 +805,8 @@ def compute_delay_clean(
         np.broadcast_to(rows_to_clean[:, None], (number_of_rows, number_of_pols))
     )
     weights = (~flags[rows, :, pols]).astype(float)
+    if protected_channels is not None:
+        weights[:, protected_channels] = 0.0
     has_weight = weights.any(axis=1)
     rows, pols, weights = rows[has_weight], pols[has_weight], weights[has_weight]
     values = data[rows, :, pols]
@@ -740,6 +828,12 @@ def compute_delay_clean(
                     field_delay_s=field_delays[rows[members]],
                     options=options,
                     visibility_noise=visibility_noise,
+                    object_delay_s=None
+                    if object_delay_s is None
+                    else object_delay_s[rows[members]],
+                    object_extent_s=None
+                    if object_extent_s is None
+                    else object_extent_s[rows[members]],
                 )
                 results_by_spectrum.update(
                     zip(members.tolist(), group_results, strict=True)
@@ -769,7 +863,6 @@ def compute_delay_clean(
         ),
         update_flags=bool(flagged.any()),
         flags=new_flags,
-        overlap_rows=rows_reaching_field,
     )
 
 
@@ -784,43 +877,97 @@ class CleanTractorOptions(TractorOptions, RateFilterOptions):
     """CLEAN stops when the residual falls below this many times the noise"""
     mask_sigma: float = 5.0
     """The CLEAN mask grows into delays brighter than this many times the noise"""
+    protect_mhz: tuple[float, ...] | None = None
+    """Frequency ranges in MHz, as pairs of low and high, left out of CLEAN to protect known spectral lines. The objects are still subtracted from them."""
 
 
-def _active_rows(
+@dataclass
+class ChunkObjects:
+    """Where each object is nulled in the rows of a chunk"""
+
+    active: list[NDArray[np.bool_]]
+    """Cross-correlation rows where each object is above the elevation cut and within the allowed Nyquist zone"""
+    field_delay_s: NDArray[np.floating]
+    """Half-width of the field's delay range of each row, in seconds"""
+    object_delay_s: NDArray[np.floating]
+    """Each object's delay, shape (row, object), NaN where it is not active"""
+    object_extent_s: NDArray[np.floating]
+    """Half-width of each object's disc in delay, shape (row, object)"""
+    meets_field: list[NDArray[np.bool_]]
+    """Active rows where each object's band, with the CLEAN margin, meets the field"""
+
+
+def _chunk_objects(
     data_chunk: DataChunk,
     w_delays_list: list[WDelays],
     clean_tractor_options: CleanTractorOptions,
-) -> tuple[list[NDArray[np.bool_]], NDArray[np.floating]]:
-    """Cross-correlation rows where each object is above the elevation cut and
-    within the allowed Nyquist zone, and the field's delay range of each row in
-    seconds"""
+) -> ChunkObjects:
+    """Each object's delay, extent and activity over the rows of a chunk"""
     freq_hz = data_chunk.freq_chan.to("Hz").value
-    half_period_s = 0.5 / abs(float(np.mean(np.diff(freq_hz))))
-    cross = data_chunk.ant_1 != data_chunk.ant_2
-
-    active = []
-    field_delay_s = np.full(
-        len(data_chunk.ant_1), clean_tractor_options.field_delay_ns * 1e-9
+    channel_width_hz = abs(float(np.mean(np.diff(freq_hz))))
+    period_s = 1 / channel_width_hz
+    margin_s = _clean_options(clean_tractor_options).object_margin_resolutions / (
+        len(freq_hz) * channel_width_hz
     )
+    cross = data_chunk.ant_1 != data_chunk.ant_2
+    n_rows = len(data_chunk.ant_1)
+
+    field_delay_s = np.full(n_rows, clean_tractor_options.field_delay_ns * 1e-9)
+    active, meets_field, delays, extents = [], [], [], []
     for index, w_delays in enumerate(w_delays_list):
         baseline_idx, time_idx = _get_baseline_time_indicies(w_delays, data_chunk)
         object_s = w_delays.w_delays[baseline_idx, time_idx].to("s").value
-        above = (
-            w_delays.elevation[time_idx].to("deg").value
-            >= clean_tractor_options.elevation_cut_deg
-        )
-        in_zone = (
-            calculate_nyquist_zone(values=object_s, upper_limit=half_period_s)
-            <= clean_tractor_options.ignore_nyquist_zone
-        )
-        active.append(above & in_zone & cross)
         # The guard band depends only on the baseline, so is the same for every object
         if index == 0 and w_delays.guard_region is not None:
             field_delay_s = (
                 field_delay_s
                 + w_delays.guard_region[baseline_idx, time_idx].to("s").value
             )
-    return active, field_delay_s
+        above = (
+            w_delays.elevation[time_idx].to("deg").value
+            >= clean_tractor_options.elevation_cut_deg
+        )
+        in_zone = (
+            calculate_nyquist_zone(values=object_s, upper_limit=period_s / 2)
+            <= clean_tractor_options.ignore_nyquist_zone
+        )
+        is_active = above & in_zone & cross
+        extent_s = (
+            np.zeros(n_rows)
+            if w_delays.object_extent is None
+            else w_delays.object_extent[baseline_idx, time_idx].to("s").value
+        )
+        wrapped_s = np.abs((object_s + period_s / 2) % period_s - period_s / 2)
+        active.append(is_active)
+        meets_field.append(
+            is_active & (wrapped_s - extent_s - margin_s <= field_delay_s)
+        )
+        delays.append(np.where(is_active, object_s, np.nan))
+        extents.append(extent_s)
+    return ChunkObjects(
+        active=active,
+        field_delay_s=field_delay_s,
+        object_delay_s=np.stack(delays, axis=1),
+        object_extent_s=np.stack(extents, axis=1),
+        meets_field=meets_field,
+    )
+
+
+def protected_channel_mask(
+    freq_hz: NDArray[np.floating], protect_mhz: tuple[float, ...] | None
+) -> NDArray[np.bool_] | None:
+    """Channels within any of the (low, high) frequency ranges, in MHz, given
+    as a flat sequence of pairs. None if there are none."""
+    if not protect_mhz:
+        return None
+    if len(protect_mhz) % 2:
+        msg = f"protect_mhz must be pairs of (low, high) in MHz, got {protect_mhz}"
+        raise ValueError(msg)
+    freq_mhz = np.asarray(freq_hz, dtype=float) * 1e-6
+    protected = np.zeros(len(freq_mhz), dtype=bool)
+    for low, high in zip(protect_mhz[::2], protect_mhz[1::2], strict=True):
+        protected |= (freq_mhz >= min(low, high)) & (freq_mhz <= max(low, high))
+    return protected
 
 
 def compute_clean_tractor(
@@ -841,12 +988,12 @@ def compute_clean_tractor(
     Returns:
         TaperedChunkResult: The cleaned visibilities and any new flags
     """
-    object_active, field_delay_s = _active_rows(
+    objects = _chunk_objects(
         data_chunk=data_chunk,
         w_delays_list=w_delays_list,
         clean_tractor_options=clean_tractor_options,
     )
-    active = np.logical_or.reduce(object_active)
+    active = np.logical_or.reduce(objects.active)
     if not active.any():
         result = TaperedChunkResult(
             chunk_size=data_chunk.chunk_size,
@@ -856,22 +1003,22 @@ def compute_clean_tractor(
     else:
         result = compute_delay_clean(
             data_chunk=data_chunk,
-            field_delay_s=field_delay_s,
+            field_delay_s=objects.field_delay_s,
             options=_clean_options(clean_tractor_options),
             visibility_noise=clean_tractor_options.visibility_noise,
             active_rows=active,
             statistics=statistics,
             flag_overlap=clean_tractor_options.flag_overlap,
+            object_delay_s=objects.object_delay_s,
+            object_extent_s=objects.object_extent_s,
+            protected_channels=protected_channel_mask(
+                data_chunk.freq_chan.to("Hz").value, clean_tractor_options.protect_mhz
+            ),
         )
     if not clean_tractor_options.rate_filter:
         return result
     # The rate filter starts from the delay-cleaned rows with their original flags
     assert result.data_chunk is not None
-    overlap = (
-        np.zeros(len(active), dtype=bool)
-        if result.overlap_rows is None
-        else result.overlap_rows
-    )
     return replace(
         result,
         rate_payload=make_rate_filter_payload(
@@ -881,7 +1028,7 @@ def compute_clean_tractor(
                 mask=np.ma.getmaskarray(data_chunk.masked_data),
             ),
             w_delays_list=w_delays_list,
-            object_contaminated=[overlap & rows for rows in object_active],
+            object_contaminated=objects.meets_field,
         ),
     )
 
@@ -924,10 +1071,18 @@ def make_clean_rate_filter(
 
 
 def describe_clean_run(
-    statistics: DelayCleanStatistics, clean_tractor_options: CleanTractorOptions
+    statistics: DelayCleanStatistics,
+    clean_tractor_options: CleanTractorOptions,
+    w_delays_list: list[WDelays] | None = None,
 ) -> str:
     """A plain description of a delay CLEAN run, for logs and the HISTORY table"""
     objects = ", ".join(clean_tractor_options.target_objects)
+    if w_delays_list is not None:
+        objects = ", ".join(
+            f"{w_delays.object_name} (radius {w_delays.object_radius.to_value('deg'):.3g} deg)"
+            for w_delays in w_delays_list
+        )
+    margin = _clean_options(clean_tractor_options).object_margin_resolutions
     guard = " plus the guard band" if clean_tractor_options.guard_field else ""
     noise = (
         f"the noise was given as {clean_tractor_options.visibility_noise:.3g}"
@@ -940,12 +1095,13 @@ def describe_clean_run(
         else ""
     )
     return (
-        f"Delay CLEAN: removed emission outside the field's delay range "
-        f"(+/-{clean_tractor_options.field_delay_ns:g} ns{guard}) from "
+        f"Delay CLEAN: removed emission within each object's delay band (its "
+        f"delay +/- its disc's extent + {margin:g}/bandwidth), outside the field's "
+        f"delay range (+/-{clean_tractor_options.field_delay_ns:g} ns{guard}), from "
         f"{statistics.spectra} spectra where {objects} was above the elevation "
         f"cut; {noise}. {statistics.rows_flagged} rows were "
         f"{'flagged' if clean_tractor_options.flag_overlap else 'left unflagged (--no-flag-overlap)'}"
-        f" where the subtracted emission reached the field.{skipped}"
+        f" where an object's band met the field.{skipped}"
     )
 
 
@@ -965,23 +1121,84 @@ def describe_band_edges(statistics: DelayCleanStatistics) -> str | None:
     )
 
 
-def describe_clean_line_limit(number_of_channels: int, threshold_sigma: float) -> str:
-    """The brightness above which spectral lines in the field are partly
-    subtracted by delay CLEAN.
+def describe_clean_line_limit(number_of_channels: int, mask_sigma: float) -> str:
+    """The brightness below which delay CLEAN leaves spectral lines in the field
+    untouched.
 
-    A Gaussian line of peak S and width (FWHM) of n channels spreads over
-    delay with a peak of about 1.06 S n / N in a spectrum of N channels, while
-    CLEAN stops at threshold_sigma times the delay noise, sigma / sqrt(N). So
-    lines are partly subtracted once S / sigma exceeds about
-    threshold_sigma sqrt(N) / (1.06 n).
+    A Gaussian line of peak S and FWHM of n channels spreads over delay with a
+    peak of kappa S n / N in a spectrum of N channels (kappa = 1.06). CLEAN
+    only reaches it once that exceeds the mask, mask_sigma times the delay
+    noise sigma / sqrt(N): S / sigma > mask_sigma sqrt(N) / (kappa n). Above
+    that, a line loses the part of its delay spread inside the objects' bands,
+    as ``report_clean_line_impact`` gives.
     """
-    one_channel = threshold_sigma * np.sqrt(number_of_channels) / 1.06
+    one_channel = mask_sigma * np.sqrt(number_of_channels) / KAPPA
     return (
-        "Spectral lines in the field are partly subtracted by delay CLEAN when "
-        f"their peak exceeds about {one_channel:.0f}/n times the noise per "
-        f"channel, for a line n channels wide (FWHM): {one_channel:.0f} times "
-        f"for 1 channel, {one_channel / 10:.0f} times for 10 channels."
+        "Delay CLEAN leaves spectral lines in the field untouched while their peak "
+        f"is below about {one_channel:.0f}/n times the noise per channel, for a "
+        f"line n channels wide (FWHM): {one_channel:.0f} times for 1 channel, "
+        f"{one_channel / 10:.0f} times for 10 channels. Brighter lines lose the "
+        "part of their delay spread inside each object's band."
     )
+
+
+def report_clean_line_impact(
+    open_ms_tables: OpenMSTables,
+    clean_tractor_options: CleanTractorOptions,
+    w_delays_list: list[WDelays],
+) -> dict[str, LineImpactSummary]:
+    """The largest loss of a bright spectral line in the field, from geometry,
+    for each object. CLEAN subtracts a band of width 2 (extent + margin) about
+    the object's delay, so a line loses as it would to a notch of that width
+    (``summarise_line_impact``). Rows where the band meets the field are
+    flagged and not counted.
+
+    Args:
+        open_ms_tables (OpenMSTables): The open measurement set
+        clean_tractor_options (CleanTractorOptions): The CLEAN settings
+        w_delays_list (list[WDelays]): The delays and extent of each object
+
+    Returns:
+        dict[str, LineImpactSummary]: The summary for each object, keyed by name
+    """
+    freq_hz = np.atleast_1d(open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze())
+    channel_width_hz = abs(float(np.mean(np.diff(freq_hz))))
+    period_s = 1 / channel_width_hz
+    margin_s = _clean_options(clean_tractor_options).object_margin_resolutions / (
+        len(freq_hz) * channel_width_hz
+    )
+    field_s = clean_tractor_options.field_delay_ns * 1e-9
+    summaries = {}
+    for w_delays in w_delays_list:
+        object_s = w_delays.w_delays.to("s").value
+        extent_s = (
+            np.zeros_like(object_s)
+            if w_delays.object_extent is None
+            else w_delays.object_extent.to("s").value
+        )
+        guard_s = (
+            np.zeros_like(object_s)
+            if w_delays.guard_region is None
+            else w_delays.guard_region.to("s").value
+        )
+        above = (
+            w_delays.elevation.to("deg").value
+            >= clean_tractor_options.elevation_cut_deg
+        )[None, :]
+        in_zone = (
+            calculate_nyquist_zone(values=object_s, upper_limit=period_s / 2)
+            <= clean_tractor_options.ignore_nyquist_zone
+        )
+        separation_s = np.abs((object_s + period_s / 2) % period_s - period_s / 2)
+        half_width_s = extent_s + margin_s
+        cleaned = above & in_zone & (separation_s - half_width_s > field_s + guard_s)
+        summaries[w_delays.object_name] = summarise_line_impact(
+            delay_separation_s=separation_s[cleaned],
+            effective_width_s=2 * half_width_s[cleaned],
+            channel_width_hz=channel_width_hz,
+            reference_frequency_hz=float(np.mean(freq_hz)),
+        )
+    return summaries
 
 
 @dataclass
@@ -1024,11 +1241,22 @@ def clean_tractor(
     number_of_channels = len(
         np.atleast_1d(open_ms_tables.spw_table.getcol("CHAN_FREQ").squeeze())
     )
-    line_limit = describe_clean_line_limit(
-        number_of_channels=number_of_channels,
-        threshold_sigma=clean_tractor_options.threshold_sigma,
-    )
-    logger.info(line_limit)
+    line_messages = [
+        describe_clean_line_limit(
+            number_of_channels=number_of_channels,
+            mask_sigma=clean_tractor_options.mask_sigma,
+        ),
+        *(
+            describe_line_impact(name, summary)
+            for name, summary in report_clean_line_impact(
+                open_ms_tables=open_ms_tables,
+                clean_tractor_options=clean_tractor_options,
+                w_delays_list=setup.w_delays_list,
+            ).items()
+        ),
+    ]
+    for message in line_messages:
+        logger.info(message)
 
     before_flags = (
         read_baseline_flags(
@@ -1075,7 +1303,10 @@ def clean_tractor(
         logger.info(f"Made {len(plot_paths)} output plots")
 
     if statistics is not None:
-        messages = [describe_clean_run(statistics, clean_tractor_options), line_limit]
+        messages = [
+            describe_clean_run(statistics, clean_tractor_options, setup.w_delays_list),
+            *line_messages,
+        ]
         band_edges = describe_band_edges(statistics)
         if band_edges is not None:
             messages.append(band_edges)

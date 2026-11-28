@@ -999,8 +999,6 @@ class TaperedChunkResult:
     """The scaled weights that should be written back to the MS. The key is the column name and the mapped values are the corresponding scaled weights. If None nothing to write back."""
     rate_payload: RateFilterPayload | None = None
     """Rows for delay-rate filtering. None unless rate filtering."""
-    overlap_rows: NDArray[np.bool_] | None = None
-    """Rows where the object reaches the field in delay, whether or not they are flagged. None if not checked."""
 
 
 def make_rate_filter_payload(
@@ -1200,6 +1198,8 @@ class TractorOptions(BaseOptions):
 
     target_objects: tuple[str, ...] = ("sun",)
     """The target object to apply the delay towards."""
+    object_radius_deg: tuple[float, ...] | None = None
+    """Angular radius of each target object in degrees, in the order of target_objects. If None the Sun is 0.5 deg, the Moon 0.27 deg and anything else a point. Used by clean; tukey's notch width is set by outer_width_ns."""
     data_column: str = "DATA"
     """The visibility column to modify"""
     output_column: str = "CORRECTED_DATA"
@@ -1790,6 +1790,9 @@ def prepare_tractor(ms_path: Path, tractor_options: TractorOptions) -> TractorSe
         reverse_baselines=tractor_options.reverse_baselines,
         flip_uvw_sign=tractor_options.flip_uvw_sign,
         radial_fov=radial_fov,
+        object_radii=None
+        if tractor_options.object_radius_deg is None
+        else [radius * u.deg for radius in tractor_options.object_radius_deg],
     )
     assert all(len(w_delays.w_delays.shape) == 2 for w_delays in w_delays_list), (
         "Sanity check failed, incorrect dimensionality returned"

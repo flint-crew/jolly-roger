@@ -348,6 +348,8 @@ class SegmentGeometry:
     """Half-width of the field's protected delays, shape (row,)"""
     field_rate: NDArray[np.floating[Any]]
     """Half-width of the field's protected delay-rates, shape (row,)"""
+    object_rate_extent: NDArray[np.floating[Any]] | None = None
+    """Half-width of each object's disc in delay-rate, shape (object, row). None for points."""
 
 
 class SegmentOutcome(Enum):
@@ -764,13 +766,18 @@ def segment_geometry(
     baseline = segment.baseline_idx
     time_idx = np.asarray(segment.time_idx)
     half_period_s = 0.5 / abs(float(np.mean(np.diff(settings.freq_hz))))
-    delays, rates, active = [], [], []
+    delays, rates, active, rate_extents = [], [], [], []
     for w_delays in settings.w_delays_list:
         delay = w_delays.w_delays[baseline, time_idx].to("s").value
         elevation = w_delays.elevation[time_idx].to("deg").value
         zone = calculate_nyquist_zone(values=delay, upper_limit=half_period_s)
         delays.append(delay)
         rates.append(get_w_rates(w_delays)[baseline, time_idx].to("").value)
+        rate_extents.append(
+            np.zeros(len(time_idx))
+            if w_delays.object_rate_extent is None
+            else w_delays.object_rate_extent[baseline, time_idx].to("").value
+        )
         active.append(
             (elevation >= settings.elevation_cut_deg)
             & (zone <= settings.ignore_nyquist_zone)
@@ -791,6 +798,7 @@ def segment_geometry(
         field_rate=no_guard
         if first.rate_guard_region is None
         else first.rate_guard_region[baseline, time_idx].to("").value,
+        object_rate_extent=np.array(rate_extents),
     )
 
 
